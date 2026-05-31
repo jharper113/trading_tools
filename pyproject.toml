@@ -1,0 +1,14 @@
+[project]
+name = "tos-trade-analysis"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "jupyter>=1.1.1",
+    "matplotlib>=3.9.4",
+    "numpy>=2.0.2",
+    "pandas>=2.3.3",
+    "pyarrow>=21.0.0",
+    "pytest>=8.4.2",
+]

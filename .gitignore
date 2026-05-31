@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+.pytest_cache/
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local brokerage exports and generated reports
+data/
+output/
+
+# Office/editor temp files
+.~lock.*#
+
+# Local backup files
+*_old
