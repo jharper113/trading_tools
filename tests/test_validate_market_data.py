@@ -10,6 +10,8 @@ from validate_market_data import (
     compare_market_data,
     dashboard_reconciliation_rows,
     dashboard_html,
+    elapsed_text,
+    filter_reviewed_auto_review,
     find_duplicate_bars,
     validate_market_data,
     yahoo_chart_params,
@@ -36,9 +38,16 @@ def test_yahoo_symbol_mapping_for_default_futures_roots():
     assert yahoo_symbol_for("/KC") == "KC=F"
 
 
+def test_elapsed_text_formats_validation_progress_times():
+    assert elapsed_text(7) == "7s"
+    assert elapsed_text(125) == "2m 5s"
+    assert elapsed_text(3725) == "1h 2m 5s"
+
+
 def test_yahoo_interval_mapping():
     assert yahoo_interval_for("daily") == "1d"
     assert yahoo_interval_for("5m") == "5m"
+    assert yahoo_interval_for("60m") == "60m"
 
 
 def test_yahoo_chart_params_uses_range_without_dates():
@@ -570,6 +579,32 @@ def test_apply_auto_review_decisions_filters_review_rows(tmp_path):
     assert reviewed["comparison_key"].tolist() == ["2026-01-01"]
 
 
+def test_filter_reviewed_auto_review_skips_existing_review_keys():
+    auto_review = pd.DataFrame(
+        [
+            {
+                "symbol": "/ES",
+                "frequency": "daily",
+                "comparison_key": "2026-01-01",
+                "decision": "yahoo",
+            },
+            {
+                "symbol": "/ES",
+                "frequency": "daily",
+                "comparison_key": "2026-01-02",
+                "decision": "yahoo",
+            },
+        ]
+    )
+
+    filtered = filter_reviewed_auto_review(
+        auto_review,
+        {("/ES", "daily", "2026-01-01")},
+    )
+
+    assert filtered["comparison_key"].tolist() == ["2026-01-02"]
+
+
 def test_validate_market_data_can_auto_apply_decisions(tmp_path):
     source_dir = tmp_path / "market_data"
     output_dir = tmp_path / "validation"
@@ -610,3 +645,58 @@ def test_validate_market_data_can_auto_apply_decisions(tmp_path):
     assert result["auto_apply_result"]["updated_bars"] == 1
     assert updated.loc[updated["date"] == "2026-01-02", "close"].iloc[0] == 101
     assert reviewed.loc[0, "selected_source"] == "yahoo"
+
+
+def test_validate_market_data_review_new_only_skips_reviewed_auto_apply(tmp_path):
+    source_dir = tmp_path / "market_data"
+    output_dir = tmp_path / "validation"
+    daily_dir = source_dir / "daily"
+    daily_dir.mkdir(parents=True)
+    local = make_bars(
+        [
+            {"timestamp": "2026-01-01T00:00:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+            {"timestamp": "2026-01-02T00:00:00Z", "open": 150, "high": 151, "low": 149, "close": 150},
+            {"timestamp": "2026-01-03T00:00:00Z", "open": 102, "high": 103, "low": 101, "close": 102},
+        ]
+    )
+    local.to_csv(daily_dir / "ES.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "/ES",
+                "frequency": "daily",
+                "comparison_key": "2026-01-02",
+                "selected_source": "yahoo",
+                "reviewed_at": "2026-01-04T00:00:00Z",
+            }
+        ]
+    ).to_csv(source_dir / "reviewed_bars.csv", index=False)
+
+    def fake_reference_fetcher(symbol, frequency, start=None, end=None):
+        return make_bars(
+            [
+                {"timestamp": "2026-01-01T00:00:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+                {"timestamp": "2026-01-02T00:00:00Z", "open": 101, "high": 102, "low": 100, "close": 101},
+                {"timestamp": "2026-01-03T00:00:00Z", "open": 102, "high": 103, "low": 101, "close": 102},
+            ],
+            symbol=symbol,
+            frequency=frequency,
+            source="yahoo",
+        )
+
+    result = validate_market_data(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        symbols=["/ES"],
+        frequencies=["daily"],
+        reference_fetcher=fake_reference_fetcher,
+        auto_apply_decisions=True,
+        review_new_only=True,
+    )
+    updated = pd.read_csv(daily_dir / "ES.csv")
+    applied = pd.read_csv(output_dir / "auto_review_applied_decisions.csv")
+
+    assert result["auto_apply_result"]["updated_bars"] == 0
+    assert result["auto_review"].empty
+    assert applied.empty
+    assert updated.loc[updated["date"] == "2026-01-02", "close"].iloc[0] == 150

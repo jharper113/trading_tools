@@ -1,6 +1,7 @@
 import argparse
 import bisect
 import json
+import time
 import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -68,6 +69,7 @@ AUTO_REVIEW_COLUMNS = [
     "local_close",
     "reference_close",
 ]
+APPLIED_AUTO_REVIEW_COLUMNS = AUTO_REVIEW_COLUMNS + ["decision"]
 TIMEZONE_ALIGNMENT_COLUMNS = [
     "symbol",
     "frequency",
@@ -89,6 +91,35 @@ DUPLICATE_COLUMNS = [
     "low",
     "close",
 ]
+
+
+def elapsed_text(seconds):
+    seconds = max(0, int(seconds))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+
+    if minutes:
+        return f"{minutes}m {seconds}s"
+
+    return f"{seconds}s"
+
+
+def eta_text(start_time, completed, total):
+    if completed <= 0 or total <= 0:
+        return "estimating"
+
+    elapsed = time.monotonic() - start_time
+    remaining = max(0, total - completed)
+    seconds_remaining = elapsed / completed * remaining
+
+    return elapsed_text(seconds_remaining)
+
+
+def log_progress(message):
+    print(message, flush=True)
 
 
 YAHOO_FUTURES_SYMBOLS = {
@@ -146,6 +177,9 @@ def yahoo_interval_for(frequency):
     if frequency == "5min":
         return "5m"
 
+    if frequency == "60min":
+        return "60m"
+
     raise ValueError(f"Unsupported Yahoo validation frequency: {frequency}")
 
 
@@ -155,7 +189,10 @@ def default_yahoo_range_for(frequency):
     if frequency == "daily":
         return "5y"
 
-    return "1mo"
+    if frequency == "5min":
+        return "1mo"
+
+    return "730d"
 
 
 def date_to_epoch_seconds(value):
@@ -856,6 +893,52 @@ def apply_auto_review_decisions(source_dir, auto_review):
         source_dir=source_dir,
         decisions=decisions,
     )
+
+
+def reviewed_key_set(source_dir):
+    reviewed = load_reviewed_bars(source_dir)
+
+    if reviewed is None or len(reviewed) == 0:
+        return set()
+
+    return set(
+        zip(
+            reviewed["symbol"].map(normalize_symbol),
+            reviewed["frequency"].map(normalize_frequency),
+            reviewed["comparison_key"].astype(str),
+        )
+    )
+
+
+def filter_reviewed_auto_review(auto_review, reviewed_keys):
+    if (
+        auto_review is None
+        or len(auto_review) == 0
+        or not reviewed_keys
+    ):
+        return auto_review
+
+    working = auto_review.copy()
+    keys = list(
+        zip(
+            working["symbol"].map(normalize_symbol),
+            working["frequency"].map(normalize_frequency),
+            working["comparison_key"].astype(str),
+        )
+    )
+
+    return working[
+        [key not in reviewed_keys for key in keys]
+    ].reset_index(drop=True)
+
+
+def actionable_auto_review(auto_review):
+    if auto_review is None or len(auto_review) == 0:
+        return pd.DataFrame(columns=APPLIED_AUTO_REVIEW_COLUMNS)
+
+    return auto_review[
+        auto_review["decision"].isin(["local", "yahoo"])
+    ].copy().reindex(columns=APPLIED_AUTO_REVIEW_COLUMNS)
 
 
 def to_json_records(frame):
@@ -1643,9 +1726,14 @@ def collect_validation_data(
     start=None,
     end=None,
     reference_fetcher=fetch_yahoo_bars,
+    review_new_only=False,
+    reviewed_keys=None,
 ):
     symbols = symbols or DEFAULT_SYMBOLS
-    frequencies = frequencies or ["daily", "5min"]
+    frequencies = frequencies or ["daily", "5min", "60min"]
+    total_jobs = len(symbols) * len(frequencies)
+    completed_jobs = 0
+    run_start = time.monotonic()
     all_differences = []
     all_missing = []
     all_duplicates = []
@@ -1657,7 +1745,13 @@ def collect_validation_data(
         symbol = normalize_symbol(raw_symbol)
 
         for raw_frequency in frequencies:
+            job_number = completed_jobs + 1
+            job_start = time.monotonic()
             frequency = normalize_frequency(raw_frequency)
+            log_progress(
+                f"[{job_number}/{total_jobs}] Validating {symbol} "
+                f"{frequency}: loading local bars and fetching Yahoo..."
+            )
             local_bars = load_local_bars(source_dir, symbol, frequency)
             reference_bars = reference_fetcher(
                 symbol=symbol,
@@ -1685,6 +1779,13 @@ def collect_validation_data(
                 symbol=symbol,
                 frequency=frequency,
             )
+            auto_review_total = len(auto_review)
+            if review_new_only:
+                auto_review = filter_reviewed_auto_review(
+                    auto_review,
+                    reviewed_keys or set(),
+                )
+            reviewed_skipped = auto_review_total - len(auto_review)
             timezone_alignment = build_timezone_alignment_report(
                 local_bars=local_bars,
                 reference_bars=reference_bars,
@@ -1700,6 +1801,21 @@ def collect_validation_data(
 
             if len(duplicates) > 0:
                 all_duplicates.append(duplicates)
+
+            completed_jobs += 1
+            summary_row = summary.iloc[0]
+            log_progress(
+                f"[{completed_jobs}/{total_jobs}] Completed {symbol} "
+                f"{frequency}: local {summary_row['local_bars']} bars, "
+                f"Yahoo {summary_row['reference_bars']} bars, "
+                f"failed {summary_row['failed_bars']}, "
+                f"missing local {summary_row['missing_local_bars']}, "
+                f"missing Yahoo {summary_row['missing_reference_bars']}, "
+                f"auto-review {len(auto_review)} rows"
+                f"{f' ({reviewed_skipped} reviewed skipped)' if reviewed_skipped else ''}, "
+                f"step {elapsed_text(time.monotonic() - job_start)}, "
+                f"ETA {eta_text(run_start, completed_jobs, total_jobs)}."
+            )
 
     return {
         "differences": pd.concat(all_differences, ignore_index=True),
@@ -1734,9 +1850,18 @@ def validate_market_data(
     reference_fetcher=fetch_yahoo_bars,
     dashboard_max_rows=DEFAULT_DASHBOARD_MAX_ROWS,
     auto_apply_decisions=False,
+    review_new_only=False,
 ):
+    run_start = time.monotonic()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    log_progress("Starting market data validation.")
+    reviewed_keys = reviewed_key_set(source_dir) if review_new_only else set()
+    if review_new_only:
+        log_progress(
+            f"Review-new-only mode: loaded {len(reviewed_keys)} reviewed "
+            "symbol/frequency/bar keys."
+        )
     result = collect_validation_data(
         source_dir=source_dir,
         symbols=symbols,
@@ -1745,16 +1870,37 @@ def validate_market_data(
         start=start,
         end=end,
         reference_fetcher=reference_fetcher,
+        review_new_only=review_new_only,
+        reviewed_keys=reviewed_keys,
     )
     auto_apply_result = {}
+    applied_auto_review = pd.DataFrame(columns=APPLIED_AUTO_REVIEW_COLUMNS)
 
     if auto_apply_decisions:
+        log_progress(
+            "Applying auto-review decisions marked local or Yahoo..."
+        )
+        applied_auto_review = actionable_auto_review(result["auto_review"])
         auto_apply_result = apply_auto_review_decisions(
             source_dir=source_dir,
-            auto_review=result["auto_review"],
+            auto_review=applied_auto_review,
+        )
+        log_progress(
+            "Auto-apply result: "
+            f"{auto_apply_result.get('updated_bars', 0)} updated bars, "
+            f"{auto_apply_result.get('reviewed_bars', 0)} reviewed bars."
         )
 
         if auto_apply_result.get("updated_bars", 0) > 0:
+            log_progress(
+                "Re-running validation after auto-apply so reports reflect "
+                "the post-apply state."
+            )
+            reviewed_keys = (
+                reviewed_key_set(source_dir)
+                if review_new_only
+                else set()
+            )
             result = collect_validation_data(
                 source_dir=source_dir,
                 symbols=symbols,
@@ -1763,6 +1909,8 @@ def validate_market_data(
                 start=start,
                 end=end,
                 reference_fetcher=reference_fetcher,
+                review_new_only=review_new_only,
+                reviewed_keys=reviewed_keys,
             )
 
     summary = result["summary"]
@@ -1771,6 +1919,7 @@ def validate_market_data(
     duplicates = result["duplicates"]
     auto_review = result["auto_review"]
     timezone_alignment = result["timezone_alignment"]
+    log_progress("Writing validation heatmap, dashboard, and CSV reports...")
     heatmap_path = save_heatmap(summary, output_dir)
     dashboard_path = write_validation_dashboard(
         output_dir=output_dir,
@@ -1790,7 +1939,15 @@ def validate_market_data(
     missing.to_csv(output_dir / "missing_bars.csv", index=False)
     duplicates.to_csv(output_dir / "duplicate_bars.csv", index=False)
     auto_review.to_csv(output_dir / "auto_review_decisions.csv", index=False)
+    applied_auto_review.to_csv(
+        output_dir / "auto_review_applied_decisions.csv",
+        index=False,
+    )
     timezone_alignment.to_csv(output_dir / "timezone_alignment.csv", index=False)
+    log_progress(
+        f"Finished market data validation in "
+        f"{elapsed_text(time.monotonic() - run_start)}."
+    )
 
     return {
         "summary": summary,
@@ -1798,6 +1955,7 @@ def validate_market_data(
         "missing": missing,
         "duplicates": duplicates,
         "auto_review": auto_review,
+        "applied_auto_review": applied_auto_review,
         "timezone_alignment": timezone_alignment,
         "auto_apply_result": auto_apply_result,
         "heatmap_path": heatmap_path,
@@ -1913,8 +2071,8 @@ def parse_args():
     parser.add_argument(
         "--frequencies",
         nargs="+",
-        default=["daily", "5min"],
-        help="Frequencies to validate: daily, 5min.",
+        default=["daily", "5min", "60min"],
+        help="Frequencies to validate: daily, 5min, 60min.",
     )
     parser.add_argument(
         "--threshold-pct",
@@ -1972,12 +2130,34 @@ def parse_args():
             "and mark those bars reviewed before writing the dashboard."
         ),
     )
+    parser.add_argument(
+        "--review-new-only",
+        action="store_true",
+        help=(
+            "Skip bars already listed in reviewed_bars.csv when building "
+            "auto-review/apply decisions. Full validation reports are still "
+            "computed."
+        ),
+    )
+    parser.add_argument(
+        "--recheck-reviewed",
+        action="store_true",
+        help=(
+            "Reconsider bars already listed in reviewed_bars.csv. This "
+            "overrides the default new-only behavior used with "
+            "--auto-apply-decisions."
+        ),
+    )
 
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    review_new_only = (
+        args.review_new_only
+        or args.auto_apply_decisions
+    ) and not args.recheck_reviewed
     result = validate_market_data(
         source_dir=args.source_dir,
         output_dir=args.output_dir,
@@ -1988,6 +2168,7 @@ def main():
         end=args.end,
         dashboard_max_rows=args.dashboard_max_rows,
         auto_apply_decisions=args.auto_apply_decisions,
+        review_new_only=review_new_only,
     )
     summary = result["summary"]
     approved_count = int(summary["approved"].fillna(False).sum())
@@ -2001,6 +2182,7 @@ def main():
     print(f"Wrote: {Path(args.output_dir) / 'missing_bars.csv'}")
     print(f"Wrote: {Path(args.output_dir) / 'duplicate_bars.csv'}")
     print(f"Wrote: {Path(args.output_dir) / 'auto_review_decisions.csv'}")
+    print(f"Wrote: {Path(args.output_dir) / 'auto_review_applied_decisions.csv'}")
     print(f"Wrote: {Path(args.output_dir) / 'timezone_alignment.csv'}")
 
     if result["auto_apply_result"]:

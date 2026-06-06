@@ -4,6 +4,7 @@ import csv
 import getpass
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -51,7 +52,7 @@ DEFAULT_SYMBOLS = [
 ]
 DEFAULT_OUTPUT_DIR = Path("data/market_data")
 DEFAULT_PROVIDER = "csv"
-SUPPORTED_FREQUENCIES = {"daily", "5min"}
+SUPPORTED_FREQUENCIES = {"daily", "5min", "60min"}
 REVIEWED_BARS_FILE = "reviewed_bars.csv"
 QUALITY_DIR = "quality"
 INTEGRITY_REPORT_FILE = "market_data_integrity.csv"
@@ -64,6 +65,7 @@ SCHWAB_TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 SCHWAB_REDIRECT_URI = "https://developer.schwab.com/oauth2-redirect.html"
 SCHWAB_MAX_DAILY_YEARS = 20
 SCHWAB_MAX_INTRADAY_DAYS = 10
+DEFAULT_SCHWAB_TOKEN_FILE = Path("data/market_data/schwab_tokens.json")
 
 
 FUTURES_PRODUCTS = {
@@ -284,6 +286,31 @@ DAILY_INTRADAY_COLUMNS = [
 DAILY_FIX_CANDIDATE_COLUMNS = CANONICAL_COLUMNS + ["intraday_bars"]
 
 
+def elapsed_text(seconds):
+    seconds = max(0, int(seconds))
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+
+    if minutes:
+        return f"{minutes}m {seconds}s"
+
+    return f"{seconds}s"
+
+
+def eta_text(start_time, completed, total):
+    if completed <= 0 or total <= 0:
+        return "estimating"
+
+    elapsed = time.monotonic() - start_time
+    remaining = max(0, total - completed)
+    seconds_remaining = elapsed / completed * remaining
+
+    return elapsed_text(seconds_remaining)
+
+
 def normalize_symbol(symbol):
     symbol = str(symbol).strip().upper()
 
@@ -311,6 +338,14 @@ def normalize_frequency(frequency):
         "5-min": "5min",
         "5-minute": "5min",
         "5minute": "5min",
+        "60m": "60min",
+        "60-min": "60min",
+        "60-minute": "60min",
+        "60minute": "60min",
+        "1h": "60min",
+        "1hr": "60min",
+        "hour": "60min",
+        "hourly": "60min",
     }
     frequency = aliases.get(frequency, frequency)
 
@@ -952,11 +987,13 @@ def load_saved_market_data(output_dir, symbol, frequency):
 def write_quality_reports(
     output_dir,
     symbols,
+    frequencies=None,
     threshold_pct=0.25,
     apply_daily_fixes=False,
     min_intraday_bars=50,
 ):
     output_dir = Path(output_dir)
+    frequencies = frequencies or ["daily", "5min", "60min"]
     quality_dir = output_dir / QUALITY_DIR
     quality_dir.mkdir(parents=True, exist_ok=True)
     integrity_reports = []
@@ -969,7 +1006,8 @@ def write_quality_reports(
         daily = load_saved_market_data(output_dir, normalized, "daily")
         intraday = load_saved_market_data(output_dir, normalized, "5min")
 
-        for frequency, bars in [("daily", daily), ("5min", intraday)]:
+        for frequency in frequencies:
+            bars = load_saved_market_data(output_dir, normalized, frequency)
             integrity = build_integrity_report(bars)
             integrity_reports.append(integrity)
             summary_rows.append(
@@ -1036,6 +1074,7 @@ def write_quality_reports(
             refreshed = write_quality_reports(
                 output_dir=output_dir,
                 symbols=symbols,
+                frequencies=frequencies,
                 threshold_pct=threshold_pct,
                 apply_daily_fixes=False,
                 min_intraday_bars=min_intraday_bars,
@@ -1144,27 +1183,60 @@ class SchwabProvider:
     def __init__(
         self,
         access_token=None,
+        refresh_token=None,
+        token_file=None,
         client_id=None,
         client_secret=None,
         redirect_uri=SCHWAB_REDIRECT_URI,
         max_history=False,
         base_url=SCHWAB_BASE_URL,
     ):
-        self.access_token = access_token or os.getenv("SCHWAB_ACCESS_TOKEN")
         self.base_url = base_url.rstrip("/")
         self.max_history = max_history
+        self.token_file = token_file_for(token_file)
+        saved_tokens = load_schwab_token_file(self.token_file)
+        explicit_access_token = (
+            access_token
+            or os.getenv("SCHWAB_ACCESS_TOKEN")
+        )
+        self.access_token = explicit_access_token
+        refresh_token = (
+            refresh_token
+            or os.getenv("SCHWAB_REFRESH_TOKEN")
+            or saved_tokens.get("refresh_token")
+        )
+
+        if not self.access_token and refresh_token:
+            client_id, client_secret = schwab_client_credentials(
+                client_id=client_id,
+                client_secret=client_secret,
+                prompt=False,
+            )
+            token_payload = exchange_schwab_refresh_token(
+                client_id=client_id,
+                client_secret=client_secret,
+                refresh_token=refresh_token,
+            )
+            save_schwab_token_file(self.token_file, token_payload)
+            self.access_token = token_payload["access_token"]
 
         if not self.access_token:
-            self.access_token = prompt_for_schwab_access_token(
+            self.access_token = saved_tokens.get("access_token")
+
+        if not self.access_token:
+            token_payload = prompt_for_schwab_token_payload(
                 client_id=client_id,
                 client_secret=client_secret,
                 redirect_uri=redirect_uri,
             )
+            save_schwab_token_file(self.token_file, token_payload)
+            self.access_token = token_payload["access_token"]
 
     def fetch_bars(self, symbol, frequency, start=None, end=None):
+        requested_frequency = normalize_frequency(frequency)
         params = schwab_price_history_params(
             symbol=symbol,
-            frequency=frequency,
+            frequency=requested_frequency,
             start=start,
             end=end,
             max_history=self.max_history,
@@ -1194,12 +1266,21 @@ class SchwabProvider:
             ) from error
 
         candles = payload.get("candles", [])
-        return normalize_bar_frame(
+        bars = normalize_bar_frame(
             candles,
             symbol=symbol,
-            frequency=frequency,
+            frequency=requested_frequency,
             source="schwab",
         )
+
+        if requested_frequency == "60min":
+            return aggregate_bars_to_60min(
+                bars,
+                symbol=symbol,
+                source="schwab_30min_aggregated",
+            )
+
+        return bars
 
 
 def schwab_price_history_params(
@@ -1219,13 +1300,22 @@ def schwab_price_history_params(
             "frequencyType": "daily",
             "frequency": 1,
         }
-    else:
+    elif frequency == "5min":
         params = {
             "symbol": normalize_symbol(symbol),
             "periodType": "day",
             "period": SCHWAB_MAX_INTRADAY_DAYS if max_history else 1,
             "frequencyType": "minute",
             "frequency": 5,
+            "needExtendedHoursData": "true",
+        }
+    else:
+        params = {
+            "symbol": normalize_symbol(symbol),
+            "periodType": "day",
+            "period": SCHWAB_MAX_INTRADAY_DAYS if max_history else 1,
+            "frequencyType": "minute",
+            "frequency": 30,
             "needExtendedHoursData": "true",
         }
 
@@ -1269,22 +1359,76 @@ def extract_authorization_code(value):
     return value
 
 
-def exchange_schwab_authorization_code(
+def token_file_for(token_file=None):
+    return Path(
+        token_file
+        or os.getenv("SCHWAB_TOKEN_FILE")
+        or DEFAULT_SCHWAB_TOKEN_FILE
+    )
+
+
+def load_schwab_token_file(token_file):
+    path = Path(token_file)
+
+    if not path.exists():
+        return {}
+
+    with path.open() as token_handle:
+        return json.load(token_handle)
+
+
+def save_schwab_token_file(token_file, token_payload):
+    path = Path(token_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = load_schwab_token_file(path)
+    merged = {
+        **existing,
+        **token_payload,
+        "retrieved_at": datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+    }
+
+    with path.open("w") as token_handle:
+        json.dump(merged, token_handle, indent=2)
+        token_handle.write("\n")
+
+    os.chmod(path, 0o600)
+
+    return path
+
+
+def schwab_client_credentials(client_id=None, client_secret=None, prompt=True):
+    if client_id is None:
+        client_id = os.getenv("SCHWAB_CLIENT_ID")
+
+    if client_secret is None:
+        client_secret = os.getenv("SCHWAB_CLIENT_SECRET")
+
+    if prompt:
+        client_id = client_id or input("Schwab client_id: ").strip()
+        client_secret = client_secret or getpass.getpass(
+            "Schwab client_secret: "
+        ).strip()
+
+    if not client_id:
+        raise ValueError("Schwab client_id is required")
+
+    if not client_secret:
+        raise ValueError("Schwab client_secret is required")
+
+    return client_id, client_secret
+
+
+def request_schwab_token(
     client_id,
     client_secret,
-    authorization_code,
-    redirect_uri=SCHWAB_REDIRECT_URI,
+    token_fields,
     token_url=SCHWAB_TOKEN_URL,
 ):
     credentials = f"{client_id}:{client_secret}".encode("utf-8")
     basic_auth = base64.b64encode(credentials).decode("ascii")
-    payload = urlencode(
-        {
-            "grant_type": "authorization_code",
-            "code": extract_authorization_code(authorization_code),
-            "redirect_uri": redirect_uri,
-        }
-    ).encode("utf-8")
+    payload = urlencode(token_fields).encode("utf-8")
     request = Request(
         token_url,
         data=payload,
@@ -1317,27 +1461,52 @@ def exchange_schwab_authorization_code(
     return token_payload
 
 
-def prompt_for_schwab_access_token(
+def exchange_schwab_authorization_code(
+    client_id,
+    client_secret,
+    authorization_code,
+    redirect_uri=SCHWAB_REDIRECT_URI,
+    token_url=SCHWAB_TOKEN_URL,
+):
+    return request_schwab_token(
+        client_id=client_id,
+        client_secret=client_secret,
+        token_fields={
+            "grant_type": "authorization_code",
+            "code": extract_authorization_code(authorization_code),
+            "redirect_uri": redirect_uri,
+        },
+        token_url=token_url,
+    )
+
+
+def exchange_schwab_refresh_token(
+    client_id,
+    client_secret,
+    refresh_token,
+    token_url=SCHWAB_TOKEN_URL,
+):
+    return request_schwab_token(
+        client_id=client_id,
+        client_secret=client_secret,
+        token_fields={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        token_url=token_url,
+    )
+
+
+def prompt_for_schwab_token_payload(
     client_id=None,
     client_secret=None,
     redirect_uri=SCHWAB_REDIRECT_URI,
 ):
-    client_id = (
-        client_id
-        or os.getenv("SCHWAB_CLIENT_ID")
-        or input("Schwab client_id: ").strip()
+    client_id, client_secret = schwab_client_credentials(
+        client_id=client_id,
+        client_secret=client_secret,
+        prompt=True,
     )
-    client_secret = (
-        client_secret
-        or os.getenv("SCHWAB_CLIENT_SECRET")
-        or getpass.getpass("Schwab client_secret: ").strip()
-    )
-
-    if not client_id:
-        raise ValueError("Schwab client_id is required")
-
-    if not client_secret:
-        raise ValueError("Schwab client_secret is required")
 
     authorization_url = schwab_authorization_url(
         client_id=client_id,
@@ -1365,7 +1534,19 @@ def prompt_for_schwab_access_token(
     else:
         print("Received access token for this run.")
 
-    return token_payload["access_token"]
+    return token_payload
+
+
+def prompt_for_schwab_access_token(
+    client_id=None,
+    client_secret=None,
+    redirect_uri=SCHWAB_REDIRECT_URI,
+):
+    return prompt_for_schwab_token_payload(
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri,
+    )["access_token"]
 
 
 def date_to_epoch_ms(value):
@@ -1402,6 +1583,53 @@ def filter_date_range(bars, start=None, end=None):
     return working.reset_index(drop=True)
 
 
+def aggregate_bars_to_60min(bars, symbol, source="schwab_30min"):
+    if bars is None or len(bars) == 0:
+        return empty_bars_frame()
+
+    working = bars.copy()
+    working["timestamp"] = pd.to_datetime(
+        working["timestamp"],
+        utc=True,
+        errors="coerce",
+    )
+    working = working[working["timestamp"].notna()].copy()
+
+    if len(working) == 0:
+        return empty_bars_frame()
+
+    for column in ["open", "high", "low", "close", "volume", "open_interest"]:
+        working[column] = pd.to_numeric(
+            working.get(column),
+            errors="coerce",
+        )
+
+    working = working.sort_values("timestamp")
+    working["hour"] = working["timestamp"].dt.floor("60min")
+    aggregations = {
+        "open": ("open", "first"),
+        "high": ("high", "max"),
+        "low": ("low", "min"),
+        "close": ("close", "last"),
+        "volume": ("volume", "sum"),
+        "open_interest": ("open_interest", "last"),
+    }
+    aggregated = working.groupby("hour", as_index=False).agg(**aggregations)
+    aggregated = aggregated.rename(columns={"hour": "timestamp"})
+    aggregated["date"] = aggregated["timestamp"].dt.date.astype(str)
+    aggregated["symbol"] = normalize_symbol(symbol)
+    aggregated["frequency"] = "60min"
+    aggregated["source"] = source
+    aggregated["retrieved_at"] = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    aggregated["timestamp"] = aggregated["timestamp"].dt.strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    return aggregated[CANONICAL_COLUMNS].reset_index(drop=True)
+
+
 def create_provider(args):
     if args.provider == "csv":
         return CsvProvider(args.input_dir)
@@ -1409,6 +1637,8 @@ def create_provider(args):
     if args.provider == "schwab":
         return SchwabProvider(
             access_token=args.access_token,
+            refresh_token=args.refresh_token,
+            token_file=args.token_file,
             client_id=args.client_id,
             client_secret=args.client_secret,
             redirect_uri=args.redirect_uri,
@@ -1422,7 +1652,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Download or ingest futures market data and store normalized "
-            "daily/5-minute bars locally."
+            "daily, 5-minute, and 60-minute bars locally."
         )
     )
     parser.add_argument(
@@ -1434,8 +1664,8 @@ def parse_args():
     parser.add_argument(
         "--frequencies",
         nargs="+",
-        default=["daily", "5min"],
-        help="One or more frequencies: daily, 5min",
+        default=["daily", "5min", "60min"],
+        help="One or more frequencies: daily, 5min, 60min",
     )
     parser.add_argument(
         "--provider",
@@ -1476,6 +1706,20 @@ def parse_args():
         help="Schwab bearer token. Defaults to SCHWAB_ACCESS_TOKEN.",
     )
     parser.add_argument(
+        "--refresh-token",
+        help=(
+            "Schwab refresh token for non-interactive token renewal. "
+            "Defaults to SCHWAB_REFRESH_TOKEN or the token file."
+        ),
+    )
+    parser.add_argument(
+        "--token-file",
+        help=(
+            "Path to a JSON file for saved Schwab tokens. Defaults to "
+            "SCHWAB_TOKEN_FILE or data/market_data/schwab_tokens.json."
+        ),
+    )
+    parser.add_argument(
         "--client-id",
         help="Schwab OAuth client_id. Defaults to SCHWAB_CLIENT_ID or prompt.",
     )
@@ -1492,13 +1736,18 @@ def parse_args():
         help="Schwab OAuth redirect URI configured for your app.",
     )
     parser.add_argument(
-        "-all",
         "--all",
         action="store_true",
         help=(
             "Request as much Schwab price history as this script can ask for. "
             "Without this flag, Schwab mode uses the default shorter window."
         ),
+    )
+    parser.add_argument(
+        "-all",
+        action="store_true",
+        dest="all",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--quality-threshold-pct",
@@ -1542,16 +1791,38 @@ def main():
     manifest_path = write_symbol_manifest(output_dir, symbols)
     print(f"Wrote symbol manifest: {manifest_path}")
 
+    run_start = time.monotonic()
+
     if not args.quality_only:
         provider = create_provider(args)
+        total_jobs = len(symbols) * len(frequencies)
+        completed_jobs = 0
 
         for symbol in symbols:
             for frequency in frequencies:
+                job_number = completed_jobs + 1
+                job_start = time.monotonic()
+                fetch_note = (
+                    " via 30min Schwab bars"
+                    if args.provider == "schwab" and frequency == "60min"
+                    else ""
+                )
+                print(
+                    f"[{job_number}/{total_jobs}] Fetching {symbol} "
+                    f"{frequency} from {args.provider}{fetch_note}..."
+                )
                 bars = provider.fetch_bars(
                     symbol=symbol,
                     frequency=frequency,
                     start=args.start,
                     end=args.end,
+                )
+                fetch_elapsed = time.monotonic() - job_start
+                save_start = time.monotonic()
+                print(
+                    f"[{job_number}/{total_jobs}] Fetched {len(bars)} bars "
+                    f"for {symbol} {frequency} in {elapsed_text(fetch_elapsed)}; "
+                    "saving..."
                 )
 
                 output_path, row_count = save_market_data(
@@ -1560,11 +1831,20 @@ def main():
                     frequency=frequency,
                     bars=bars,
                 )
+                completed_jobs += 1
+                total_elapsed = time.monotonic() - job_start
+                save_elapsed = time.monotonic() - save_start
                 print(
-                    f"{symbol} {frequency}: added {len(bars)} bars; "
-                    f"{row_count} total rows -> {output_path}"
+                    f"[{completed_jobs}/{total_jobs}] Saved {symbol} "
+                    f"{frequency}: added {len(bars)} bars; "
+                    f"{row_count} total rows -> {output_path}. "
+                    f"Step {elapsed_text(total_elapsed)} "
+                    f"(save {elapsed_text(save_elapsed)}); "
+                    f"ETA {eta_text(run_start, completed_jobs, total_jobs)}."
                 )
 
+    quality_start = time.monotonic()
+    print("Running saved-data integrity repairs...")
     repair_result = repair_saved_integrity(
         output_dir=output_dir,
         symbols=symbols,
@@ -1577,9 +1857,11 @@ def main():
             f"{repair_result['repaired_files']} files."
         )
 
+    print("Writing quality reports...")
     quality = write_quality_reports(
         output_dir=output_dir,
         symbols=symbols,
+        frequencies=frequencies,
         threshold_pct=args.quality_threshold_pct,
         apply_daily_fixes=args.apply_daily_intraday_fixes,
         min_intraday_bars=args.min_intraday_bars_for_daily_fix,
@@ -1596,6 +1878,11 @@ def main():
             f"{quality['apply_result'].get('updated_files', 0)} files."
         )
     print(f"Quality checks found {quality_issues} issue rows.")
+    print(
+        "Finished market data run in "
+        f"{elapsed_text(time.monotonic() - run_start)} "
+        f"(quality {elapsed_text(time.monotonic() - quality_start)})."
+    )
 
 
 if __name__ == "__main__":

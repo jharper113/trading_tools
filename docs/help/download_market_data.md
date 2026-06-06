@@ -1,6 +1,6 @@
 # download_market_data.py
 
-Download or ingest futures market data and store normalized daily and 5-minute bars locally.
+Download or ingest futures market data and store normalized daily, 5-minute, and 60-minute bars locally.
 
 ## Typical Uses
 
@@ -10,7 +10,7 @@ Ingest vendor CSV data for the full default futures universe:
 python download_market_data.py \
   --provider csv \
   --input-dir data/vendor_market_data \
-  --frequencies daily 5min
+  --frequencies daily 5min 60min
 ```
 
 Run quality checks against already-saved market data without fetching new bars:
@@ -24,8 +24,8 @@ Request Schwab's maximum supported history window:
 ```bash
 python download_market_data.py \
   --provider schwab \
-  -all \
-  --frequencies daily 5min
+  --all \
+  --frequencies daily 5min 60min
 ```
 
 Download or ingest only a subset:
@@ -35,7 +35,7 @@ python download_market_data.py \
   --provider csv \
   --input-dir data/vendor_market_data \
   --symbols /ES /NQ /ZN /CL \
-  --frequencies daily 5min
+  --frequencies daily 5min 60min
 ```
 
 ## Outputs
@@ -57,7 +57,7 @@ The symbol manifest is written to `data/market_data/symbols.csv`.
 : Futures roots or contract symbols to download. Omit this flag to use the full default futures universe.
 
 `--frequencies FREQUENCIES [FREQUENCIES ...]`
-: Frequencies to download or check. Supported values are `daily` and `5min`.
+: Frequencies to download or check. Supported values are `daily`, `5min`, and `60min`.
 
 `--provider {csv,schwab}`
 : Data provider. Use `csv` for vendor/exported bars and `schwab` for Schwab API price history.
@@ -80,6 +80,12 @@ The symbol manifest is written to `data/market_data/symbols.csv`.
 `--access-token ACCESS_TOKEN`
 : Schwab bearer token. Defaults to `SCHWAB_ACCESS_TOKEN`.
 
+`--refresh-token REFRESH_TOKEN`
+: Schwab refresh token for non-interactive token renewal. Defaults to `SCHWAB_REFRESH_TOKEN` or the token file.
+
+`--token-file TOKEN_FILE`
+: Path to a JSON file for saved Schwab tokens. Defaults to `SCHWAB_TOKEN_FILE` or `data/market_data/schwab_tokens.json`.
+
 `--client-id CLIENT_ID`
 : Schwab OAuth client id. Defaults to `SCHWAB_CLIENT_ID` or an interactive prompt.
 
@@ -89,7 +95,7 @@ The symbol manifest is written to `data/market_data/symbols.csv`.
 `--redirect-uri REDIRECT_URI`
 : Schwab OAuth redirect URI configured for your app.
 
-`-all`, `--all`
+`--all`
 : Request as much Schwab price history as the script can ask for. This controls history depth, not symbol selection.
 
 `--quality-threshold-pct QUALITY_THRESHOLD_PCT`
@@ -104,3 +110,9 @@ The symbol manifest is written to `data/market_data/symbols.csv`.
 ## Notes
 
 The quality gate safely fixes OHLC envelope issues during save and reports remaining integrity issues. Daily-vs-5min repairs are candidate-only unless `--apply-daily-intraday-fixes` is passed.
+
+Long Schwab runs can take a while because the script requests each symbol/frequency pair separately. The script prints per-job progress, elapsed time, and an ETA while fetching and saving. To speed up a scheduled run, pass a smaller `--symbols` list, omit frequencies you do not need, or use `--start` to limit the requested date range.
+
+Schwab does not accept `60` as a minute frequency. When you request `60min`, the script asks Schwab for 30-minute bars and aggregates them into 60-minute bars locally before saving.
+
+For cron, client id and client secret are not enough by themselves on the first run because Schwab OAuth requires browser approval. Run the command manually once, paste the authorization redirect URL/code, and the script will save tokens to `data/market_data/schwab_tokens.json` with `0600` permissions. Later cron runs can renew access with the saved refresh token as long as `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET` are available.

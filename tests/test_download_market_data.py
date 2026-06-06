@@ -3,21 +3,29 @@ import pandas as pd
 from download_market_data import (
     DEFAULT_SYMBOLS,
     FUTURES_PRODUCTS,
+    SchwabProvider,
+    aggregate_bars_to_60min,
     append_market_data,
     apply_daily_intraday_fix_candidates,
     auto_fix_integrity_issues,
     build_daily_intraday_fix_candidates,
     build_daily_intraday_quality_report,
     build_integrity_report,
+    elapsed_text,
     extract_authorization_code,
+    load_schwab_token_file,
     normalize_bar_frame,
     normalize_frequency,
     normalize_symbol,
     output_file_for,
+    parse_args,
     repair_saved_integrity,
+    save_schwab_token_file,
     save_market_data,
     schwab_authorization_url,
+    schwab_client_credentials,
     schwab_price_history_params,
+    token_file_for,
     write_quality_reports,
     write_symbol_manifest,
 )
@@ -31,6 +39,30 @@ def test_normalize_symbol_adds_futures_slash():
 def test_normalize_frequency_aliases():
     assert normalize_frequency("1d") == "daily"
     assert normalize_frequency("5-minute") == "5min"
+    assert normalize_frequency("60m") == "60min"
+    assert normalize_frequency("1h") == "60min"
+
+
+def test_elapsed_text_formats_seconds_minutes_and_hours():
+    assert elapsed_text(9) == "9s"
+    assert elapsed_text(61) == "1m 1s"
+    assert elapsed_text(3661) == "1h 1m 1s"
+
+
+def test_parse_args_prefers_long_all_flag_but_accepts_legacy_alias(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["download_market_data.py", "--all"],
+    )
+
+    assert parse_args().all
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["download_market_data.py", "-all"],
+    )
+
+    assert parse_args().all
 
 
 def test_default_symbols_cover_liquid_futures_categories():
@@ -417,6 +449,74 @@ def test_write_quality_reports_outputs_summary_and_candidates(tmp_path):
     assert len(reports["daily_fix_candidates"]) == 1
 
 
+def test_write_quality_reports_includes_60min_integrity(tmp_path):
+    hourly = normalize_bar_frame(
+        pd.DataFrame(
+            [
+                {
+                    "timestamp": "2026-01-01T14:00:00Z",
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100,
+                }
+            ]
+        ),
+        symbol="/ES",
+        frequency="60min",
+        source="hourly",
+        retrieved_at="2026-01-01T00:00:00Z",
+    )
+    save_market_data(tmp_path, "/ES", "60min", hourly)
+
+    reports = write_quality_reports(tmp_path, ["/ES"], frequencies=["60min"])
+
+    row = reports["summary"].iloc[0]
+    assert row["frequency"] == "60min"
+    assert row["bars_checked"] == 1
+    assert row["status"] == "passed"
+
+
+def test_aggregate_bars_to_60min_combines_30min_bars():
+    bars = normalize_bar_frame(
+        pd.DataFrame(
+            [
+                {
+                    "timestamp": "2026-01-01T14:00:00Z",
+                    "open": 100,
+                    "high": 101,
+                    "low": 99,
+                    "close": 100.5,
+                    "volume": 10,
+                },
+                {
+                    "timestamp": "2026-01-01T14:30:00Z",
+                    "open": 100.5,
+                    "high": 102,
+                    "low": 100,
+                    "close": 101,
+                    "volume": 20,
+                },
+            ]
+        ),
+        symbol="/ES",
+        frequency="60min",
+        source="schwab",
+        retrieved_at="2026-01-01T00:00:00Z",
+    )
+
+    aggregated = aggregate_bars_to_60min(bars, symbol="/ES")
+
+    assert len(aggregated) == 1
+    assert aggregated.loc[0, "timestamp"] == "2026-01-01T14:00:00Z"
+    assert aggregated.loc[0, "open"] == 100
+    assert aggregated.loc[0, "high"] == 102
+    assert aggregated.loc[0, "low"] == 99
+    assert aggregated.loc[0, "close"] == 101
+    assert aggregated.loc[0, "volume"] == 30
+    assert aggregated.loc[0, "frequency"] == "60min"
+
+
 def test_apply_daily_intraday_fix_candidates_rewrites_daily_bar(tmp_path):
     daily = normalize_bar_frame(
         pd.DataFrame(
@@ -483,6 +583,10 @@ def test_output_file_for_partitions_by_frequency(tmp_path):
 
     assert output_path == tmp_path / "5min" / "6E.csv"
 
+    hourly_path = output_file_for(tmp_path, "/6E", "60m")
+
+    assert hourly_path == tmp_path / "60min" / "6E.csv"
+
 
 def test_write_symbol_manifest(tmp_path):
     manifest_path = write_symbol_manifest(tmp_path, ["/ES", "CL"])
@@ -509,6 +613,20 @@ def test_schwab_price_history_params_for_5min():
     assert params["period"] == 1
     assert "startDate" in params
     assert "endDate" in params
+
+
+def test_schwab_price_history_params_for_60min():
+    params = schwab_price_history_params(
+        symbol="ES",
+        frequency="60min",
+        start="2026-01-01",
+        end="2026-01-02",
+    )
+
+    assert params["symbol"] == "/ES"
+    assert params["frequencyType"] == "minute"
+    assert params["frequency"] == 30
+    assert params["periodType"] == "day"
 
 
 def test_schwab_price_history_params_daily_uses_default_window():
@@ -544,6 +662,16 @@ def test_schwab_price_history_params_can_request_all_intraday_history():
     assert params["periodType"] == "day"
     assert params["period"] == 10
 
+    hourly_params = schwab_price_history_params(
+        symbol="ES",
+        frequency="60min",
+        max_history=True,
+    )
+
+    assert hourly_params["periodType"] == "day"
+    assert hourly_params["period"] == 10
+    assert hourly_params["frequency"] == 30
+
 
 def test_schwab_authorization_url_contains_required_oauth_fields():
     auth_url = schwab_authorization_url(
@@ -571,3 +699,74 @@ def test_extract_authorization_code_from_full_redirect_url():
 
 def test_extract_authorization_code_accepts_raw_code():
     assert extract_authorization_code("AUTH_CODE_123") == "AUTH_CODE_123"
+
+
+def test_schwab_token_file_round_trips_and_sets_private_permissions(tmp_path):
+    token_path = tmp_path / "tokens.json"
+
+    saved_path = save_schwab_token_file(
+        token_path,
+        {
+            "access_token": "ACCESS",
+            "refresh_token": "REFRESH",
+        },
+    )
+    loaded = load_schwab_token_file(token_path)
+
+    assert saved_path == token_path
+    assert loaded["access_token"] == "ACCESS"
+    assert loaded["refresh_token"] == "REFRESH"
+    assert loaded["retrieved_at"]
+    assert oct(token_path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_token_file_for_prefers_argument_then_env(monkeypatch, tmp_path):
+    env_path = tmp_path / "env_tokens.json"
+    arg_path = tmp_path / "arg_tokens.json"
+    monkeypatch.setenv("SCHWAB_TOKEN_FILE", str(env_path))
+
+    assert token_file_for(arg_path) == arg_path
+    assert token_file_for() == env_path
+
+
+def test_schwab_client_credentials_can_read_environment(monkeypatch):
+    monkeypatch.setenv("SCHWAB_CLIENT_ID", "client-id")
+    monkeypatch.setenv("SCHWAB_CLIENT_SECRET", "client-secret")
+
+    assert schwab_client_credentials(prompt=False) == (
+        "client-id",
+        "client-secret",
+    )
+
+
+def test_schwab_provider_refreshes_saved_refresh_token(monkeypatch, tmp_path):
+    token_path = tmp_path / "tokens.json"
+    save_schwab_token_file(
+        token_path,
+        {
+            "access_token": "OLD_ACCESS",
+            "refresh_token": "REFRESH",
+        },
+    )
+    monkeypatch.setenv("SCHWAB_CLIENT_ID", "client-id")
+    monkeypatch.setenv("SCHWAB_CLIENT_SECRET", "client-secret")
+
+    def fake_refresh(client_id, client_secret, refresh_token):
+        assert client_id == "client-id"
+        assert client_secret == "client-secret"
+        assert refresh_token == "REFRESH"
+        return {
+            "access_token": "NEW_ACCESS",
+            "refresh_token": "NEW_REFRESH",
+        }
+
+    monkeypatch.setattr(
+        "download_market_data.exchange_schwab_refresh_token",
+        fake_refresh,
+    )
+
+    provider = SchwabProvider(token_file=token_path)
+    saved = load_schwab_token_file(token_path)
+
+    assert provider.access_token == "NEW_ACCESS"
+    assert saved["refresh_token"] == "NEW_REFRESH"
