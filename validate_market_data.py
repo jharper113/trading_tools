@@ -1,4 +1,5 @@
 import argparse
+import bisect
 import json
 import webbrowser
 from datetime import datetime, timezone
@@ -46,6 +47,38 @@ DIFFERENCE_COLUMNS = [
     "approved",
 ]
 MISSING_COLUMNS = ["symbol", "frequency", "comparison_key", "missing_from"]
+AUTO_REVIEW_COLUMNS = [
+    "symbol",
+    "frequency",
+    "comparison_key",
+    "approved",
+    "max_pct_diff",
+    "auto_decision",
+    "auto_reason",
+    "local_neighbor_distance",
+    "reference_neighbor_distance",
+    "previous_confirmed_key",
+    "next_confirmed_key",
+    "local_open",
+    "reference_open",
+    "local_high",
+    "reference_high",
+    "local_low",
+    "reference_low",
+    "local_close",
+    "reference_close",
+]
+TIMEZONE_ALIGNMENT_COLUMNS = [
+    "symbol",
+    "frequency",
+    "local_bars",
+    "reference_bars",
+    "exact_utc_matches",
+    "best_shift_minutes",
+    "best_shift_matches",
+    "status",
+    "detail",
+]
 DUPLICATE_COLUMNS = [
     "symbol",
     "frequency",
@@ -60,11 +93,38 @@ DUPLICATE_COLUMNS = [
 
 YAHOO_FUTURES_SYMBOLS = {
     "/ES": "ES=F",
-    "/6E": "6E=F",
-    "/GC": "GC=F",
-    "/ZW": "ZW=F",
+    "/NQ": "NQ=F",
+    "/RTY": "RTY=F",
+    "/YM": "YM=F",
+    "/ZB": "ZB=F",
     "/ZN": "ZN=F",
+    "/ZF": "ZF=F",
+    "/ZT": "ZT=F",
+    "/6E": "6E=F",
+    "/6J": "6J=F",
+    "/6B": "6B=F",
+    "/6A": "6A=F",
+    "/6C": "6C=F",
+    "/6S": "6S=F",
+    "/GC": "GC=F",
+    "/SI": "SI=F",
+    "/HG": "HG=F",
+    "/PL": "PL=F",
     "/CL": "CL=F",
+    "/NG": "NG=F",
+    "/RB": "RB=F",
+    "/HO": "HO=F",
+    "/ZC": "ZC=F",
+    "/ZS": "ZS=F",
+    "/ZM": "ZM=F",
+    "/ZL": "ZL=F",
+    "/ZW": "ZW=F",
+    "/LE": "LE=F",
+    "/HE": "HE=F",
+    "/KC": "KC=F",
+    "/SB": "SB=F",
+    "/CT": "CT=F",
+    "/CC": "CC=F",
 }
 
 
@@ -336,6 +396,120 @@ def compare_market_data(local_bars, reference_bars, symbol, frequency, threshold
     )
 
     return differences, missing, summary
+
+
+def build_timezone_alignment_report(local_bars, reference_bars, symbol, frequency):
+    symbol = normalize_symbol(symbol)
+    frequency = normalize_frequency(frequency)
+    local = normalize_for_comparison(local_bars, frequency)
+    reference = normalize_for_comparison(reference_bars, frequency)
+
+    if frequency == "daily":
+        exact_matches = len(
+            set(local.get("comparison_key", []))
+            & set(reference.get("comparison_key", []))
+        )
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "frequency": frequency,
+                    "local_bars": len(local),
+                    "reference_bars": len(reference),
+                    "exact_utc_matches": exact_matches,
+                    "best_shift_minutes": 0,
+                    "best_shift_matches": exact_matches,
+                    "status": "date_aligned",
+                    "detail": "Daily bars are compared by UTC-normalized calendar date.",
+                }
+            ],
+            columns=TIMEZONE_ALIGNMENT_COLUMNS,
+        )
+
+    if len(local) == 0 or len(reference) == 0:
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "frequency": frequency,
+                    "local_bars": len(local),
+                    "reference_bars": len(reference),
+                    "exact_utc_matches": 0,
+                    "best_shift_minutes": np.nan,
+                    "best_shift_matches": 0,
+                    "status": "insufficient_data",
+                    "detail": "Cannot check timestamp alignment without both local and reference bars.",
+                }
+            ],
+            columns=TIMEZONE_ALIGNMENT_COLUMNS,
+        )
+
+    local_times = set(pd.to_datetime(local["timestamp"], utc=True).array.asi8)
+    reference_times = pd.to_datetime(reference["timestamp"], utc=True)
+    reference_ns = reference_times.array.asi8
+    exact_matches = len(local_times & set(reference_ns))
+    offsets = [
+        -720,
+        -660,
+        -600,
+        -540,
+        -480,
+        -420,
+        -360,
+        -300,
+        -240,
+        -180,
+        -120,
+        -60,
+        0,
+        60,
+        120,
+        180,
+        240,
+        300,
+        360,
+        420,
+        480,
+        540,
+        600,
+        660,
+        720,
+    ]
+    match_counts = {}
+
+    for offset_minutes in offsets:
+        shifted = reference_ns + pd.Timedelta(minutes=offset_minutes).value
+        match_counts[offset_minutes] = len(local_times & set(shifted))
+
+    best_shift = max(match_counts, key=match_counts.get)
+    best_matches = match_counts[best_shift]
+
+    if best_shift != 0 and best_matches > exact_matches:
+        status = "possible_timezone_shift"
+        detail = (
+            f"Shifting Yahoo/reference timestamps by {best_shift} minutes "
+            f"matches {best_matches} bars vs {exact_matches} exact UTC matches."
+        )
+    else:
+        status = "utc_aligned"
+        detail = "Exact UTC timestamp matching is as good as or better than common timezone shifts."
+
+    return pd.DataFrame(
+        [
+            {
+                "symbol": symbol,
+                "frequency": frequency,
+                "local_bars": len(local),
+                "reference_bars": len(reference),
+                "exact_utc_matches": exact_matches,
+                "best_shift_minutes": best_shift,
+                "best_shift_matches": best_matches,
+                "status": status,
+                "detail": detail,
+            }
+        ],
+        columns=TIMEZONE_ALIGNMENT_COLUMNS,
+    )
 
 
 def empty_comparison_outputs(symbol, frequency):
@@ -670,6 +844,20 @@ def apply_reconciliation_decisions(source_dir, decisions):
     }
 
 
+def apply_auto_review_decisions(source_dir, auto_review):
+    if auto_review is None or len(auto_review) == 0:
+        return {"updated_bars": 0, "reviewed_bars": 0}
+
+    decisions = to_json_records(
+        auto_review[auto_review["decision"].isin(["local", "yahoo"])]
+    )
+
+    return apply_reconciliation_decisions(
+        source_dir=source_dir,
+        decisions=decisions,
+    )
+
+
 def to_json_records(frame):
     if frame is None or len(frame) == 0:
         return []
@@ -710,13 +898,29 @@ def dashboard_reconciliation_rows(differences, max_rows=DEFAULT_DASHBOARD_MAX_RO
         return []
 
     price_diffs = differences[differences["field"].isin(PRICE_COLUMNS)].copy()
+    all_price_diffs = price_diffs.copy()
+    row_max = differences[differences["field"] == "row_max"].copy()
 
-    if len(price_diffs) == 0:
+    if len(price_diffs) == 0 or len(row_max) == 0:
         return []
 
+    selected_keys = sorted_dashboard_keys(row_max, max_rows=max_rows)
+
+    if selected_keys is not None:
+        selected_key_set = set(selected_keys)
+        price_diffs = price_diffs[
+            [
+                key in selected_key_set
+                for key in zip(
+                    price_diffs["symbol"],
+                    price_diffs["frequency"],
+                    price_diffs["comparison_key"],
+                )
+            ]
+        ].copy()
+
     rows = []
-    row_max = differences[differences["field"] == "row_max"].copy()
-    confirmed_lookup = build_confirmed_price_lookup(price_diffs, row_max)
+    confirmed_lookup = build_confirmed_price_lookup(all_price_diffs, row_max)
 
     for key, group in price_diffs.groupby(
         ["symbol", "frequency", "comparison_key"],
@@ -745,6 +949,7 @@ def dashboard_reconciliation_rows(differences, max_rows=DEFAULT_DASHBOARD_MAX_RO
                 comparison_key=key[2],
             )
         )
+        row.update(auto_review_decision(row))
 
         rows.append(row)
 
@@ -763,6 +968,30 @@ def dashboard_reconciliation_rows(differences, max_rows=DEFAULT_DASHBOARD_MAX_RO
         return sorted_rows[:max_rows]
 
     return sorted_rows
+
+
+def sorted_dashboard_keys(row_max, max_rows=DEFAULT_DASHBOARD_MAX_ROWS):
+    if max_rows is None or max_rows <= 0:
+        return None
+
+    working = row_max.copy()
+    working["_approved_sort"] = working["approved"].fillna(False).astype(bool)
+    working["_pct_sort"] = pd.to_numeric(
+        working["pct_diff"],
+        errors="coerce",
+    ).fillna(0)
+    working = working.sort_values(
+        ["_approved_sort", "_pct_sort", "symbol", "frequency", "comparison_key"],
+        ascending=[True, False, True, True, True],
+    ).head(max_rows)
+
+    return list(
+        zip(
+            working["symbol"],
+            working["frequency"],
+            working["comparison_key"],
+        )
+    )
 
 
 def build_confirmed_price_lookup(price_diffs, row_max):
@@ -795,47 +1024,52 @@ def build_confirmed_price_lookup(price_diffs, row_max):
             utc=True,
             errors="coerce",
         )
+        working = working[working["_sort_key"].notna()].copy()
         working = working.sort_values(
             ["_sort_key", "comparison_key"],
             na_position="last",
         )
-        lookup[key] = working[
-            ["comparison_key", "local_value", "reference_value"]
+        records = working[
+            ["comparison_key", "local_value", "reference_value", "_sort_key"]
         ].to_dict(orient="records")
+        sort_keys = [
+            record["_sort_key"].value
+            for record in records
+        ]
+        lookup[key] = {
+            "sort_keys": sort_keys,
+            "records": records,
+        }
 
     return lookup
 
 
 def confirmed_neighbor_context(confirmed_lookup, symbol, frequency, comparison_key):
-    confirmed_rows = confirmed_lookup.get((symbol, frequency), [])
+    confirmed_group = confirmed_lookup.get((symbol, frequency), {})
+    confirmed_rows = confirmed_group.get("records", [])
+    sort_keys = confirmed_group.get("sort_keys", [])
     target_time = pd.to_datetime(
         comparison_key,
         utc=True,
         errors="coerce",
     )
-    previous_row = None
-    next_row = None
 
-    for row in confirmed_rows:
-        row_time = pd.to_datetime(
-            row["comparison_key"],
-            utc=True,
-            errors="coerce",
+    if pd.isna(target_time) or not confirmed_rows:
+        previous_row = None
+        next_row = None
+    else:
+        insertion_index = bisect.bisect_left(sort_keys, target_time.value)
+        previous_row = (
+            confirmed_rows[insertion_index - 1]
+            if insertion_index > 0
+            else None
         )
-
-        if pd.isna(row_time) or pd.isna(target_time):
-            if str(row["comparison_key"]) < str(comparison_key):
-                previous_row = row
-            elif str(row["comparison_key"]) > str(comparison_key) and next_row is None:
-                next_row = row
-
-            continue
-
-        if row_time < target_time:
-            previous_row = row
-        elif row_time > target_time and next_row is None:
-            next_row = row
-            break
+        next_index = bisect.bisect_right(sort_keys, target_time.value)
+        next_row = (
+            confirmed_rows[next_index]
+            if next_index < len(confirmed_rows)
+            else None
+        )
 
     return {
         "previous_confirmed_key": previous_row.get("comparison_key") if previous_row else None,
@@ -847,12 +1081,193 @@ def confirmed_neighbor_context(confirmed_lookup, symbol, frequency, comparison_k
     }
 
 
+def finite_values(values):
+    clean = []
+
+    for value in values:
+        numeric = pd.to_numeric(value, errors="coerce")
+
+        if pd.notna(numeric) and np.isfinite(numeric):
+            clean.append(float(numeric))
+
+    return clean
+
+
+def mean_abs_distance(value, anchors):
+    numeric_value = pd.to_numeric(value, errors="coerce")
+    clean_anchors = finite_values(anchors)
+
+    if pd.isna(numeric_value) or not np.isfinite(numeric_value) or not clean_anchors:
+        return np.nan
+
+    return float(
+        np.mean(
+            [
+                abs(float(numeric_value) - anchor)
+                for anchor in clean_anchors
+            ]
+        )
+    )
+
+
+def auto_review_decision(row):
+    local_close = pd.to_numeric(row.get("local_close"), errors="coerce")
+    reference_close = pd.to_numeric(row.get("reference_close"), errors="coerce")
+    anchors = finite_values(
+        [
+            row.get("previous_confirmed_local_close"),
+            row.get("previous_confirmed_reference_close"),
+            row.get("next_confirmed_local_close"),
+            row.get("next_confirmed_reference_close"),
+        ]
+    )
+    local_distance = mean_abs_distance(local_close, anchors)
+    reference_distance = mean_abs_distance(reference_close, anchors)
+
+    if pd.notna(local_close) and pd.isna(reference_close):
+        decision = "local"
+        reason = "Yahoo/reference value missing; prefer local."
+    elif pd.isna(local_close) and pd.notna(reference_close):
+        if pd.notna(reference_distance):
+            decision = "yahoo"
+            reason = "Local value missing; Yahoo is near confirmed neighbor close(s)."
+        else:
+            decision = "review"
+            reason = "Local value missing, but no confirmed neighbor close is available."
+    elif pd.isna(local_close) and pd.isna(reference_close):
+        decision = "review"
+        reason = "Both local and Yahoo/reference values are missing."
+    elif pd.notna(local_distance) and pd.notna(reference_distance) and reference_distance < local_distance:
+        decision = "yahoo"
+        reason = "Yahoo/reference close is closer to confirmed neighbor close(s)."
+    else:
+        decision = "local"
+        reason = "Prefer local data unless Yahoo/reference is closer to confirmed neighbor close(s)."
+
+    return {
+        "auto_decision": decision,
+        "auto_reason": reason,
+        "local_neighbor_distance": local_distance,
+        "reference_neighbor_distance": reference_distance,
+    }
+
+
+def auto_review_record(row):
+    record = {column: row.get(column) for column in AUTO_REVIEW_COLUMNS}
+    record["decision"] = row.get("auto_decision")
+
+    return record
+
+
+def bar_lookup_by_comparison_key(bars, frequency):
+    normalized = normalize_for_comparison(bars, frequency)
+
+    if len(normalized) == 0:
+        return {}
+
+    normalized = normalized.drop_duplicates("comparison_key", keep="last")
+
+    return normalized.set_index("comparison_key")[PRICE_COLUMNS].to_dict(
+        orient="index"
+    )
+
+
+def build_missing_auto_review_rows(
+    missing,
+    local_bars,
+    reference_bars,
+    confirmed_lookup,
+    symbol,
+    frequency,
+):
+    if missing is None or len(missing) == 0:
+        return []
+
+    local_lookup = bar_lookup_by_comparison_key(local_bars, frequency)
+    reference_lookup = bar_lookup_by_comparison_key(reference_bars, frequency)
+    rows = []
+
+    for _, missing_row in missing.iterrows():
+        comparison_key = missing_row["comparison_key"]
+        row = {
+            "symbol": symbol,
+            "frequency": frequency,
+            "comparison_key": comparison_key,
+            "approved": False,
+            "max_pct_diff": np.nan,
+            "missing_from": missing_row.get("missing_from"),
+        }
+
+        for field in PRICE_COLUMNS:
+            row[f"local_{field}"] = local_lookup.get(comparison_key, {}).get(field)
+            row[f"reference_{field}"] = reference_lookup.get(comparison_key, {}).get(field)
+
+        row.update(
+            confirmed_neighbor_context(
+                confirmed_lookup,
+                symbol=symbol,
+                frequency=frequency,
+                comparison_key=comparison_key,
+            )
+        )
+        row.update(auto_review_decision(row))
+        rows.append(row)
+
+    return rows
+
+
+def build_auto_review_decisions(
+    differences,
+    missing,
+    local_bars,
+    reference_bars,
+    symbol,
+    frequency,
+):
+    symbol = normalize_symbol(symbol)
+    frequency = normalize_frequency(frequency)
+    rows = []
+    row_max = differences[differences["field"] == "row_max"].copy()
+    price_diffs = differences[differences["field"].isin(PRICE_COLUMNS)].copy()
+    confirmed_lookup = build_confirmed_price_lookup(price_diffs, row_max)
+
+    rows.extend(
+        [
+            row
+            for row in dashboard_reconciliation_rows(differences, max_rows=0)
+            if not row.get("approved", False)
+        ]
+    )
+    rows.extend(
+        build_missing_auto_review_rows(
+            missing=missing,
+            local_bars=local_bars,
+            reference_bars=reference_bars,
+            confirmed_lookup=confirmed_lookup,
+            symbol=symbol,
+            frequency=frequency,
+        )
+    )
+
+    if not rows:
+        return pd.DataFrame(columns=AUTO_REVIEW_COLUMNS + ["decision"])
+
+    records = [auto_review_record(row) for row in rows]
+
+    return pd.DataFrame(records).reindex(
+        columns=AUTO_REVIEW_COLUMNS + ["decision"]
+    )
+
+
 def write_validation_dashboard(
     output_dir,
     summary,
     differences,
     missing,
     duplicates,
+    auto_review=None,
+    timezone_alignment=None,
+    auto_apply_result=None,
     heatmap_path=None,
     server_enabled=False,
     dashboard_max_rows=DEFAULT_DASHBOARD_MAX_ROWS,
@@ -871,10 +1286,7 @@ def write_validation_dashboard(
             differences,
             max_rows=dashboard_max_rows,
         ),
-        "totalReconciliationRows": len(dashboard_reconciliation_rows(
-            differences,
-            max_rows=0,
-        )),
+        "totalReconciliationRows": count_reconciliation_rows(differences),
         "dashboardMaxRows": dashboard_max_rows,
         "missing": to_json_records(
             missing.head(dashboard_max_rows)
@@ -883,6 +1295,14 @@ def write_validation_dashboard(
         ),
         "totalMissingRows": len(missing),
         "duplicates": to_json_records(duplicates),
+        "autoReview": to_json_records(
+            auto_review.head(dashboard_max_rows)
+            if auto_review is not None and dashboard_max_rows and dashboard_max_rows > 0
+            else auto_review
+        ),
+        "totalAutoReviewRows": len(auto_review) if auto_review is not None else 0,
+        "timezoneAlignment": to_json_records(timezone_alignment),
+        "autoApplyResult": auto_apply_result or {},
         "heatmapSrc": heatmap_src,
         "serverEnabled": server_enabled,
     }
@@ -890,6 +1310,23 @@ def write_validation_dashboard(
     dashboard_path.write_text(html, encoding="utf-8")
 
     return dashboard_path
+
+
+def count_reconciliation_rows(differences):
+    if differences is None or len(differences) == 0:
+        return 0
+
+    price_diffs = differences[differences["field"].isin(PRICE_COLUMNS)]
+
+    if len(price_diffs) == 0:
+        return 0
+
+    return len(
+        price_diffs.groupby(
+            ["symbol", "frequency", "comparison_key"],
+            dropna=False,
+        )
+    )
 
 
 def dashboard_html(payload):
@@ -995,6 +1432,10 @@ def dashboard_html(payload):
       <div class="table-wrap"><table id="summary-table"></table></div>
     </section>
     <section>
+      <h2>Timezone Alignment</h2>
+      <div class="table-wrap"><table id="timezone-table"></table></div>
+    </section>
+    <section>
       <h2>Reconciliation Choices</h2>
       <div class="toolbar">
         <select id="filter-status">
@@ -1016,6 +1457,10 @@ def dashboard_html(payload):
       <div class="table-wrap"><table id="missing-table"></table></div>
     </section>
     <section>
+      <h2>Auto Review Decisions</h2>
+      <div class="table-wrap"><table id="auto-review-table"></table></div>
+    </section>
+    <section>
       <h2>Duplicate Local Bars</h2>
       <div class="table-wrap"><table id="duplicate-table"></table></div>
     </section>
@@ -1030,7 +1475,7 @@ def dashboard_html(payload):
     }}
     function pct(value) {{ return value === null || value === undefined ? '' : `${{fmt(value, 4)}}%`; }}
     function keyFor(row) {{ return `${{row.symbol}}|${{row.frequency}}|${{row.comparison_key}}`; }}
-    function sourceChoice(row) {{ return decisions.get(keyFor(row)) || (row.approved ? 'local' : 'review'); }}
+    function sourceChoice(row) {{ return decisions.get(keyFor(row)) || row.auto_decision || row.decision || (row.approved ? 'local' : 'review'); }}
     function setChoice(row, choice) {{ decisions.set(keyFor(row), choice); }}
     function visibleDiffRows() {{
       const filter = document.getElementById('filter-status').value;
@@ -1043,12 +1488,14 @@ def dashboard_html(payload):
       const missing = summary.reduce((sum, row) => sum + Number(row.missing_local_bars || 0) + Number(row.missing_reference_bars || 0), 0);
       const maxDiff = Math.max(...summary.map(row => Number(row.max_pct_diff || 0)));
       const displayedRows = `${{DATA.differences.length}} / ${{DATA.totalReconciliationRows || DATA.differences.length}}`;
+      const autoApplied = DATA.autoApplyResult && DATA.autoApplyResult.updated_bars;
       const cards = [
         ['Groups Approved', `${{approved}} / ${{summary.length}}`, approved === summary.length ? 'good' : 'bad'],
         ['Failed Bars', failedBars, failedBars === 0 ? 'good' : 'bad'],
         ['Missing Bars', missing, missing === 0 ? 'good' : 'warn'],
         ['Largest Difference', pct(maxDiff), maxDiff <= 0.25 ? 'good' : 'bad'],
         ['Review Rows Loaded', displayedRows, DATA.differences.length ? 'warn' : 'bad'],
+        ['Auto Applied', autoApplied || 0, autoApplied ? 'good' : 'warn'],
       ];
       document.getElementById('cards').innerHTML = cards.map(([label, value, klass]) => `<div class="card"><div class="metric-label">${{label}}</div><div class="metric-value ${{klass}}">${{value}}</div></div>`).join('');
     }}
@@ -1070,14 +1517,15 @@ def dashboard_html(payload):
     function renderDifferences() {{
       const rows = visibleDiffRows();
       const table = document.getElementById('diff-table');
-      const headers = ['symbol','frequency','comparison_key','max_pct_diff','previous confirmed close','open','high','low','close','next confirmed close','decision'];
+      const headers = ['symbol','frequency','comparison_key','max_pct_diff','auto','previous confirmed close','open','high','low','close','next confirmed close','decision'];
       table.innerHTML = `<thead><tr>${{headers.map(h => `<th>${{h}}</th>`).join('')}}</tr></thead><tbody>` + rows.map(row => {{
         const klass = row.approved ? 'approved' : 'failed';
         const choice = sourceChoice(row);
         const fields = ['open','high','low','close'].map(field => `<td>Local ${{fmt(row[`local_${{field}}`])}}<br>Yahoo ${{fmt(row[`reference_${{field}}`])}}<br><span class="${{Number(row[`pct_diff_${{field}}`] || 0) > Number(row.threshold_pct || 0) ? 'bad' : 'good'}}">${{pct(row[`pct_diff_${{field}}`])}}</span></td>`).join('');
         const previousConfirmed = `<td>${{row.previous_confirmed_key || ''}}<br>Local ${{fmt(row.previous_confirmed_local_close)}}<br>Yahoo ${{fmt(row.previous_confirmed_reference_close)}}</td>`;
         const nextConfirmed = `<td>${{row.next_confirmed_key || ''}}<br>Local ${{fmt(row.next_confirmed_local_close)}}<br>Yahoo ${{fmt(row.next_confirmed_reference_close)}}</td>`;
-        return `<tr class="${{klass}}"><td>${{row.symbol}}</td><td>${{row.frequency}}</td><td>${{row.comparison_key}}</td><td>${{pct(row.max_pct_diff)}}</td>${{previousConfirmed}}${{fields}}${{nextConfirmed}}<td><span class="choice"><label><input type="radio" name="${{keyFor(row)}}" value="local" ${{choice === 'local' ? 'checked' : ''}}>Local</label><label><input type="radio" name="${{keyFor(row)}}" value="yahoo" ${{choice === 'yahoo' ? 'checked' : ''}}>Yahoo</label><label><input type="radio" name="${{keyFor(row)}}" value="review" ${{choice === 'review' ? 'checked' : ''}}>Review</label></span></td></tr>`;
+        const auto = `<td><span class="${{row.auto_decision === 'yahoo' ? 'warn' : row.auto_decision === 'local' ? 'good' : 'bad'}}">${{row.auto_decision || ''}}</span><br>${{row.auto_reason || ''}}</td>`;
+        return `<tr class="${{klass}}"><td>${{row.symbol}}</td><td>${{row.frequency}}</td><td>${{row.comparison_key}}</td><td>${{pct(row.max_pct_diff)}}</td>${{auto}}${{previousConfirmed}}${{fields}}${{nextConfirmed}}<td><span class="choice"><label><input type="radio" name="${{keyFor(row)}}" value="local" ${{choice === 'local' ? 'checked' : ''}}>Local</label><label><input type="radio" name="${{keyFor(row)}}" value="yahoo" ${{choice === 'yahoo' ? 'checked' : ''}}>Yahoo</label><label><input type="radio" name="${{keyFor(row)}}" value="review" ${{choice === 'review' ? 'checked' : ''}}>Review</label></span></td></tr>`;
       }}).join('') + '</tbody>';
       table.querySelectorAll('input[type="radio"]').forEach(input => input.addEventListener('change', event => {{ decisions.set(event.target.name, event.target.value); }}));
     }}
@@ -1086,10 +1534,10 @@ def dashboard_html(payload):
       return /[",\\n]/.test(text) ? `"${{text.replaceAll('"', '""')}}"` : text;
     }}
     function downloadDecisions() {{
-      const header = ['symbol','frequency','comparison_key','decision','approved','max_pct_diff','local_open','reference_open','local_high','reference_high','local_low','reference_low','local_close','reference_close'];
+      const header = ['symbol','frequency','comparison_key','decision','auto_decision','auto_reason','approved','max_pct_diff','local_neighbor_distance','reference_neighbor_distance','local_open','reference_open','local_high','reference_high','local_low','reference_low','local_close','reference_close'];
       const lines = [header.join(',')];
       selectedDecisionRows().forEach(row => {{
-        const values = [row.symbol,row.frequency,row.comparison_key,row.decision,row.approved,row.max_pct_diff,row.local_open,row.reference_open,row.local_high,row.reference_high,row.local_low,row.reference_low,row.local_close,row.reference_close];
+        const values = [row.symbol,row.frequency,row.comparison_key,row.decision,row.auto_decision,row.auto_reason,row.approved,row.max_pct_diff,row.local_neighbor_distance,row.reference_neighbor_distance,row.local_open,row.reference_open,row.local_high,row.reference_high,row.local_low,row.reference_low,row.local_close,row.reference_close];
         lines.push(values.map(csvEscape).join(','));
       }});
       const blob = new Blob([lines.join('\\n')], {{ type: 'text/csv' }});
@@ -1133,7 +1581,8 @@ def dashboard_html(payload):
       URL.revokeObjectURL(url);
     }}
     function selectedDecisionRows() {{
-      return DATA.differences.map(row => ({{ ...row, decision: sourceChoice(row) }}));
+      const sourceRows = DATA.autoReview && DATA.autoReview.length ? DATA.autoReview : DATA.differences;
+      return sourceRows.map(row => ({{ ...row, decision: sourceChoice(row) }}));
     }}
     async function applyDecisions() {{
       const status = document.getElementById('apply-status');
@@ -1163,43 +1612,46 @@ def dashboard_html(payload):
     document.getElementById('download-selected-bars').addEventListener('click', downloadSelectedBars);
     document.getElementById('apply-decisions').addEventListener('click', applyDecisions);
     document.getElementById('apply-status').innerHTML = DATA.serverEnabled ? 'Server mode: Apply selected changes will update local market data and write reviewed_bars.csv.' : 'Static dashboard mode: choices can be downloaded, but direct updates require <code>--serve-dashboard</code>.';
+    if (DATA.autoApplyResult && DATA.autoApplyResult.updated_bars) {{
+      document.getElementById('apply-status').innerHTML = `Auto-applied ${{DATA.autoApplyResult.updated_bars}} bars and marked ${{DATA.autoApplyResult.reviewed_bars}} bars reviewed. Reviewed file: ${{DATA.autoApplyResult.reviewed_file || ''}}`;
+    }}
     if ((DATA.totalReconciliationRows || 0) > DATA.differences.length) {{
       document.getElementById('apply-status').innerHTML += ` Showing the top ${{DATA.differences.length}} review rows sorted by failed/largest difference. Increase with <code>--dashboard-max-rows</code>.`;
     }}
     renderCards();
     renderHeatmap();
     renderSummary();
+    renderSimpleTable('timezone-table', DATA.timezoneAlignment, ['symbol','frequency','local_bars','reference_bars','exact_utc_matches','best_shift_minutes','best_shift_matches','status','detail']);
     renderDifferences();
     renderSimpleTable('missing-table', DATA.missing, ['symbol','frequency','comparison_key','missing_from']);
     if ((DATA.totalMissingRows || 0) > DATA.missing.length) {{
       const table = document.getElementById('missing-table');
       table.insertAdjacentHTML('beforebegin', `<div class="subtle" style="padding:0 0 8px;">Showing ${{DATA.missing.length}} / ${{DATA.totalMissingRows}} missing-bar rows. Increase with <code>--dashboard-max-rows</code>.</div>`);
     }}
+    renderSimpleTable('auto-review-table', DATA.autoReview, ['symbol','frequency','comparison_key','auto_decision','auto_reason','local_neighbor_distance','reference_neighbor_distance','previous_confirmed_key','next_confirmed_key','local_close','reference_close']);
     renderSimpleTable('duplicate-table', DATA.duplicates, ['symbol','frequency','comparison_key','timestamp','open','high','low','close']);
   </script>
 </body>
 </html>"""
 
 
-def validate_market_data(
-    source_dir=DEFAULT_SOURCE_DIR,
-    output_dir=DEFAULT_OUTPUT_DIR,
+def collect_validation_data(
+    source_dir,
     symbols=None,
     frequencies=None,
     threshold_pct=DEFAULT_THRESHOLD_PCT,
     start=None,
     end=None,
     reference_fetcher=fetch_yahoo_bars,
-    dashboard_max_rows=DEFAULT_DASHBOARD_MAX_ROWS,
 ):
     symbols = symbols or DEFAULT_SYMBOLS
     frequencies = frequencies or ["daily", "5min"]
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     all_differences = []
     all_missing = []
     all_duplicates = []
     all_summary = []
+    all_auto_review = []
+    all_timezone_alignment = []
 
     for raw_symbol in symbols:
         symbol = normalize_symbol(raw_symbol)
@@ -1225,22 +1677,100 @@ def validate_market_data(
                 symbol=symbol,
                 frequency=frequency,
             )
+            auto_review = build_auto_review_decisions(
+                differences=differences,
+                missing=missing,
+                local_bars=local_bars,
+                reference_bars=reference_bars,
+                symbol=symbol,
+                frequency=frequency,
+            )
+            timezone_alignment = build_timezone_alignment_report(
+                local_bars=local_bars,
+                reference_bars=reference_bars,
+                symbol=symbol,
+                frequency=frequency,
+            )
 
             all_differences.append(differences)
             all_missing.append(missing)
             all_summary.append(summary)
+            all_auto_review.append(auto_review)
+            all_timezone_alignment.append(timezone_alignment)
 
             if len(duplicates) > 0:
                 all_duplicates.append(duplicates)
 
-    differences = pd.concat(all_differences, ignore_index=True)
-    missing = pd.concat(all_missing, ignore_index=True)
-    summary = pd.concat(all_summary, ignore_index=True)
-    duplicates = (
-        pd.concat(all_duplicates, ignore_index=True)
-        if all_duplicates
-        else pd.DataFrame(columns=DUPLICATE_COLUMNS)
+    return {
+        "differences": pd.concat(all_differences, ignore_index=True),
+        "missing": pd.concat(all_missing, ignore_index=True),
+        "summary": pd.concat(all_summary, ignore_index=True),
+        "duplicates": (
+            pd.concat(all_duplicates, ignore_index=True)
+            if all_duplicates
+            else pd.DataFrame(columns=DUPLICATE_COLUMNS)
+        ),
+        "auto_review": (
+            pd.concat(all_auto_review, ignore_index=True)
+            if all_auto_review
+            else pd.DataFrame(columns=AUTO_REVIEW_COLUMNS + ["decision"])
+        ),
+        "timezone_alignment": (
+            pd.concat(all_timezone_alignment, ignore_index=True)
+            if all_timezone_alignment
+            else pd.DataFrame(columns=TIMEZONE_ALIGNMENT_COLUMNS)
+        ),
+    }
+
+
+def validate_market_data(
+    source_dir=DEFAULT_SOURCE_DIR,
+    output_dir=DEFAULT_OUTPUT_DIR,
+    symbols=None,
+    frequencies=None,
+    threshold_pct=DEFAULT_THRESHOLD_PCT,
+    start=None,
+    end=None,
+    reference_fetcher=fetch_yahoo_bars,
+    dashboard_max_rows=DEFAULT_DASHBOARD_MAX_ROWS,
+    auto_apply_decisions=False,
+):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result = collect_validation_data(
+        source_dir=source_dir,
+        symbols=symbols,
+        frequencies=frequencies,
+        threshold_pct=threshold_pct,
+        start=start,
+        end=end,
+        reference_fetcher=reference_fetcher,
     )
+    auto_apply_result = {}
+
+    if auto_apply_decisions:
+        auto_apply_result = apply_auto_review_decisions(
+            source_dir=source_dir,
+            auto_review=result["auto_review"],
+        )
+
+        if auto_apply_result.get("updated_bars", 0) > 0:
+            result = collect_validation_data(
+                source_dir=source_dir,
+                symbols=symbols,
+                frequencies=frequencies,
+                threshold_pct=threshold_pct,
+                start=start,
+                end=end,
+                reference_fetcher=reference_fetcher,
+            )
+
+    summary = result["summary"]
+    differences = result["differences"]
+    missing = result["missing"]
+    duplicates = result["duplicates"]
+    auto_review = result["auto_review"]
+    timezone_alignment = result["timezone_alignment"]
     heatmap_path = save_heatmap(summary, output_dir)
     dashboard_path = write_validation_dashboard(
         output_dir=output_dir,
@@ -1248,6 +1778,9 @@ def validate_market_data(
         differences=differences,
         missing=missing,
         duplicates=duplicates,
+        auto_review=auto_review,
+        timezone_alignment=timezone_alignment,
+        auto_apply_result=auto_apply_result,
         heatmap_path=heatmap_path,
         dashboard_max_rows=dashboard_max_rows,
     )
@@ -1256,12 +1789,17 @@ def validate_market_data(
     differences.to_csv(output_dir / "price_differences.csv", index=False)
     missing.to_csv(output_dir / "missing_bars.csv", index=False)
     duplicates.to_csv(output_dir / "duplicate_bars.csv", index=False)
+    auto_review.to_csv(output_dir / "auto_review_decisions.csv", index=False)
+    timezone_alignment.to_csv(output_dir / "timezone_alignment.csv", index=False)
 
     return {
         "summary": summary,
         "differences": differences,
         "missing": missing,
         "duplicates": duplicates,
+        "auto_review": auto_review,
+        "timezone_alignment": timezone_alignment,
+        "auto_apply_result": auto_apply_result,
         "heatmap_path": heatmap_path,
         "dashboard_path": dashboard_path,
     }
@@ -1426,6 +1964,14 @@ def parse_args():
             "to embed all rows."
         ),
     )
+    parser.add_argument(
+        "--auto-apply-decisions",
+        action="store_true",
+        help=(
+            "Automatically apply auto-review decisions marked local or Yahoo "
+            "and mark those bars reviewed before writing the dashboard."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -1441,6 +1987,7 @@ def main():
         start=args.start,
         end=args.end,
         dashboard_max_rows=args.dashboard_max_rows,
+        auto_apply_decisions=args.auto_apply_decisions,
     )
     summary = result["summary"]
     approved_count = int(summary["approved"].fillna(False).sum())
@@ -1453,6 +2000,15 @@ def main():
     print(f"Wrote: {Path(args.output_dir) / 'price_differences.csv'}")
     print(f"Wrote: {Path(args.output_dir) / 'missing_bars.csv'}")
     print(f"Wrote: {Path(args.output_dir) / 'duplicate_bars.csv'}")
+    print(f"Wrote: {Path(args.output_dir) / 'auto_review_decisions.csv'}")
+    print(f"Wrote: {Path(args.output_dir) / 'timezone_alignment.csv'}")
+
+    if result["auto_apply_result"]:
+        print(
+            "Auto-applied "
+            f"{result['auto_apply_result'].get('updated_bars', 0)} bars "
+            "from auto-review decisions."
+        )
 
     if result["heatmap_path"]:
         print(f"Wrote: {result['heatmap_path']}")
@@ -1467,6 +2023,9 @@ def main():
                 differences=result["differences"],
                 missing=result["missing"],
                 duplicates=result["duplicates"],
+                auto_review=result["auto_review"],
+                timezone_alignment=result["timezone_alignment"],
+                auto_apply_result=result["auto_apply_result"],
                 heatmap_path=result["heatmap_path"],
                 server_enabled=True,
                 dashboard_max_rows=args.dashboard_max_rows,

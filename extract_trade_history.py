@@ -1,3 +1,4 @@
+import argparse
 import os
 import csv
 from io import StringIO
@@ -480,17 +481,49 @@ def update_master_cleaned_trades(new_trades, master_file, starting_equity):
     )
 
 
-def main():
+def output_paths(output_dir):
+    return {
+        "cleaned": f"{output_dir}/cleaned_tos_data.csv",
+        "master": f"{output_dir}/master_cleaned_tos_data.csv",
+        "pnl_chart": f"{output_dir}/pnl_chart.png",
+        "equity_curve": f"{output_dir}/equity_curve.csv",
+        "summary_stats": f"{output_dir}/summary_statistics.csv",
+    }
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Extract, enrich, and summarize Thinkorswim account trade "
+            "history exports."
+        )
+    )
+    parser.add_argument(
+        "--input",
+        default=INPUT_FILE,
+        help="Path to the raw Thinkorswim account statement CSV.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=OUTPUT_DIR,
+        help="Directory where cleaned trade outputs are written.",
+    )
+
+    return parser.parse_args()
+
+
+def main(input_file=INPUT_FILE, output_dir=OUTPUT_DIR):
+    paths = output_paths(output_dir)
 
     os.makedirs(
-        OUTPUT_DIR,
+        output_dir,
         exist_ok=True,
     )
 
     #
     # Read raw file
     #
-    with open(INPUT_FILE, "r") as f:
+    with open(input_file, "r") as f:
         lines = f.readlines()
 
     #
@@ -618,12 +651,12 @@ def main():
     df = add_margin_return_columns(df)
 
     master_starting_equity = get_master_starting_equity(
-        MASTER_OUTPUT_FILE,
+        paths["master"],
         starting_equity,
     )
     master_df = update_master_cleaned_trades(
         df,
-        MASTER_OUTPUT_FILE,
+        paths["master"],
         master_starting_equity,
     )
     equity_curve = build_equity_curve(master_df)
@@ -633,47 +666,51 @@ def main():
     # Save output
     #
     df.to_csv(
-        OUTPUT_FILE,
+        paths["cleaned"],
         index=False
     )
 
     master_df.to_csv(
-        MASTER_OUTPUT_FILE,
+        paths["master"],
         index=False,
     )
 
-    save_pnl_chart(master_df)
+    save_pnl_chart(master_df, output_file=paths["pnl_chart"])
 
     equity_curve.to_csv(
-        EQUITY_CURVE_FILE,
+        paths["equity_curve"],
         index=False,
     )
 
     summary_statistics.to_csv(
-        SUMMARY_STATS_FILE,
+        paths["summary_stats"],
         index=False,
     )
 
     print(
-        f"Saved enriched trade data to {OUTPUT_FILE}"
+        f"Saved enriched trade data to {paths['cleaned']}"
     )
 
     print(
-        f"Saved master cleaned trade data to {MASTER_OUTPUT_FILE}"
+        f"Saved master cleaned trade data to {paths['master']}"
     )
 
     print(
-        f"Saved PnL chart to {PNL_PLOT_FILE}"
+        f"Saved PnL chart to {paths['pnl_chart']}"
     )
 
     print(
-        f"Saved equity curve to {EQUITY_CURVE_FILE}"
+        f"Saved equity curve to {paths['equity_curve']}"
     )
 
     print(
-        f"Saved summary statistics to {SUMMARY_STATS_FILE}"
+        f"Saved summary statistics to {paths['summary_stats']}"
     )
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(
+        input_file=args.input,
+        output_dir=args.output_dir,
+    )

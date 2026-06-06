@@ -16,16 +16,48 @@ import pandas as pd
 
 DEFAULT_SYMBOLS = [
     "/ES",
-    "/6E",
-    "/GC",
-    "/ZW",
+    "/NQ",
+    "/RTY",
+    "/YM",
+    "/ZB",
     "/ZN",
+    "/ZF",
+    "/ZT",
+    "/6E",
+    "/6J",
+    "/6B",
+    "/6A",
+    "/6C",
+    "/6S",
+    "/GC",
+    "/SI",
+    "/HG",
+    "/PL",
     "/CL",
+    "/NG",
+    "/RB",
+    "/HO",
+    "/ZC",
+    "/ZS",
+    "/ZM",
+    "/ZL",
+    "/ZW",
+    "/LE",
+    "/HE",
+    "/KC",
+    "/SB",
+    "/CT",
+    "/CC",
 ]
 DEFAULT_OUTPUT_DIR = Path("data/market_data")
 DEFAULT_PROVIDER = "csv"
 SUPPORTED_FREQUENCIES = {"daily", "5min"}
 REVIEWED_BARS_FILE = "reviewed_bars.csv"
+QUALITY_DIR = "quality"
+INTEGRITY_REPORT_FILE = "market_data_integrity.csv"
+DAILY_INTRADAY_REPORT_FILE = "daily_intraday_quality.csv"
+DAILY_INTRADAY_FIX_FILE = "daily_intraday_fix_candidates.csv"
+QUALITY_SUMMARY_FILE = "quality_summary.csv"
 SCHWAB_BASE_URL = "https://api.schwabapi.com/marketdata/v1"
 SCHWAB_AUTHORIZE_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 SCHWAB_TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
@@ -38,26 +70,167 @@ FUTURES_PRODUCTS = {
     "/ES": {
         "name": "E-mini S&P 500",
         "exchange": "CME",
+        "category": "equity_index",
     },
-    "/6E": {
-        "name": "Euro FX",
+    "/NQ": {
+        "name": "E-mini Nasdaq-100",
         "exchange": "CME",
+        "category": "equity_index",
     },
-    "/GC": {
-        "name": "Gold",
-        "exchange": "COMEX",
+    "/RTY": {
+        "name": "E-mini Russell 2000",
+        "exchange": "CME",
+        "category": "equity_index",
     },
-    "/ZW": {
-        "name": "Chicago SRW Wheat",
+    "/YM": {
+        "name": "E-mini Dow",
         "exchange": "CBOT",
+        "category": "equity_index",
+    },
+    "/ZB": {
+        "name": "30-Year U.S. Treasury Bond",
+        "exchange": "CBOT",
+        "category": "rates",
     },
     "/ZN": {
         "name": "10-Year T-Note",
         "exchange": "CBOT",
+        "category": "rates",
+    },
+    "/ZF": {
+        "name": "5-Year T-Note",
+        "exchange": "CBOT",
+        "category": "rates",
+    },
+    "/ZT": {
+        "name": "2-Year T-Note",
+        "exchange": "CBOT",
+        "category": "rates",
+    },
+    "/6E": {
+        "name": "Euro FX",
+        "exchange": "CME",
+        "category": "currency",
+    },
+    "/6J": {
+        "name": "Japanese Yen",
+        "exchange": "CME",
+        "category": "currency",
+    },
+    "/6B": {
+        "name": "British Pound",
+        "exchange": "CME",
+        "category": "currency",
+    },
+    "/6A": {
+        "name": "Australian Dollar",
+        "exchange": "CME",
+        "category": "currency",
+    },
+    "/6C": {
+        "name": "Canadian Dollar",
+        "exchange": "CME",
+        "category": "currency",
+    },
+    "/6S": {
+        "name": "Swiss Franc",
+        "exchange": "CME",
+        "category": "currency",
+    },
+    "/GC": {
+        "name": "Gold",
+        "exchange": "COMEX",
+        "category": "metal",
+    },
+    "/SI": {
+        "name": "Silver",
+        "exchange": "COMEX",
+        "category": "metal",
+    },
+    "/HG": {
+        "name": "Copper",
+        "exchange": "COMEX",
+        "category": "metal",
+    },
+    "/PL": {
+        "name": "Platinum",
+        "exchange": "NYMEX",
+        "category": "metal",
     },
     "/CL": {
         "name": "WTI Crude Oil",
         "exchange": "NYMEX",
+        "category": "energy",
+    },
+    "/NG": {
+        "name": "Henry Hub Natural Gas",
+        "exchange": "NYMEX",
+        "category": "energy",
+    },
+    "/RB": {
+        "name": "RBOB Gasoline",
+        "exchange": "NYMEX",
+        "category": "energy",
+    },
+    "/HO": {
+        "name": "NY Harbor ULSD",
+        "exchange": "NYMEX",
+        "category": "energy",
+    },
+    "/ZC": {
+        "name": "Corn",
+        "exchange": "CBOT",
+        "category": "agriculture",
+    },
+    "/ZS": {
+        "name": "Soybeans",
+        "exchange": "CBOT",
+        "category": "agriculture",
+    },
+    "/ZM": {
+        "name": "Soybean Meal",
+        "exchange": "CBOT",
+        "category": "agriculture",
+    },
+    "/ZL": {
+        "name": "Soybean Oil",
+        "exchange": "CBOT",
+        "category": "agriculture",
+    },
+    "/ZW": {
+        "name": "Chicago SRW Wheat",
+        "exchange": "CBOT",
+        "category": "agriculture",
+    },
+    "/LE": {
+        "name": "Live Cattle",
+        "exchange": "CME",
+        "category": "agriculture",
+    },
+    "/HE": {
+        "name": "Lean Hogs",
+        "exchange": "CME",
+        "category": "agriculture",
+    },
+    "/KC": {
+        "name": "Coffee",
+        "exchange": "ICE",
+        "category": "soft",
+    },
+    "/SB": {
+        "name": "Sugar No. 11",
+        "exchange": "ICE",
+        "category": "soft",
+    },
+    "/CT": {
+        "name": "Cotton No. 2",
+        "exchange": "ICE",
+        "category": "soft",
+    },
+    "/CC": {
+        "name": "Cocoa",
+        "exchange": "ICE",
+        "category": "soft",
     },
 }
 
@@ -83,6 +256,32 @@ REVIEWED_COLUMNS = [
     "selected_source",
     "reviewed_at",
 ]
+INTEGRITY_COLUMNS = [
+    "symbol",
+    "frequency",
+    "timestamp",
+    "date",
+    "issue_type",
+    "field",
+    "value",
+    "expected",
+    "severity",
+    "auto_fix",
+]
+DAILY_INTRADAY_COLUMNS = [
+    "symbol",
+    "date",
+    "field",
+    "daily_value",
+    "intraday_value",
+    "abs_diff",
+    "pct_diff",
+    "threshold_pct",
+    "intraday_bars",
+    "severity",
+    "auto_fix",
+]
+DAILY_FIX_CANDIDATE_COLUMNS = CANONICAL_COLUMNS + ["intraday_bars"]
 
 
 def normalize_symbol(symbol):
@@ -339,6 +538,359 @@ def append_market_data(existing, incoming, reviewed_bars=None):
     return combined[CANONICAL_COLUMNS].reset_index(drop=True)
 
 
+def build_integrity_report(bars):
+    if bars is None or len(bars) == 0:
+        return pd.DataFrame(columns=INTEGRITY_COLUMNS)
+
+    working = bars.copy()
+    timestamps = pd.to_datetime(
+        working["timestamp"],
+        utc=True,
+        errors="coerce",
+    )
+    rows = []
+
+    for index, row in working.iterrows():
+        symbol = normalize_symbol(row.get("symbol"))
+        frequency = normalize_frequency(row.get("frequency"))
+        timestamp = (
+            timestamps.loc[index].strftime("%Y-%m-%dT%H:%M:%SZ")
+            if not pd.isna(timestamps.loc[index])
+            else ""
+        )
+        date = str(row.get("date", ""))[:10]
+        prices = {
+            field: pd.to_numeric(row.get(field), errors="coerce")
+            for field in ["open", "high", "low", "close"]
+        }
+
+        for field, value in prices.items():
+            if pd.isna(value):
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "frequency": frequency,
+                        "timestamp": timestamp,
+                        "date": date,
+                        "issue_type": "missing_ohlc",
+                        "field": field,
+                        "value": value,
+                        "expected": "numeric OHLC value",
+                        "severity": "error",
+                        "auto_fix": "drop_bar",
+                    }
+                )
+            elif value <= 0:
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "frequency": frequency,
+                        "timestamp": timestamp,
+                        "date": date,
+                        "issue_type": "non_positive_price",
+                        "field": field,
+                        "value": value,
+                        "expected": "> 0",
+                        "severity": "error",
+                        "auto_fix": "drop_bar",
+                    }
+                )
+
+        clean_prices = [
+            value
+            for value in prices.values()
+            if pd.notna(value) and value > 0
+        ]
+
+        if len(clean_prices) != 4:
+            continue
+
+        expected_high = max(clean_prices)
+        expected_low = min(clean_prices)
+
+        if prices["high"] < expected_high:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "frequency": frequency,
+                    "timestamp": timestamp,
+                    "date": date,
+                    "issue_type": "high_below_ohlc",
+                    "field": "high",
+                    "value": prices["high"],
+                    "expected": expected_high,
+                    "severity": "error",
+                    "auto_fix": "set_high_to_max_ohlc",
+                }
+            )
+
+        if prices["low"] > expected_low:
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "frequency": frequency,
+                    "timestamp": timestamp,
+                    "date": date,
+                    "issue_type": "low_above_ohlc",
+                    "field": "low",
+                    "value": prices["low"],
+                    "expected": expected_low,
+                    "severity": "error",
+                    "auto_fix": "set_low_to_min_ohlc",
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=INTEGRITY_COLUMNS)
+
+    return pd.DataFrame(rows).reindex(columns=INTEGRITY_COLUMNS)
+
+
+def auto_fix_integrity_issues(bars):
+    if bars is None or len(bars) == 0:
+        return empty_bars_frame(), pd.DataFrame(columns=INTEGRITY_COLUMNS)
+
+    fixed = bars.copy()
+    before_report = build_integrity_report(fixed)
+
+    for column in ["open", "high", "low", "close"]:
+        fixed[column] = pd.to_numeric(fixed[column], errors="coerce")
+
+    invalid_mask = fixed[["open", "high", "low", "close"]].isna().any(axis=1)
+    invalid_mask = invalid_mask | (fixed[["open", "high", "low", "close"]] <= 0).any(axis=1)
+    fixed = fixed[~invalid_mask].copy()
+
+    if len(fixed) > 0:
+        fixed["high"] = fixed[["open", "high", "low", "close"]].max(axis=1)
+        fixed["low"] = fixed[["open", "high", "low", "close"]].min(axis=1)
+
+    return fixed[CANONICAL_COLUMNS].reset_index(drop=True), before_report
+
+
+def aggregate_intraday_to_daily(intraday_bars):
+    if intraday_bars is None or len(intraday_bars) == 0:
+        return pd.DataFrame(columns=[
+            "symbol",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "intraday_bars",
+        ])
+
+    working = intraday_bars.copy()
+    working["timestamp"] = pd.to_datetime(
+        working["timestamp"],
+        utc=True,
+        errors="coerce",
+    )
+    working = working[working["timestamp"].notna()].copy()
+    working = working.sort_values(["symbol", "timestamp"])
+
+    for column in ["open", "high", "low", "close"]:
+        working[column] = pd.to_numeric(working[column], errors="coerce")
+
+    working = working.dropna(subset=["open", "high", "low", "close"])
+    working["symbol"] = working["symbol"].map(normalize_symbol)
+    working["date"] = working["timestamp"].dt.date.astype(str)
+
+    if len(working) == 0:
+        return pd.DataFrame(columns=[
+            "symbol",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "intraday_bars",
+        ])
+
+    aggregated = working.groupby(["symbol", "date"], as_index=False).agg(
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        intraday_bars=("close", "size"),
+    )
+
+    return aggregated
+
+
+def build_daily_intraday_quality_report(
+    daily_bars,
+    intraday_bars,
+    threshold_pct=0.25,
+):
+    if daily_bars is None or len(daily_bars) == 0:
+        return pd.DataFrame(columns=DAILY_INTRADAY_COLUMNS)
+
+    intraday_daily = aggregate_intraday_to_daily(intraday_bars)
+
+    if len(intraday_daily) == 0:
+        return pd.DataFrame(columns=DAILY_INTRADAY_COLUMNS)
+
+    daily = daily_bars.copy()
+    daily["symbol"] = daily["symbol"].map(normalize_symbol)
+    daily["date"] = pd.to_datetime(
+        daily["timestamp"],
+        utc=True,
+        errors="coerce",
+    ).dt.date.astype(str)
+
+    for column in ["open", "high", "low", "close"]:
+        daily[column] = pd.to_numeric(daily[column], errors="coerce")
+
+    merged = pd.merge(
+        daily[["symbol", "date", "open", "high", "low", "close"]],
+        intraday_daily,
+        on=["symbol", "date"],
+        how="inner",
+        suffixes=("_daily", "_intraday"),
+    )
+    rows = []
+
+    for _, row in merged.iterrows():
+        for field in ["open", "high", "low", "close"]:
+            daily_value = row[f"{field}_daily"]
+            intraday_value = row[f"{field}_intraday"]
+
+            if pd.isna(daily_value) or pd.isna(intraday_value):
+                pct_diff = np.nan
+                abs_diff = np.nan
+            else:
+                abs_diff = daily_value - intraday_value
+                denominator = abs(intraday_value)
+                pct_diff = (
+                    abs(abs_diff) / denominator * 100
+                    if denominator != 0
+                    else np.nan
+                )
+
+            if pd.isna(pct_diff) or pct_diff <= threshold_pct:
+                continue
+
+            rows.append(
+                {
+                    "symbol": row["symbol"],
+                    "date": row["date"],
+                    "field": field,
+                    "daily_value": daily_value,
+                    "intraday_value": intraday_value,
+                    "abs_diff": abs_diff,
+                    "pct_diff": pct_diff,
+                    "threshold_pct": threshold_pct,
+                    "intraday_bars": row["intraday_bars"],
+                    "severity": "warning",
+                    "auto_fix": "candidate_daily_from_intraday",
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=DAILY_INTRADAY_COLUMNS)
+
+    return pd.DataFrame(rows).reindex(columns=DAILY_INTRADAY_COLUMNS)
+
+
+def build_daily_intraday_fix_candidates(daily_bars, intraday_bars, threshold_pct=0.25):
+    report = build_daily_intraday_quality_report(
+        daily_bars=daily_bars,
+        intraday_bars=intraday_bars,
+        threshold_pct=threshold_pct,
+    )
+
+    if len(report) == 0:
+        return pd.DataFrame(columns=DAILY_FIX_CANDIDATE_COLUMNS)
+
+    candidate_keys = set(zip(report["symbol"], report["date"]))
+    intraday_daily = aggregate_intraday_to_daily(intraday_bars)
+    candidates = intraday_daily[
+        [
+            (row["symbol"], row["date"]) in candidate_keys
+            for _, row in intraday_daily.iterrows()
+        ]
+    ].copy()
+
+    if len(candidates) == 0:
+        return pd.DataFrame(columns=DAILY_FIX_CANDIDATE_COLUMNS)
+
+    candidates["timestamp"] = pd.to_datetime(
+        candidates["date"],
+        utc=True,
+    ).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    candidates["frequency"] = "daily"
+    candidates["volume"] = pd.NA
+    candidates["open_interest"] = pd.NA
+    candidates["source"] = "candidate_from_5min"
+    candidates["retrieved_at"] = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+    return candidates[DAILY_FIX_CANDIDATE_COLUMNS].reset_index(drop=True)
+
+
+def apply_daily_intraday_fix_candidates(
+    output_dir,
+    candidates,
+    min_intraday_bars=50,
+):
+    if candidates is None or len(candidates) == 0:
+        return {"updated_bars": 0, "updated_files": 0}
+
+    output_dir = Path(output_dir)
+    working = candidates.copy()
+    working["intraday_bars"] = pd.to_numeric(
+        working.get("intraday_bars"),
+        errors="coerce",
+    ).fillna(0)
+    working = working[working["intraday_bars"] >= min_intraday_bars].copy()
+
+    if len(working) == 0:
+        return {"updated_bars": 0, "updated_files": 0}
+
+    updated_bars = 0
+    updated_files = 0
+
+    for symbol, group in working.groupby("symbol"):
+        output_path = output_file_for(output_dir, symbol, "daily")
+
+        if not output_path.exists():
+            continue
+
+        existing = pd.read_csv(output_path)
+        existing["timestamp"] = pd.to_datetime(
+            existing["timestamp"],
+            utc=True,
+            errors="coerce",
+        )
+        existing = existing[existing["timestamp"].notna()].copy()
+        existing["_date"] = existing["timestamp"].dt.date.astype(str)
+        group = group.copy()
+        group["_date"] = pd.to_datetime(
+            group["timestamp"],
+            utc=True,
+            errors="coerce",
+        ).dt.date.astype(str)
+        fix_dates = set(group["_date"])
+        existing = existing[~existing["_date"].isin(fix_dates)].drop(
+            columns=["_date"]
+        )
+        replacement = group[CANONICAL_COLUMNS]
+        combined = append_market_data(
+            existing,
+            replacement,
+            reviewed_bars=load_reviewed_bars(output_dir),
+        )
+        combined.to_csv(output_path, index=False)
+        updated_bars += len(replacement)
+        updated_files += 1
+
+    return {
+        "updated_bars": updated_bars,
+        "updated_files": updated_files,
+    }
+
+
 def save_market_data(output_dir, symbol, frequency, bars):
     output_path = output_file_for(output_dir, symbol, frequency)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -350,6 +902,7 @@ def save_market_data(output_dir, symbol, frequency, bars):
     )
     reviewed_bars = load_reviewed_bars(output_dir)
     combined = append_market_data(existing, bars, reviewed_bars=reviewed_bars)
+    combined, _ = auto_fix_integrity_issues(combined)
     combined.to_csv(output_path, index=False)
 
     return output_path, len(combined)
@@ -367,6 +920,7 @@ def write_symbol_manifest(output_dir, symbols):
                 "symbol",
                 "name",
                 "exchange",
+                "category",
             ],
         )
         writer.writeheader()
@@ -379,10 +933,177 @@ def write_symbol_manifest(output_dir, symbols):
                     "symbol": normalized,
                     "name": product.get("name", ""),
                     "exchange": product.get("exchange", ""),
+                    "category": product.get("category", ""),
                 }
             )
 
     return manifest_path
+
+
+def load_saved_market_data(output_dir, symbol, frequency):
+    path = output_file_for(output_dir, symbol, frequency)
+
+    if not path.exists():
+        return empty_bars_frame()
+
+    return pd.read_csv(path)
+
+
+def write_quality_reports(
+    output_dir,
+    symbols,
+    threshold_pct=0.25,
+    apply_daily_fixes=False,
+    min_intraday_bars=50,
+):
+    output_dir = Path(output_dir)
+    quality_dir = output_dir / QUALITY_DIR
+    quality_dir.mkdir(parents=True, exist_ok=True)
+    integrity_reports = []
+    daily_intraday_reports = []
+    fix_candidates = []
+    summary_rows = []
+
+    for symbol in symbols:
+        normalized = normalize_symbol(symbol)
+        daily = load_saved_market_data(output_dir, normalized, "daily")
+        intraday = load_saved_market_data(output_dir, normalized, "5min")
+
+        for frequency, bars in [("daily", daily), ("5min", intraday)]:
+            integrity = build_integrity_report(bars)
+            integrity_reports.append(integrity)
+            summary_rows.append(
+                {
+                    "symbol": normalized,
+                    "frequency": frequency,
+                    "check": "ohlc_integrity",
+                    "bars_checked": len(bars),
+                    "issues": len(integrity),
+                    "status": "passed" if len(integrity) == 0 else "failed",
+                }
+            )
+
+        daily_intraday = build_daily_intraday_quality_report(
+            daily_bars=daily,
+            intraday_bars=intraday,
+            threshold_pct=threshold_pct,
+        )
+        candidates = build_daily_intraday_fix_candidates(
+            daily_bars=daily,
+            intraday_bars=intraday,
+            threshold_pct=threshold_pct,
+        )
+        daily_intraday_reports.append(daily_intraday)
+        fix_candidates.append(candidates)
+        summary_rows.append(
+            {
+                "symbol": normalized,
+                "frequency": "daily_vs_5min",
+                "check": "daily_intraday_consistency",
+                "bars_checked": len(daily),
+                "issues": len(daily_intraday),
+                "status": (
+                    "passed" if len(daily_intraday) == 0 else "review_candidates"
+                ),
+            }
+        )
+
+    integrity_report = (
+        pd.concat(integrity_reports, ignore_index=True)
+        if integrity_reports
+        else pd.DataFrame(columns=INTEGRITY_COLUMNS)
+    )
+    daily_intraday_report = (
+        pd.concat(daily_intraday_reports, ignore_index=True)
+        if daily_intraday_reports
+        else pd.DataFrame(columns=DAILY_INTRADAY_COLUMNS)
+    )
+    daily_fix_candidates = (
+        pd.concat(fix_candidates, ignore_index=True)
+        if fix_candidates
+        else pd.DataFrame(columns=DAILY_FIX_CANDIDATE_COLUMNS)
+    )
+    apply_result = {}
+
+    if apply_daily_fixes:
+        apply_result = apply_daily_intraday_fix_candidates(
+            output_dir=output_dir,
+            candidates=daily_fix_candidates,
+            min_intraday_bars=min_intraday_bars,
+        )
+
+        if apply_result.get("updated_bars", 0) > 0:
+            refreshed = write_quality_reports(
+                output_dir=output_dir,
+                symbols=symbols,
+                threshold_pct=threshold_pct,
+                apply_daily_fixes=False,
+                min_intraday_bars=min_intraday_bars,
+            )
+            refreshed["apply_result"] = apply_result
+            return refreshed
+
+    summary = pd.DataFrame(summary_rows)
+
+    integrity_path = quality_dir / INTEGRITY_REPORT_FILE
+    daily_intraday_path = quality_dir / DAILY_INTRADAY_REPORT_FILE
+    fix_candidates_path = quality_dir / DAILY_INTRADAY_FIX_FILE
+    summary_path = quality_dir / QUALITY_SUMMARY_FILE
+
+    integrity_report.to_csv(integrity_path, index=False)
+    daily_intraday_report.to_csv(daily_intraday_path, index=False)
+    daily_fix_candidates.to_csv(fix_candidates_path, index=False)
+    summary.to_csv(summary_path, index=False)
+
+    return {
+        "summary": summary,
+        "integrity": integrity_report,
+        "daily_intraday": daily_intraday_report,
+        "daily_fix_candidates": daily_fix_candidates,
+        "apply_result": apply_result,
+        "summary_path": summary_path,
+        "integrity_path": integrity_path,
+        "daily_intraday_path": daily_intraday_path,
+        "fix_candidates_path": fix_candidates_path,
+    }
+
+
+def repair_saved_integrity(output_dir, symbols, frequencies=None):
+    output_dir = Path(output_dir)
+    frequencies = frequencies or ["daily", "5min"]
+    repaired_bars = 0
+    repaired_files = 0
+    issue_reports = []
+
+    for symbol in symbols:
+        for frequency in frequencies:
+            path = output_file_for(output_dir, symbol, frequency)
+
+            if not path.exists():
+                continue
+
+            bars = pd.read_csv(path)
+            fixed, report = auto_fix_integrity_issues(bars)
+            issue_reports.append(report)
+
+            if len(report) == 0:
+                continue
+
+            fixed.to_csv(path, index=False)
+            repaired_bars += len(report)
+            repaired_files += 1
+
+    issue_report = (
+        pd.concat(issue_reports, ignore_index=True)
+        if issue_reports
+        else pd.DataFrame(columns=INTEGRITY_COLUMNS)
+    )
+
+    return {
+        "repaired_issue_rows": repaired_bars,
+        "repaired_files": repaired_files,
+        "issues": issue_report,
+    }
 
 
 class CsvProvider:
@@ -735,6 +1456,14 @@ def parse_args():
         help="Directory where normalized market data files are written",
     )
     parser.add_argument(
+        "--quality-only",
+        action="store_true",
+        help=(
+            "Run local integrity and daily-vs-5min quality checks against "
+            "already saved market data without fetching provider data."
+        ),
+    )
+    parser.add_argument(
         "--start",
         help="Optional inclusive start date/time, e.g. 2026-01-01",
     )
@@ -771,13 +1500,38 @@ def parse_args():
             "Without this flag, Schwab mode uses the default shorter window."
         ),
     )
+    parser.add_argument(
+        "--quality-threshold-pct",
+        type=float,
+        default=0.25,
+        help=(
+            "Maximum allowed OHLC percentage difference when comparing daily "
+            "bars to daily bars aggregated from 5-minute data."
+        ),
+    )
+    parser.add_argument(
+        "--apply-daily-intraday-fixes",
+        action="store_true",
+        help=(
+            "Replace mismatched daily bars with OHLC aggregated from 5-minute "
+            "bars when enough intraday bars are available."
+        ),
+    )
+    parser.add_argument(
+        "--min-intraday-bars-for-daily-fix",
+        type=int,
+        default=50,
+        help=(
+            "Minimum number of 5-minute bars required before applying a "
+            "daily repair candidate."
+        ),
+    )
 
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    provider = create_provider(args)
     output_dir = Path(args.output_dir)
     symbols = [normalize_symbol(symbol) for symbol in args.symbols]
     frequencies = [
@@ -788,25 +1542,60 @@ def main():
     manifest_path = write_symbol_manifest(output_dir, symbols)
     print(f"Wrote symbol manifest: {manifest_path}")
 
-    for symbol in symbols:
-        for frequency in frequencies:
-            bars = provider.fetch_bars(
-                symbol=symbol,
-                frequency=frequency,
-                start=args.start,
-                end=args.end,
-            )
+    if not args.quality_only:
+        provider = create_provider(args)
 
-            output_path, row_count = save_market_data(
-                output_dir=output_dir,
-                symbol=symbol,
-                frequency=frequency,
-                bars=bars,
-            )
-            print(
-                f"{symbol} {frequency}: added {len(bars)} bars; "
-                f"{row_count} total rows -> {output_path}"
-            )
+        for symbol in symbols:
+            for frequency in frequencies:
+                bars = provider.fetch_bars(
+                    symbol=symbol,
+                    frequency=frequency,
+                    start=args.start,
+                    end=args.end,
+                )
+
+                output_path, row_count = save_market_data(
+                    output_dir=output_dir,
+                    symbol=symbol,
+                    frequency=frequency,
+                    bars=bars,
+                )
+                print(
+                    f"{symbol} {frequency}: added {len(bars)} bars; "
+                    f"{row_count} total rows -> {output_path}"
+                )
+
+    repair_result = repair_saved_integrity(
+        output_dir=output_dir,
+        symbols=symbols,
+        frequencies=frequencies,
+    )
+    if repair_result["repaired_issue_rows"]:
+        print(
+            "Repaired integrity issues: "
+            f"{repair_result['repaired_issue_rows']} issue rows across "
+            f"{repair_result['repaired_files']} files."
+        )
+
+    quality = write_quality_reports(
+        output_dir=output_dir,
+        symbols=symbols,
+        threshold_pct=args.quality_threshold_pct,
+        apply_daily_fixes=args.apply_daily_intraday_fixes,
+        min_intraday_bars=args.min_intraday_bars_for_daily_fix,
+    )
+    quality_issues = int(quality["summary"]["issues"].sum())
+    print(f"Wrote quality summary: {quality['summary_path']}")
+    print(f"Wrote integrity report: {quality['integrity_path']}")
+    print(f"Wrote daily-vs-5min report: {quality['daily_intraday_path']}")
+    print(f"Wrote daily repair candidates: {quality['fix_candidates_path']}")
+    if quality["apply_result"]:
+        print(
+            "Applied daily-vs-5min fixes: "
+            f"{quality['apply_result'].get('updated_bars', 0)} bars across "
+            f"{quality['apply_result'].get('updated_files', 0)} files."
+        )
+    print(f"Quality checks found {quality_issues} issue rows.")
 
 
 if __name__ == "__main__":
