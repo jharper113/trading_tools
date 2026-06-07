@@ -1,6 +1,6 @@
 # download_market_data.py
 
-Download or ingest futures market data and store normalized daily, 5-minute, and 60-minute bars locally.
+Download or ingest market data and store normalized daily, 5-minute, and 60-minute bars locally.
 
 ## Typical Uses
 
@@ -38,6 +38,15 @@ python download_market_data.py \
   --frequencies daily 5min 60min
 ```
 
+Download daily SPY data for the buy-and-hold benchmark:
+
+```bash
+python download_market_data.py \
+  --provider schwab \
+  --symbols SPY \
+  --frequencies daily
+```
+
 ## Outputs
 
 Normalized bars are written to `data/market_data/<frequency>/<symbol>.csv` by default.
@@ -54,7 +63,7 @@ The symbol manifest is written to `data/market_data/symbols.csv`.
 ## Flags
 
 `--symbols SYMBOLS [SYMBOLS ...]`
-: Futures roots or contract symbols to download. Omit this flag to use the full default futures universe.
+: Symbols to download, such as futures roots/contracts (`/ES`, `/6E`, `/GC`) or equities/ETFs (`SPY`). Omit this flag to use the full default futures universe.
 
 `--frequencies FREQUENCIES [FREQUENCIES ...]`
 : Frequencies to download or check. Supported values are `daily`, `5min`, and `60min`.

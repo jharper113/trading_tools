@@ -33,6 +33,7 @@ DEFAULT_OUTPUT_DIR = Path("output/market_data_validation")
 DEFAULT_THRESHOLD_PCT = 0.25
 DASHBOARD_FILE = "validation_dashboard.html"
 DEFAULT_DASHBOARD_MAX_ROWS = 1000
+DEFAULT_REFERENCE_FREQUENCIES = ["daily"]
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
 PRICE_COLUMNS = ["open", "high", "low", "close"]
 DIFFERENCE_COLUMNS = [
@@ -165,7 +166,10 @@ def yahoo_symbol_for(symbol):
     if symbol in YAHOO_FUTURES_SYMBOLS:
         return YAHOO_FUTURES_SYMBOLS[symbol]
 
-    return f"{symbol.lstrip('/')}=F"
+    if symbol.startswith("/"):
+        return f"{symbol.lstrip('/')}=F"
+
+    return symbol
 
 
 def yahoo_interval_for(frequency):
@@ -930,6 +934,167 @@ def filter_reviewed_auto_review(auto_review, reviewed_keys):
     return working[
         [key not in reviewed_keys for key in keys]
     ].reset_index(drop=True)
+
+
+def unreviewed_local_bars(local_bars, symbol, frequency, reviewed_keys):
+    local = normalize_for_comparison(local_bars, frequency)
+
+    if len(local) == 0 or not reviewed_keys:
+        return local
+
+    symbol = normalize_symbol(symbol)
+    frequency = normalize_frequency(frequency)
+    keys = list(
+        zip(
+            [symbol] * len(local),
+            [frequency] * len(local),
+            local["comparison_key"].astype(str),
+        )
+    )
+
+    return local[
+        [key not in reviewed_keys for key in keys]
+    ].reset_index(drop=True)
+
+
+def review_new_only_padding(frequency):
+    frequency = normalize_frequency(frequency)
+
+    if frequency == "daily":
+        return pd.Timedelta(days=7)
+
+    if frequency == "5min":
+        return pd.Timedelta(days=1)
+
+    return pd.Timedelta(days=3)
+
+
+def bounded_timestamp(value, fallback=None):
+    if value is None:
+        return fallback
+
+    timestamp = pd.to_datetime(
+        value,
+        utc=True,
+        errors="coerce",
+    )
+
+    if pd.isna(timestamp):
+        return fallback
+
+    return timestamp
+
+
+def format_fetch_timestamp(timestamp):
+    if timestamp is None or pd.isna(timestamp):
+        return None
+
+    return pd.Timestamp(timestamp).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def review_new_only_fetch_window(
+    local_bars,
+    symbol,
+    frequency,
+    reviewed_keys,
+    start=None,
+    end=None,
+):
+    unreviewed = unreviewed_local_bars(
+        local_bars,
+        symbol,
+        frequency,
+        reviewed_keys,
+    )
+
+    if len(unreviewed) == 0:
+        return {
+            "skip_reference_fetch": True,
+            "start": None,
+            "end": None,
+            "unreviewed_bars": 0,
+        }
+
+    timestamps = pd.to_datetime(
+        unreviewed["timestamp"],
+        utc=True,
+        errors="coerce",
+    ).dropna()
+
+    if timestamps.empty:
+        return {
+            "skip_reference_fetch": False,
+            "start": start,
+            "end": end,
+            "unreviewed_bars": len(unreviewed),
+        }
+
+    padding = review_new_only_padding(frequency)
+    fetch_start = timestamps.min() - padding
+    fetch_end = timestamps.max() + padding
+    user_start = bounded_timestamp(start)
+    user_end = bounded_timestamp(end)
+
+    if user_start is not None:
+        fetch_start = max(fetch_start, user_start)
+
+    if user_end is not None:
+        fetch_end = min(fetch_end, user_end)
+
+    return {
+        "skip_reference_fetch": False,
+        "start": format_fetch_timestamp(fetch_start),
+        "end": format_fetch_timestamp(fetch_end),
+        "unreviewed_bars": len(unreviewed),
+    }
+
+
+def skipped_review_new_only_summary(symbol, frequency, local_bars, threshold_pct):
+    local = normalize_for_comparison(local_bars, frequency)
+
+    return pd.DataFrame(
+        [
+            {
+                "symbol": normalize_symbol(symbol),
+                "frequency": normalize_frequency(frequency),
+                "local_bars": len(local),
+                "reference_bars": 0,
+                "matched_bars": 0,
+                "missing_local_bars": 0,
+                "missing_reference_bars": 0,
+                "max_pct_diff": np.nan,
+                "mean_pct_diff": np.nan,
+                "approved_bars": 0,
+                "failed_bars": 0,
+                "threshold_pct": threshold_pct,
+                "approved": True,
+            }
+        ]
+    )
+
+
+def skipped_reference_summary(symbol, frequency, local_bars, threshold_pct):
+    local = normalize_for_comparison(local_bars, frequency)
+
+    return pd.DataFrame(
+        [
+            {
+                "symbol": normalize_symbol(symbol),
+                "frequency": normalize_frequency(frequency),
+                "local_bars": len(local),
+                "reference_bars": 0,
+                "matched_bars": 0,
+                "missing_local_bars": 0,
+                "missing_reference_bars": 0,
+                "max_pct_diff": np.nan,
+                "mean_pct_diff": np.nan,
+                "approved_bars": 0,
+                "failed_bars": 0,
+                "threshold_pct": threshold_pct,
+                "approved": True,
+            }
+        ]
+    )
 
 
 def actionable_auto_review(auto_review):
@@ -1722,6 +1887,7 @@ def collect_validation_data(
     source_dir,
     symbols=None,
     frequencies=None,
+    reference_frequencies=None,
     threshold_pct=DEFAULT_THRESHOLD_PCT,
     start=None,
     end=None,
@@ -1731,6 +1897,14 @@ def collect_validation_data(
 ):
     symbols = symbols or DEFAULT_SYMBOLS
     frequencies = frequencies or ["daily", "5min", "60min"]
+    reference_frequencies = {
+        normalize_frequency(frequency)
+        for frequency in (
+            reference_frequencies
+            if reference_frequencies is not None
+            else DEFAULT_REFERENCE_FREQUENCIES
+        )
+    }
     total_jobs = len(symbols) * len(frequencies)
     completed_jobs = 0
     run_start = time.monotonic()
@@ -1750,48 +1924,132 @@ def collect_validation_data(
             frequency = normalize_frequency(raw_frequency)
             log_progress(
                 f"[{job_number}/{total_jobs}] Validating {symbol} "
-                f"{frequency}: loading local bars and fetching Yahoo..."
+                f"{frequency}: loading local bars..."
             )
             local_bars = load_local_bars(source_dir, symbol, frequency)
-            reference_bars = reference_fetcher(
-                symbol=symbol,
-                frequency=frequency,
-                start=start,
-                end=end,
-            )
-            differences, missing, summary = compare_market_data(
-                local_bars=local_bars,
-                reference_bars=reference_bars,
-                symbol=symbol,
-                frequency=frequency,
-                threshold_pct=threshold_pct,
-            )
             duplicates = find_duplicate_bars(
                 local_bars,
                 symbol=symbol,
                 frequency=frequency,
             )
-            auto_review = build_auto_review_decisions(
-                differences=differences,
-                missing=missing,
-                local_bars=local_bars,
-                reference_bars=reference_bars,
-                symbol=symbol,
-                frequency=frequency,
-            )
-            auto_review_total = len(auto_review)
-            if review_new_only:
-                auto_review = filter_reviewed_auto_review(
-                    auto_review,
-                    reviewed_keys or set(),
+
+            fetch_start = start
+            fetch_end = end
+            reviewed_skipped = 0
+            fetch_window = None
+            skip_reference = frequency not in reference_frequencies
+
+            if skip_reference:
+                log_progress(
+                    f"[{job_number}/{total_jobs}] Skipping Yahoo for "
+                    f"{symbol} {frequency}: frequency not selected for "
+                    "reference validation."
                 )
-            reviewed_skipped = auto_review_total - len(auto_review)
-            timezone_alignment = build_timezone_alignment_report(
-                local_bars=local_bars,
-                reference_bars=reference_bars,
-                symbol=symbol,
-                frequency=frequency,
-            )
+                reference_bars = pd.DataFrame(columns=[])
+                differences = pd.DataFrame(columns=DIFFERENCE_COLUMNS)
+                missing = pd.DataFrame(columns=MISSING_COLUMNS)
+                summary = skipped_reference_summary(
+                    symbol=symbol,
+                    frequency=frequency,
+                    local_bars=local_bars,
+                    threshold_pct=threshold_pct,
+                )
+                auto_review = pd.DataFrame(
+                    columns=AUTO_REVIEW_COLUMNS + ["decision"]
+                )
+                timezone_alignment = build_timezone_alignment_report(
+                    local_bars=pd.DataFrame(columns=[]),
+                    reference_bars=pd.DataFrame(columns=[]),
+                    symbol=symbol,
+                    frequency=frequency,
+                )
+            elif review_new_only:
+                fetch_window = review_new_only_fetch_window(
+                    local_bars=local_bars,
+                    symbol=symbol,
+                    frequency=frequency,
+                    reviewed_keys=reviewed_keys or set(),
+                    start=start,
+                    end=end,
+                )
+
+            if (
+                not skip_reference
+                and fetch_window is not None
+                and fetch_window["skip_reference_fetch"]
+            ):
+                log_progress(
+                    f"[{job_number}/{total_jobs}] Skipping Yahoo for "
+                    f"{symbol} {frequency}: no unreviewed local bars."
+                )
+                reference_bars = pd.DataFrame(columns=[])
+                differences = pd.DataFrame(columns=DIFFERENCE_COLUMNS)
+                missing = pd.DataFrame(columns=MISSING_COLUMNS)
+                summary = skipped_review_new_only_summary(
+                    symbol=symbol,
+                    frequency=frequency,
+                    local_bars=local_bars,
+                    threshold_pct=threshold_pct,
+                )
+                auto_review = pd.DataFrame(
+                    columns=AUTO_REVIEW_COLUMNS + ["decision"]
+                )
+                timezone_alignment = build_timezone_alignment_report(
+                    local_bars=pd.DataFrame(columns=[]),
+                    reference_bars=pd.DataFrame(columns=[]),
+                    symbol=symbol,
+                    frequency=frequency,
+                )
+            elif not skip_reference:
+                if fetch_window is not None:
+                    fetch_start = fetch_window["start"]
+                    fetch_end = fetch_window["end"]
+                    log_progress(
+                        f"[{job_number}/{total_jobs}] Fetching Yahoo for "
+                        f"{symbol} {frequency} around "
+                        f"{fetch_window['unreviewed_bars']} unreviewed "
+                        "local bars..."
+                    )
+                else:
+                    log_progress(
+                        f"[{job_number}/{total_jobs}] Fetching Yahoo for "
+                        f"{symbol} {frequency}..."
+                    )
+
+                reference_bars = reference_fetcher(
+                    symbol=symbol,
+                    frequency=frequency,
+                    start=fetch_start,
+                    end=fetch_end,
+                )
+                differences, missing, summary = compare_market_data(
+                    local_bars=local_bars,
+                    reference_bars=reference_bars,
+                    symbol=symbol,
+                    frequency=frequency,
+                    threshold_pct=threshold_pct,
+                )
+                auto_review = build_auto_review_decisions(
+                    differences=differences,
+                    missing=missing,
+                    local_bars=local_bars,
+                    reference_bars=reference_bars,
+                    symbol=symbol,
+                    frequency=frequency,
+                )
+                auto_review_total = len(auto_review)
+                if review_new_only:
+                    auto_review = filter_reviewed_auto_review(
+                        auto_review,
+                        reviewed_keys or set(),
+                    )
+                reviewed_skipped = auto_review_total - len(auto_review)
+                timezone_alignment = build_timezone_alignment_report(
+                    local_bars=local_bars,
+                    reference_bars=reference_bars,
+                    symbol=symbol,
+                    frequency=frequency,
+                )
 
             all_differences.append(differences)
             all_missing.append(missing)
@@ -1844,6 +2102,7 @@ def validate_market_data(
     output_dir=DEFAULT_OUTPUT_DIR,
     symbols=None,
     frequencies=None,
+    reference_frequencies=None,
     threshold_pct=DEFAULT_THRESHOLD_PCT,
     start=None,
     end=None,
@@ -1866,6 +2125,7 @@ def validate_market_data(
         source_dir=source_dir,
         symbols=symbols,
         frequencies=frequencies,
+        reference_frequencies=reference_frequencies,
         threshold_pct=threshold_pct,
         start=start,
         end=end,
@@ -1905,6 +2165,7 @@ def validate_market_data(
                 source_dir=source_dir,
                 symbols=symbols,
                 frequencies=frequencies,
+                reference_frequencies=reference_frequencies,
                 threshold_pct=threshold_pct,
                 start=start,
                 end=end,
@@ -2048,8 +2309,8 @@ def serve_validation_dashboard(
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Validate locally stored futures market data against Yahoo "
-            "Finance continuous futures data."
+            "Validate locally stored market data against Yahoo Finance "
+            "reference data."
         )
     )
     parser.add_argument(
@@ -2066,13 +2327,26 @@ def parse_args():
         "--symbols",
         nargs="+",
         default=DEFAULT_SYMBOLS,
-        help="Futures roots to validate, e.g. /ES /GC /CL.",
+        help=(
+            "Symbols to validate, e.g. /ES /GC /CL or equities/ETFs "
+            "such as SPY."
+        ),
     )
     parser.add_argument(
         "--frequencies",
         nargs="+",
         default=["daily", "5min", "60min"],
         help="Frequencies to validate: daily, 5min, 60min.",
+    )
+    parser.add_argument(
+        "--reference-frequencies",
+        nargs="+",
+        default=DEFAULT_REFERENCE_FREQUENCIES,
+        help=(
+            "Frequencies to compare against Yahoo/reference data. "
+            "Default: daily. Pass daily 5min 60min to opt into "
+            "Yahoo intraday validation."
+        ),
     )
     parser.add_argument(
         "--threshold-pct",
@@ -2135,8 +2409,8 @@ def parse_args():
         action="store_true",
         help=(
             "Skip bars already listed in reviewed_bars.csv when building "
-            "auto-review/apply decisions. Full validation reports are still "
-            "computed."
+            "auto-review/apply decisions and narrow Yahoo/reference fetches "
+            "to unreviewed local bars."
         ),
     )
     parser.add_argument(
@@ -2163,6 +2437,7 @@ def main():
         output_dir=args.output_dir,
         symbols=args.symbols,
         frequencies=args.frequencies,
+        reference_frequencies=args.reference_frequencies,
         threshold_pct=args.threshold_pct,
         start=args.start,
         end=args.end,

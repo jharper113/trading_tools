@@ -140,6 +140,36 @@ def test_add_pnl_columns():
     assert list(out["cumulative_pnl"]) == [123.5, 272.25, 271.0]
 
 
+def test_add_pnl_columns_treats_negative_net_price_as_credit():
+    df = pd.DataFrame([
+        {
+            "Spread": "CUSTOM",
+            "Side": "SELL",
+            "Qty": -1,
+            "Pos Effect": "TO OPEN",
+            "Symbol": "SPX",
+            "Price": 4.97,
+            "Net Price": -3.25,
+            "fees": 1.25,
+        },
+        {
+            "Spread": None,
+            "Side": "BUY",
+            "Qty": 1,
+            "Pos Effect": "TO OPEN",
+            "Symbol": "SPX",
+            "Price": 1.72,
+            "Net Price": "CREDIT",
+            "fees": 1.25,
+        },
+    ])
+
+    out = add_pnl_columns(df)
+
+    assert list(out["trade_pnl"]) == [325.0, 0.0]
+    assert list(out["net_pnl"]) == [323.75, -1.25]
+
+
 def test_add_pnl_columns_matches_futures_close():
     df = pd.DataFrame([
         {

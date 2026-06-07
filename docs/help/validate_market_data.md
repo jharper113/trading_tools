@@ -1,6 +1,6 @@
 # validate_market_data.py
 
-Validate locally stored futures market data against Yahoo Finance continuous futures reference data.
+Validate locally stored market data against Yahoo Finance reference data.
 
 ## Typical Uses
 
@@ -12,6 +12,10 @@ python -u validate_market_data.py \
   --frequencies daily 5min 60min \
   --threshold-pct 0.25
 ```
+
+By default, Yahoo/reference comparison runs for daily bars only. Intraday
+frequencies still run local duplicate checks and dashboard/report generation
+without requesting Yahoo intraday data.
 
 Serve the dashboard locally so selected decisions can be applied directly:
 
@@ -60,10 +64,13 @@ Applied decisions update `data/market_data/`, write reviewed keys to `data/marke
 : Directory where validation reports are written. Default: `output/market_data_validation`.
 
 `--symbols SYMBOLS [SYMBOLS ...]`
-: Futures roots to validate. Omit this flag to use the full default futures universe.
+: Symbols to validate, such as futures roots (`/ES`, `/GC`, `/CL`) or equities/ETFs (`SPY`). Omit this flag to use the full default futures universe.
 
 `--frequencies FREQUENCIES [FREQUENCIES ...]`
 : Frequencies to validate. Supported values are `daily`, `5min`, and `60min`.
+
+`--reference-frequencies REFERENCE_FREQUENCIES [REFERENCE_FREQUENCIES ...]`
+: Frequencies to compare against Yahoo/reference data. Default: `daily`. Pass `daily 5min 60min` to opt into Yahoo intraday validation.
 
 `--threshold-pct THRESHOLD_PCT`
 : Maximum allowed OHLC percentage difference for approval. Default: `0.25`.
@@ -93,7 +100,7 @@ Applied decisions update `data/market_data/`, write reviewed keys to `data/marke
 : Automatically apply auto-review decisions marked `local` or `yahoo`, mark those bars reviewed, and write the dashboard from the post-apply validation state. In CLI usage, this defaults to new-only review behavior unless `--recheck-reviewed` is also passed.
 
 `--review-new-only`
-: Skip bars already listed in `data/market_data/reviewed_bars.csv` when building auto-review/apply decisions. Full validation summaries, difference reports, missing-bar reports, and duplicate checks are still computed.
+: Skip bars already listed in `data/market_data/reviewed_bars.csv` when building auto-review/apply decisions. Yahoo/reference fetches are narrowed to unreviewed local bars with padding for neighbor checks, and symbol/frequency groups with no unreviewed local bars skip Yahoo entirely. Use `--recheck-reviewed` when you need a full reference recheck of reviewed bars.
 
 `--recheck-reviewed`
 : Reconsider bars already listed in `data/market_data/reviewed_bars.csv`. Use this when you intentionally want to rerun auto-review/apply logic across previously reviewed bars after changing the algorithm or threshold.
@@ -101,5 +108,9 @@ Applied decisions update `data/market_data/`, write reviewed keys to `data/marke
 ## Notes
 
 The validator uses Yahoo as a reference, but Yahoo is not treated as automatically correct. Auto-review prefers local data unless the Yahoo close is closer to confirmed neighboring closes, or local data is missing and Yahoo has neighbor support.
+
+Yahoo intraday data is limited and can be noisy for futures session/timestamp
+alignment. For normal runs, prefer daily Yahoo reference checks plus local
+integrity/duplicate checks for `5min` and `60min`.
 
 For cron, use `python -u` so redirected logs update immediately. The validator also flushes progress lines while each symbol/frequency is being checked, including elapsed time and ETA.

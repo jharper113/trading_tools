@@ -467,6 +467,9 @@ def calculate_premium_trade_pnl(row):
     if trade_price is None:
         return 0.0
 
+    if net_price is not None and net_price < 0:
+        return abs(net_price) * qty * multiplier
+
     return trade_price * qty * multiplier * side_sign
 
 

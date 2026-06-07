@@ -2,6 +2,7 @@ import pandas as pd
 
 from download_market_data import (
     DEFAULT_SYMBOLS,
+    EQUITY_PRODUCTS,
     FUTURES_PRODUCTS,
     SchwabProvider,
     aggregate_bars_to_60min,
@@ -34,6 +35,7 @@ from download_market_data import (
 def test_normalize_symbol_adds_futures_slash():
     assert normalize_symbol("es") == "/ES"
     assert normalize_symbol("/6e") == "/6E"
+    assert normalize_symbol("SPY") == "SPY"
 
 
 def test_normalize_frequency_aliases():
@@ -587,15 +589,20 @@ def test_output_file_for_partitions_by_frequency(tmp_path):
 
     assert hourly_path == tmp_path / "60min" / "6E.csv"
 
+    equity_path = output_file_for(tmp_path, "SPY", "daily")
+
+    assert equity_path == tmp_path / "daily" / "SPY.csv"
+
 
 def test_write_symbol_manifest(tmp_path):
-    manifest_path = write_symbol_manifest(tmp_path, ["/ES", "CL"])
+    manifest_path = write_symbol_manifest(tmp_path, ["/ES", "CL", "SPY"])
 
     manifest = pd.read_csv(manifest_path)
 
-    assert list(manifest["symbol"]) == ["/ES", "/CL"]
+    assert list(manifest["symbol"]) == ["/ES", "/CL", "SPY"]
     assert manifest.loc[0, "name"] == "E-mini S&P 500"
     assert manifest.loc[1, "category"] == "energy"
+    assert manifest.loc[2, "name"] == EQUITY_PRODUCTS["SPY"]["name"]
 
 
 def test_schwab_price_history_params_for_5min():
@@ -640,6 +647,16 @@ def test_schwab_price_history_params_daily_uses_default_window():
     assert params["period"] == 1
     assert params["frequencyType"] == "daily"
     assert params["frequency"] == 1
+
+
+def test_schwab_price_history_params_equity_symbol_has_no_futures_slash():
+    params = schwab_price_history_params(
+        symbol="SPY",
+        frequency="daily",
+    )
+
+    assert params["symbol"] == "SPY"
+    assert params["frequencyType"] == "daily"
 
 
 def test_schwab_price_history_params_can_request_all_daily_history():

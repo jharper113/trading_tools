@@ -235,6 +235,13 @@ FUTURES_PRODUCTS = {
         "category": "soft",
     },
 }
+EQUITY_PRODUCTS = {
+    "SPY": {
+        "name": "SPDR S&P 500 ETF",
+        "exchange": "NYSE Arca",
+        "category": "equity_index",
+    },
+}
 
 
 CANONICAL_COLUMNS = [
@@ -317,8 +324,13 @@ def normalize_symbol(symbol):
     if not symbol:
         raise ValueError("Symbol cannot be blank")
 
-    if not symbol.startswith("/"):
-        symbol = f"/{symbol}"
+    if symbol.startswith("/"):
+        return symbol
+
+    futures_symbol = f"/{symbol}"
+
+    if futures_symbol in FUTURES_PRODUCTS:
+        return futures_symbol
 
     return symbol
 
@@ -962,7 +974,11 @@ def write_symbol_manifest(output_dir, symbols):
 
         for symbol in symbols:
             normalized = normalize_symbol(symbol)
-            product = FUTURES_PRODUCTS.get(normalized, {})
+            product = (
+                FUTURES_PRODUCTS.get(normalized)
+                or EQUITY_PRODUCTS.get(normalized)
+                or {}
+            )
             writer.writerow(
                 {
                     "symbol": normalized,
@@ -1651,7 +1667,7 @@ def create_provider(args):
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Download or ingest futures market data and store normalized "
+            "Download or ingest market data and store normalized "
             "daily, 5-minute, and 60-minute bars locally."
         )
     )
@@ -1659,7 +1675,10 @@ def parse_args():
         "--symbols",
         nargs="+",
         default=DEFAULT_SYMBOLS,
-        help="Futures roots or contract symbols, e.g. /ES /6E /GC",
+        help=(
+            "Symbols to download, e.g. /ES /6E /GC or equities/ETFs "
+            "such as SPY."
+        ),
     )
     parser.add_argument(
         "--frequencies",

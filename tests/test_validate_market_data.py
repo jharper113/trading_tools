@@ -36,6 +36,7 @@ def test_yahoo_symbol_mapping_for_default_futures_roots():
     assert yahoo_symbol_for("/NQ") == "NQ=F"
     assert yahoo_symbol_for("/ZB") == "ZB=F"
     assert yahoo_symbol_for("/KC") == "KC=F"
+    assert yahoo_symbol_for("SPY") == "SPY"
 
 
 def test_elapsed_text_formats_validation_progress_times():
@@ -700,3 +701,187 @@ def test_validate_market_data_review_new_only_skips_reviewed_auto_apply(tmp_path
     assert result["auto_review"].empty
     assert applied.empty
     assert updated.loc[updated["date"] == "2026-01-02", "close"].iloc[0] == 150
+
+
+def test_validate_market_data_review_new_only_skips_yahoo_when_all_reviewed(tmp_path):
+    source_dir = tmp_path / "market_data"
+    output_dir = tmp_path / "validation"
+    daily_dir = source_dir / "daily"
+    daily_dir.mkdir(parents=True)
+    local = make_bars(
+        [
+            {"timestamp": "2026-01-01T00:00:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+            {"timestamp": "2026-01-02T00:00:00Z", "open": 101, "high": 102, "low": 100, "close": 101},
+        ]
+    )
+    local.to_csv(daily_dir / "ES.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "/ES",
+                "frequency": "daily",
+                "comparison_key": "2026-01-01",
+                "selected_source": "local",
+                "reviewed_at": "2026-01-03T00:00:00Z",
+            },
+            {
+                "symbol": "/ES",
+                "frequency": "daily",
+                "comparison_key": "2026-01-02",
+                "selected_source": "local",
+                "reviewed_at": "2026-01-03T00:00:00Z",
+            },
+        ]
+    ).to_csv(source_dir / "reviewed_bars.csv", index=False)
+
+    def fake_reference_fetcher(symbol, frequency, start=None, end=None):
+        raise AssertionError("Yahoo/reference fetch should have been skipped")
+
+    result = validate_market_data(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        symbols=["/ES"],
+        frequencies=["daily"],
+        reference_fetcher=fake_reference_fetcher,
+        review_new_only=True,
+    )
+
+    summary = result["summary"].iloc[0]
+    assert summary["local_bars"] == 2
+    assert summary["reference_bars"] == 0
+    assert summary["approved"]
+    assert result["auto_review"].empty
+
+
+def test_validate_market_data_review_new_only_narrows_yahoo_fetch_window(tmp_path):
+    source_dir = tmp_path / "market_data"
+    output_dir = tmp_path / "validation"
+    daily_dir = source_dir / "daily"
+    daily_dir.mkdir(parents=True)
+    local = make_bars(
+        [
+            {"timestamp": "2026-01-01T00:00:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+            {"timestamp": "2026-01-20T00:00:00Z", "open": 120, "high": 121, "low": 119, "close": 120},
+            {"timestamp": "2026-02-20T00:00:00Z", "open": 140, "high": 141, "low": 139, "close": 140},
+        ]
+    )
+    local.to_csv(daily_dir / "ES.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "/ES",
+                "frequency": "daily",
+                "comparison_key": "2026-01-01",
+                "selected_source": "local",
+                "reviewed_at": "2026-01-03T00:00:00Z",
+            },
+            {
+                "symbol": "/ES",
+                "frequency": "daily",
+                "comparison_key": "2026-02-20",
+                "selected_source": "local",
+                "reviewed_at": "2026-02-21T00:00:00Z",
+            },
+        ]
+    ).to_csv(source_dir / "reviewed_bars.csv", index=False)
+    calls = []
+
+    def fake_reference_fetcher(symbol, frequency, start=None, end=None):
+        calls.append(
+            {
+                "symbol": symbol,
+                "frequency": frequency,
+                "start": start,
+                "end": end,
+            }
+        )
+        return make_bars(
+            [
+                {"timestamp": "2026-01-20T00:00:00Z", "open": 120, "high": 121, "low": 119, "close": 120},
+            ],
+            symbol=symbol,
+            frequency=frequency,
+            source="yahoo",
+        )
+
+    validate_market_data(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        symbols=["/ES"],
+        frequencies=["daily"],
+        reference_fetcher=fake_reference_fetcher,
+        review_new_only=True,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["start"] == "2026-01-13T00:00:00Z"
+    assert calls[0]["end"] == "2026-01-27T00:00:00Z"
+
+
+def test_validate_market_data_skips_yahoo_intraday_by_default(tmp_path):
+    source_dir = tmp_path / "market_data"
+    output_dir = tmp_path / "validation"
+    intraday_dir = source_dir / "5min"
+    intraday_dir.mkdir(parents=True)
+    local = make_bars(
+        [
+            {"timestamp": "2026-01-01T09:30:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+        ],
+        frequency="5min",
+    )
+    local.to_csv(intraday_dir / "ES.csv", index=False)
+
+    def fake_reference_fetcher(symbol, frequency, start=None, end=None):
+        raise AssertionError("Yahoo/reference intraday fetch should be skipped")
+
+    result = validate_market_data(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        symbols=["/ES"],
+        frequencies=["5min"],
+        reference_fetcher=fake_reference_fetcher,
+    )
+
+    summary = result["summary"].iloc[0]
+    assert summary["frequency"] == "5min"
+    assert summary["local_bars"] == 1
+    assert summary["reference_bars"] == 0
+    assert result["auto_review"].empty
+
+
+def test_validate_market_data_can_opt_into_yahoo_intraday(tmp_path):
+    source_dir = tmp_path / "market_data"
+    output_dir = tmp_path / "validation"
+    intraday_dir = source_dir / "5min"
+    intraday_dir.mkdir(parents=True)
+    local = make_bars(
+        [
+            {"timestamp": "2026-01-01T09:30:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+        ],
+        frequency="5min",
+    )
+    local.to_csv(intraday_dir / "ES.csv", index=False)
+    calls = []
+
+    def fake_reference_fetcher(symbol, frequency, start=None, end=None):
+        calls.append(frequency)
+        return make_bars(
+            [
+                {"timestamp": "2026-01-01T09:30:00Z", "open": 100, "high": 101, "low": 99, "close": 100},
+            ],
+            symbol=symbol,
+            frequency=frequency,
+            source="yahoo",
+        )
+
+    result = validate_market_data(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        symbols=["/ES"],
+        frequencies=["5min"],
+        reference_frequencies=["5min"],
+        reference_fetcher=fake_reference_fetcher,
+    )
+
+    assert calls == ["5min"]
+    assert result["summary"].iloc[0]["reference_bars"] == 1
