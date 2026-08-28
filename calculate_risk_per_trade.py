@@ -6,16 +6,22 @@ import re
 import numpy as np
 import pandas as pd
 
+from wfa_performance_simulation import (
+    DEFAULT_WFA_BLOCK_LENGTH,
+    DEFAULT_WFA_CAGR_QUANTILE,
+    build_wfa_simulation,
+)
+
 
 INPUT_FILE = "./output/master_cleaned_tos_data.csv"
 OUTPUT_DIR = "./output/risk_per_trade"
 SUMMARY_FILE = f"{OUTPUT_DIR}/risk_per_trade_summary.csv"
 
-DEFAULT_SIMULATIONS = 1000
+DEFAULT_SIMULATIONS = 5000
 DEFAULT_SAFE_F_INCREMENT = 0.01
 DEFAULT_SAFE_F_START = 1.0
 DEFAULT_BANKROLL = 100000
-DEFAULT_DRAWDOWN_LIMIT = -0.30
+DEFAULT_DRAWDOWN_LIMIT = -0.20
 DEFAULT_PCT_ABOVE_DD_LIMIT = 0.95
 DEFAULT_PERIODS_PER_YEAR = 252
 RISK_RETURN_COLUMN = "return_on_margin"
@@ -537,6 +543,166 @@ def calculate_risk_per_trade_by_strategy(
         )
 
     return summary_df, report_files, performance_df
+
+
+def strategy_elapsed_years(group):
+    timestamps = pd.Series(dtype="datetime64[ns]")
+    if "timestamp" in group.columns:
+        timestamps = pd.to_datetime(group["timestamp"], errors="coerce")
+    elif "_timestamp" in group.columns:
+        timestamps = pd.to_datetime(group["_timestamp"], errors="coerce")
+    elif "Exec Time" in group.columns:
+        timestamps = pd.to_datetime(
+            group["Exec Time"],
+            format="%m/%d/%y %H:%M:%S",
+            errors="coerce",
+        )
+
+    timestamps = timestamps.dropna()
+    if len(timestamps) >= 2:
+        elapsed_days = max((timestamps.max() - timestamps.min()).days, 1)
+        return elapsed_days / 365.25
+
+    return max(len(group), 1) / DEFAULT_PERIODS_PER_YEAR
+
+
+def calculate_growth_optimal_risk_by_strategy(
+    trades,
+    output_dir=OUTPUT_DIR,
+    return_column=RISK_RETURN_COLUMN,
+    simulations=DEFAULT_SIMULATIONS,
+    bankroll=DEFAULT_BANKROLL,
+    drawdown_limit=DEFAULT_DRAWDOWN_LIMIT,
+    pct_above_dd_limit=DEFAULT_PCT_ABOVE_DD_LIMIT,
+    safe_f_start=DEFAULT_SAFE_F_START,
+    last_n_trades=0,
+    random_seed=None,
+    mean_block_length=DEFAULT_WFA_BLOCK_LENGTH,
+    cagr_objective_quantile=DEFAULT_WFA_CAGR_QUANTILE,
+    write_files=True,
+):
+    """Apply drawdown-constrained CAR25 sizing to each live strategy."""
+    working = prepare_strategy_returns(
+        trades,
+        return_column,
+        last_n_trades,
+    )
+    summaries = []
+    performances = []
+    iqr_frames = []
+    search_frames = []
+    report_files = []
+    max_breach_probability = 1.0 - float(pct_above_dd_limit)
+
+    for strategy_name, group in working.groupby("Strategy_Name", sort=True):
+        seed = (
+            None
+            if random_seed is None
+            else sum(ord(char) for char in str(strategy_name)) + random_seed
+        )
+        simulation = build_wfa_simulation(
+            group[return_column],
+            strategy_elapsed_years(group),
+            strategy_name,
+            simulations=simulations,
+            mean_block_length=mean_block_length,
+            drawdown_limit=drawdown_limit,
+            max_breach_probability=max_breach_probability,
+            max_risk_fraction=safe_f_start,
+            cagr_quantile=cagr_objective_quantile,
+            random_seed=seed,
+        )
+        optimization = simulation["optimization"]
+        iqr = simulation["summary"].copy()
+        iqr.insert(0, "Strategy_Name", strategy_name)
+        search = simulation["risk_search"].copy()
+        search.insert(0, "Strategy_Name", strategy_name)
+        performance = simulation["results"].copy()
+        profit_factor_rows = iqr[iqr["metric_key"] == "profit_factor"]
+        profit_factor_q25 = (
+            float(profit_factor_rows["Q25"].iloc[0])
+            if not profit_factor_rows.empty
+            else None
+        )
+        summary = {
+            "Strategy_Name": strategy_name,
+            "trade_count": int(len(group)),
+            "simulations": int(simulations),
+            "safe_f": optimization["risk_fraction"],
+            "risk_per_trade_dollars": (
+                float(bankroll) * optimization["risk_fraction"]
+            ),
+            "CAR25": optimization["cagr_objective"],
+            "profit_factor_Q25": profit_factor_q25,
+            "bankroll": float(bankroll),
+            "drawdown_limit": float(drawdown_limit),
+            "pct_above_drawdown_limit": float(pct_above_dd_limit),
+            "drawdown_breach_probability": optimization[
+                "drawdown_breach_probability"
+            ],
+            "risk_ceiling_fraction": optimization["risk_ceiling_fraction"],
+            "cagr_objective_quantile": float(cagr_objective_quantile),
+            "mean_block_length": float(mean_block_length),
+            "elapsed_years": optimization["elapsed_years"],
+            "safe_f_increment": None,
+            "last_n_trades": last_n_trades,
+            "sizing_method": "drawdown_constrained_car25",
+            "return_basis": return_column,
+        }
+        summaries.append(summary)
+        performances.append(performance)
+        iqr_frames.append(iqr)
+        search_frames.append(search)
+
+        if write_files:
+            legacy_quantiles = iqr[[
+                "metric_key",
+                "Q25",
+                "Median",
+                "Q75",
+            ]].rename(columns={"metric_key": "Metric"})
+            report_files.extend(
+                write_strategy_report(
+                    summary,
+                    legacy_quantiles,
+                    output_dir,
+                )
+            )
+
+    summary_df = pd.DataFrame(summaries)
+    performance_df = (
+        pd.concat(performances, ignore_index=True)
+        if performances
+        else pd.DataFrame()
+    )
+    iqr_df = (
+        pd.concat(iqr_frames, ignore_index=True)
+        if iqr_frames
+        else pd.DataFrame()
+    )
+    search_df = (
+        pd.concat(search_frames, ignore_index=True)
+        if search_frames
+        else pd.DataFrame()
+    )
+
+    if write_files:
+        os.makedirs(output_dir, exist_ok=True)
+        summary_df.to_csv(f"{output_dir}/risk_per_trade_summary.csv", index=False)
+        performance_df.to_csv(
+            f"{output_dir}/risk_per_trade_simulations.csv",
+            index=False,
+        )
+        iqr_df.to_csv(
+            f"{output_dir}/risk_metric_iqr.csv",
+            index=False,
+        )
+        search_df.to_csv(
+            f"{output_dir}/risk_fraction_search.csv",
+            index=False,
+        )
+
+    return summary_df, report_files, performance_df, iqr_df, search_df
 
 
 def load_realized_trades_from_master(path):

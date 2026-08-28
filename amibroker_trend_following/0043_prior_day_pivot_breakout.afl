@@ -1,0 +1,33 @@
+// Prior-Day Pivot Breakout
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(0, 0, 0, 0);
+SetPositionSize(Param("Position % Equity", 4, 1, 100, 1), spsPercentOfEquity);
+
+exitTime = Param("Exit Time HHMMSS", 153000, 0, 235959, 100);
+maxHold = Param("Max Hold Bars", 4, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+priorHigh = TimeFrameGetPrice("H", inDaily, -1);
+priorLow = TimeFrameGetPrice("L", inDaily, -1);
+priorClose = TimeFrameGetPrice("C", inDaily, -1);
+pivot = (priorHigh + priorLow + priorClose) / 3;
+
+Buy = Close > pivot AND Cross(Close, priorHigh);
+Sell = TimeNum() >= exitTime OR Close < pivot;
+Short = Close < pivot AND Cross(priorLow, Close);
+Cover = TimeNum() >= exitTime OR Close > pivot;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.2 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(priorHigh, "Prior High", colorGreen, styleLine);
+Plot(priorLow, "Prior Low", colorRed, styleLine);

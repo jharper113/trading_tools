@@ -1,0 +1,37 @@
+// Failed Breakdown / Breakout Reclaim
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+channelLen = Param("Channel Length", 10, 3, 40, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+maxHold = Param("Max Hold Bars", 4, 1, 5, 1);
+trendLen = Param("Trend EMA", 50, 10, 150, 5);
+
+priorLow = Ref(LLV(Low, channelLen), -1);
+priorHigh = Ref(HHV(High, channelLen), -1);
+trendEMA = EMA(Close, trendLen);
+
+failedBreakdown = Low < priorLow AND Close > priorLow AND Close > Open;
+failedBreakout = High > priorHigh AND Close < priorHigh AND Close < Open;
+
+Buy = failedBreakdown AND Close > trendEMA;
+Sell = Close < priorLow;
+Short = failedBreakout AND Close < trendEMA;
+Cover = Close > priorHigh;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.4 * ATR(atrLen), True);
+ApplyStop(stopTypeProfit, stopModePoint, 2.2 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(priorLow, "Prior Low", colorGreen, styleLine);
+Plot(priorHigh, "Prior High", colorRed, styleLine);

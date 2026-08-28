@@ -1,0 +1,37 @@
+// ADX-Filtered Donchian Breakout Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 10, 1, 100, 1), spsPercentOfEquity);
+
+entryLen = Param("Entry Channel", 50, 10, 200, 5);
+exitLen = Param("Exit Channel", 20, 5, 100, 5);
+adxLen = Param("ADX Length", 14, 5, 50, 1);
+minADX = Param("Minimum ADX", 25, 5, 60, 1);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+atrStop = Param("ATR Stop", 4, 1, 10, 0.25);
+
+upperEntry = Ref(HHV(High, entryLen), -1);
+lowerEntry = Ref(LLV(Low, entryLen), -1);
+upperExit = Ref(HHV(High, exitLen), -1);
+lowerExit = Ref(LLV(Low, exitLen), -1);
+trendStrength = ADX(adxLen) >= minADX;
+
+Buy = Close > upperEntry AND trendStrength;
+Sell = Close < lowerExit;
+Short = Close < lowerEntry AND trendStrength;
+Cover = Close > upperExit;
+
+ApplyStop(stopTypeTrailing, stopModePoint, atrStop * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(upperEntry, "Entry High", colorGreen, styleLine);
+Plot(lowerEntry, "Entry Low", colorRed, styleLine);
+Plot(ADX(adxLen), "ADX", colorBlue, styleOwnScale);

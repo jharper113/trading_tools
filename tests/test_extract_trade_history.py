@@ -10,6 +10,7 @@ from extract_trade_history import (
     build_fee_correction_suggestions,
     build_cash_trade_corrections,
     combine_cash_trade_corrections,
+    correction_key,
     current_statement_approved_corrections,
     drop_invalid_strategy_duplicates,
     filter_by_exec_date,
@@ -19,10 +20,12 @@ from extract_trade_history import (
     group_review_key,
     parse_filter_date,
     parse_cash_ledger,
+    parse_statement_ytd_summary,
     reconcile_cash_balances,
     strict_reconciliation_failures,
     summarize_cash_reconciliation,
     write_cash_reconciliation_dashboard,
+    ytd_dashboard_section,
 )
 
 
@@ -52,6 +55,75 @@ def test_fill_missing_execution_times_uses_previous_trade_time():
         "1/15/26 10:35:41",
         "1/15/26 10:35:41",
     ]
+
+
+def test_parse_statement_ytd_summary_uses_overall_totals_and_fee_labels():
+    lines = [
+        "Profits and Losses\n",
+        "Symbol,P/L Open,P/L %,P/L Day,Mark Value,P/L YTD,Description\n",
+        "SPCX,($356.48),-0.53%,\"$2,304.00\",\"$66,684.00\",$497.01,SPACE EX TECH SPACEX A\n",
+        ",\"$1,868.54\",+2.13%,\"$2,458.33\",\"$67,335.02\",\"$23,334.89\",OVERALL TOTALS\n",
+        "\n",
+        "Forex Account Summary\n",
+        "Forex Commissions YTD,$0.00\n",
+        "\n",
+        "Account Summary\n",
+        "Equity Commissions & Fees YTD,\"$1,343.26\"\n",
+        "Futures Commissions & Fees YTD,\"$3,368.13\"\n",
+        "Crypto Trading Fees YTD,$13.63\n",
+        "Total Commissions & Fees YTD,\"$4,711.39\"\n",
+    ]
+
+    summary, positions = parse_statement_ytd_summary(
+        lines,
+        "/tmp/2026-06-13-AccountStatement.csv",
+    )
+
+    assert summary["statement_year"] == 2026
+    assert summary["statement_gross_ytd_pnl"] == 23334.89
+    assert summary["statement_open_position_pnl"] == 1868.54
+    assert summary["statement_total_ytd_commissions_and_fees"] == 4725.02
+    assert round(summary["statement_closed_net_ytd_pnl"], 2) == 16741.33
+    assert positions.loc[0, "Symbol"] == "SPCX"
+    assert positions.loc[0, "statement_closed_gross_pnl"] == 853.49
+
+
+def test_ytd_dashboard_shows_only_nonzero_open_pnl_positions():
+    summary = {
+        "statement_gross_ytd_pnl": 23334.89,
+        "statement_open_position_pnl": 1868.54,
+        "statement_closed_gross_ytd_pnl": 21466.35,
+        "statement_total_ytd_commissions_and_fees": 4725.02,
+        "statement_closed_net_ytd_pnl": 16741.33,
+    }
+    positions = pd.DataFrame([
+        {
+            "Symbol": "SPCX",
+            "statement_open_pnl": 1868.54,
+            "statement_closed_gross_pnl": 853.49,
+        },
+        {
+            "Symbol": "/MGCM26",
+            "statement_open_pnl": 0.0,
+            "statement_closed_gross_pnl": -4312.0,
+        },
+        {
+            "Symbol": "SPCE",
+            "statement_open_pnl": 0.0,
+            "statement_closed_gross_pnl": 15743.32,
+        },
+    ])
+
+    html = ytd_dashboard_section(summary, positions)
+
+    assert "Open PnL Positions" in html
+    totals_heading = html.index("<h2>Statement Totals</h2>")
+    totals_section_end = html.index("</section>", totals_heading)
+    open_positions_heading = html.index("<h2>Open PnL Positions</h2>")
+    assert totals_section_end < open_positions_heading
+    assert "SPCX" in html
+    assert "/MGCM26" not in html
+    assert "SPCE" not in html
 
 
 def test_parse_cash_ledger_extracts_cash_balance_rows():
@@ -95,6 +167,114 @@ def test_parse_cash_ledger_extracts_futures_statement_rows():
     ]
     assert ledger.loc[0, "cash_flow"] == 118.92
     assert ledger.loc[1, "cash_flow"] == 0.0
+
+
+def test_reconcile_cash_balances_counts_futures_mark_to_market_as_trade_cash():
+    lines = [
+        "Futures Statements\n",
+        "Trade Date,Exec Date,Exec Time,Type,Ref #,Description,Misc Fees,Commissions & Fees,Amount,Balance\n",
+        "1/13/26,1/13/26,01:00:00,BAL,--,Futures cash balance at the start of business day,--,--,--,\"42,608.50\"\n",
+        "1/13/26,1/13/26,15:57:53,TRD,ref,SOLD -1 /ESH26:XCME @7000.00,-1.40,-1.80,--,\"42,605.30\"\n",
+        "1/13/26,1/13/26,17:00:00,ADJ,--,/ESH26:XCME mark to market at 7001.75 official settlement price,--,--,-87.50,\"42,517.80\"\n",
+        "1/13/26,1/13/26,17:00:00,ADJ,--,/ZBH26:XCBT mark to market at 115'26 official settlement price,--,--,375.00,\"42,892.80\"\n",
+        "1/13/26,1/13/26,21:43:27,TRD,ref,BOT +1 /ESH26:XCME @6993.25,-1.40,-1.80,425.00,\"43,314.60\"\n",
+        "Account Trade History\n",
+    ]
+    trades = pd.DataFrame([
+        {
+            "Exec Time": "1/13/26 15:57:53",
+            "Spread": "FUTURE",
+            "Side": "SELL",
+            "Qty": -1,
+            "Pos Effect": "TO OPEN",
+            "Symbol": "/ESH26",
+            "Type": "FUTURE",
+            "Price": 7000.00,
+            "trade_pnl": 0.0,
+            "fees": 3.2,
+            "net_pnl": -3.2,
+        },
+        {
+            "Exec Time": "1/13/26 21:43:27",
+            "Spread": "FUTURE",
+            "Side": "BUY",
+            "Qty": 1,
+            "Pos Effect": "TO CLOSE",
+            "Symbol": "/ESH26",
+            "Type": "FUTURE",
+            "Price": 6993.25,
+            "trade_pnl": 337.5,
+            "fees": 3.2,
+            "net_pnl": 334.3,
+        },
+    ])
+
+    reconciliation = reconcile_cash_balances(
+        lines,
+        trades,
+        tolerance=0.01,
+    )
+    row = reconciliation.iloc[0]
+
+    assert row["account_bucket"] == "futures"
+    assert row["statement_trade_rows"] == 3
+    assert round(row["statement_trade_cash_flow"], 2) == 331.10
+    assert round(row["non_trade_cash_flow"], 2) == 375.0
+    assert round(row["extracted_net_pnl"], 2) == 331.10
+    assert row["status"] == "reconciled"
+
+
+def test_reconcile_cash_balances_does_not_count_mark_to_market_before_later_open():
+    lines = [
+        "Futures Statements\n",
+        "Trade Date,Exec Date,Exec Time,Type,Ref #,Description,Misc Fees,Commissions & Fees,Amount,Balance\n",
+        "2/4/26,2/4/26,01:00:00,BAL,--,Futures cash balance at the start of business day,--,--,--,\"51,527.78\"\n",
+        "2/4/26,2/4/26,09:31:12,TRD,ref,SOLD -3 /MESH26:XCME 1/5 11 FEB 26 /X2CG26:XCME 6690 PUT @10.50,-0.66,-5.40,157.50,\"51,679.22\"\n",
+        "2/4/26,2/4/26,17:00:00,ADJ,--,/MESH26:XCME mark to market at 6906.25 official settlement price,--,--,-887.50,\"50,791.72\"\n",
+        "2/5/26,2/4/26,22:00:21,TRD,ref,BOT +1 /MESH26:XCME @6895.00,-0.37,-1.80,--,\"50,789.55\"\n",
+        "Account Trade History\n",
+    ]
+    trades = pd.DataFrame([
+        {
+            "Exec Time": "2/4/26 09:31:12",
+            "Spread": "SINGLE",
+            "Side": "SELL",
+            "Qty": -3,
+            "Pos Effect": "TO OPEN",
+            "Symbol": "/MESH26 1/5 11 FEB 26",
+            "Type": "PUT",
+            "Price": 10.50,
+            "trade_pnl": 157.5,
+            "fees": 6.06,
+            "net_pnl": 151.44,
+        },
+        {
+            "Exec Time": "2/4/26 22:00:21",
+            "Spread": "FUTURE",
+            "Side": "BUY",
+            "Qty": 1,
+            "Pos Effect": "TO OPEN",
+            "Symbol": "/MESH26",
+            "Type": "FUTURE",
+            "Price": 6895.00,
+            "trade_pnl": 0.0,
+            "fees": 2.17,
+            "net_pnl": -2.17,
+        },
+    ])
+
+    reconciliation = reconcile_cash_balances(
+        lines,
+        trades,
+        tolerance=0.01,
+    )
+    row = reconciliation.iloc[0]
+
+    assert row["statement_trade_rows"] == 2
+    assert round(row["statement_trade_cash_flow"], 2) == 149.27
+    assert round(row["non_trade_cash_flow"], 2) == -887.50
+    assert round(row["extracted_net_pnl"], 2) == 149.27
+    assert row["status"] == "reconciled"
 
 
 def test_parse_cash_ledger_does_not_label_forex_as_futures_after_empty_futures_section():
@@ -339,7 +519,7 @@ def test_reviewed_reconciliation_groups_do_not_fail_strict_mode():
     assert failures["date"].tolist() == ["2026-06-02"]
 
 
-def test_saved_approval_keys_match_current_statement_candidates():
+def test_saved_approval_keys_do_not_match_renumbered_candidates():
     saved = pd.DataFrame([
         {
             "statement_file": "trades.csv",
@@ -376,13 +556,10 @@ def test_saved_approval_keys_match_current_statement_candidates():
         current,
     )
 
-    assert current["statement_file"].tolist() == [
-        "2026-06-06-AccountStatement.csv",
-    ]
-    assert set(combined["statement_file"]) == {
+    assert current.empty
+    assert combined["statement_file"].tolist() == [
         "trades.csv",
-        "2026-06-06-AccountStatement.csv",
-    }
+    ]
 
 
 def test_cash_reconciliation_counts_trades_in_unreconciled_groups():
@@ -526,6 +703,193 @@ def test_cash_trade_corrections_apply_cash_ledger_to_multileg_event():
     assert round(corrected["net_pnl"].sum(), 2) == 322.82
 
 
+def test_cash_trade_corrections_preserve_split_stock_fill_trade_pnl():
+    lines = [
+        "Cash Balance\n",
+        "DATE,TIME,TYPE,REF #,DESCRIPTION,Misc Fees,Commissions & Fees,AMOUNT,BALANCE\n",
+        "6/12/26,01:00:00,BAL,,Cash balance,,,,1000.00\n",
+        "6/12/26,12:01:48,TRD,,BOT +7 SPCX @161.46 | BOT +93 SPCX @161.46,,,-16146.00,-15146.00\n",
+        "Account Trade History\n",
+    ]
+    trades = pd.DataFrame(
+        [
+            {
+                "statement_file": "trades.csv",
+                "statement_trade_row": 122,
+                "Exec Time": "6/12/26 12:01:48",
+                "Spread": "STOCK",
+                "Side": "BUY",
+                "Qty": 7,
+                "Pos Effect": "TO OPEN",
+                "Symbol": "SPCX",
+                "Type": "STOCK",
+                "fees": 0.0,
+                "trade_pnl": -1130.22,
+                "net_pnl": -1130.22,
+            },
+            {
+                "statement_file": "trades.csv",
+                "statement_trade_row": 123,
+                "Exec Time": "6/12/26 12:01:48",
+                "Spread": "STOCK",
+                "Side": "BUY",
+                "Qty": 93,
+                "Pos Effect": "TO OPEN",
+                "Symbol": "SPCX",
+                "Type": "STOCK",
+                "fees": 0.0,
+                "trade_pnl": -15015.78,
+                "net_pnl": -15015.78,
+            },
+        ]
+    )
+
+    corrections = build_cash_trade_corrections(
+        parse_cash_ledger(lines),
+        trades,
+    )
+    corrected = apply_cash_trade_corrections(
+        trades,
+        corrections,
+    )
+
+    assert len(corrections) == 2
+    assert corrected.loc[0, "trade_pnl"] == -1130.22
+    assert corrected.loc[1, "trade_pnl"] == -15015.78
+    assert corrected["net_pnl"].sum() == -16146.0
+
+
+def test_saved_aggregate_stock_correction_does_not_overwrite_split_row_pnl():
+    trades = pd.DataFrame(
+        [
+            {
+                "statement_file": "trades.csv",
+                "statement_trade_row": 122,
+                "Exec Time": "6/12/26 12:01:48",
+                "Spread": "STOCK",
+                "Side": "BUY",
+                "Qty": 7,
+                "Symbol": "SPCX",
+                "trade_pnl": -1130.22,
+                "fees": 0.0,
+                "net_pnl": -1130.22,
+            },
+        ]
+    )
+    stale_correction = pd.DataFrame(
+        [
+            {
+                "statement_file": "trades.csv",
+                "statement_trade_row": 122,
+                "correction_status": "cash_ledger_applied",
+                "correction_source": "cash_ledger",
+                "ledger_description": (
+                    "BOT +7 SPCX @161.46 | BOT +93 SPCX @161.46"
+                ),
+                "original_trade_pnl": -1130.22,
+                "corrected_trade_pnl": -16146.0,
+                "corrected_fees": 0.0,
+                "corrected_net_pnl": -16146.0,
+                "ledger_cash_flow": -16146.0,
+            },
+        ]
+    )
+
+    corrected = apply_cash_trade_corrections(
+        trades,
+        stale_correction,
+    )
+
+    assert corrected.loc[0, "cash_correction_applied"]
+    assert corrected.loc[0, "trade_pnl"] == -1130.22
+    assert corrected.loc[0, "net_pnl"] == -1130.22
+
+
+def test_cash_trade_corrections_preserve_futures_trade_pnl():
+    lines = [
+        "Futures Statements\n",
+        ",2/3/26,11:16:23,TRD,ref,SOLD -1 /MGCJ26:XCEC @4985.00,-0.62,-1.80,3324.00,0\n",
+        "Account Trade History\n",
+    ]
+    trades = pd.DataFrame([
+        {
+            "statement_file": "trades.csv",
+            "statement_trade_row": 259,
+            "Exec Time": "2/3/26 11:16:23",
+            "Spread": "FUTURE",
+            "Side": "SELL",
+            "Qty": -1,
+            "Pos Effect": "TO CLOSE",
+            "Symbol": "/MGCJ26",
+            "Type": "FUTURE",
+            "Price": 4985.00,
+            "fees": 2.75,
+            "trade_pnl": -1010.00,
+            "net_pnl": -1012.75,
+        },
+    ])
+
+    corrections = build_cash_trade_corrections(
+        parse_cash_ledger(lines),
+        trades,
+    )
+    corrected = apply_cash_trade_corrections(
+        trades,
+        corrections,
+    )
+
+    assert corrections.loc[0, "corrected_trade_pnl"] == -1010.00
+    assert round(corrections.loc[0, "corrected_fees"], 2) == 2.42
+    assert round(corrections.loc[0, "corrected_net_pnl"], 2) == -1012.42
+    assert corrected.loc[0, "trade_pnl"] == -1010.00
+    assert round(corrected.loc[0, "fees"], 2) == 2.42
+    assert round(corrected.loc[0, "net_pnl"], 2) == -1012.42
+
+
+def test_saved_futures_cash_correction_does_not_overwrite_trade_pnl():
+    trades = pd.DataFrame([
+        {
+            "statement_file": "trades.csv",
+            "statement_trade_row": 259,
+            "Exec Time": "2/3/26 11:16:23",
+            "Spread": "FUTURE",
+            "Side": "SELL",
+            "Qty": -1,
+            "Pos Effect": "TO CLOSE",
+            "Symbol": "/MGCJ26",
+            "Type": "FUTURE",
+            "Price": 4985.00,
+            "fees": 2.75,
+            "trade_pnl": -1010.00,
+            "net_pnl": -1012.75,
+        },
+    ])
+    stale_correction = pd.DataFrame([
+        {
+            "statement_file": "trades.csv",
+            "statement_trade_row": 259,
+            "correction_status": "cash_ledger_applied",
+            "correction_source": "cash_ledger",
+            "ledger_description": "SOLD -1 /MGCJ26:XCEC @4985.00",
+            "ledger_cash_flow": 3321.58,
+            "original_trade_pnl": -1010.00,
+            "corrected_trade_pnl": 3324.00,
+            "corrected_fees": 2.42,
+            "corrected_net_pnl": 3321.58,
+        },
+    ])
+
+    corrected = apply_cash_trade_corrections(
+        trades,
+        stale_correction,
+    )
+
+    assert corrected.loc[0, "cash_correction_applied"]
+    assert corrected.loc[0, "trade_pnl"] == -1010.00
+    assert corrected.loc[0, "fees"] == 2.42
+    assert corrected.loc[0, "net_pnl"] == -1012.42
+
+
 def test_cash_trade_corrections_match_exact_event_when_day_counts_differ():
     lines = [
         "Cash Balance\n",
@@ -619,6 +983,123 @@ def test_cash_trade_corrections_match_exact_event_when_day_counts_differ():
     assert corrected.loc[3, "net_pnl"] == 0.0
 
 
+def test_cash_trade_corrections_do_not_aggregate_identical_partial_closes():
+    lines = [
+        "Cash Balance\n",
+        "DATE,TIME,TYPE,REF #,DESCRIPTION,Misc Fees,Commissions & Fees,AMOUNT,BALANCE\n",
+        "6/8/26,11:13:44,TRD,,SOLD -5 VERTICAL SPX 100 (Weeklys) 8 JUN 26 7430/7410 PUT @2.35 CBOE,-5.72,-5.20,1175.00,81537.87\n",
+        "6/8/26,12:38:28,TRD,,BOT +1 VERTICAL SPX 100 (Weeklys) 8 JUN 26 7430/7410 PUT @7.10 CBOE,-1.14,-1.04,-710.00,80825.69\n",
+        "6/8/26,12:38:28,TRD,,BOT +1 VERTICAL SPX 100 (Weeklys) 8 JUN 26 7430/7410 PUT @7.10 CBOE,-1.14,-1.04,-710.00,80113.51\n",
+        "6/8/26,12:38:28,TRD,,BOT +1 VERTICAL SPX 100 (Weeklys) 8 JUN 26 7430/7410 PUT @7.10 CBOE,-1.16,-1.04,-710.00,79401.31\n",
+        "6/8/26,12:38:28,TRD,,BOT +1 VERTICAL SPX 100 (Weeklys) 8 JUN 26 7430/7410 PUT @7.10 CBOE,-1.14,-1.04,-710.00,78689.13\n",
+        "6/8/26,12:38:28,TRD,,BOT +1 VERTICAL SPX 100 (Weeklys) 8 JUN 26 7430/7410 PUT @7.10 CBOE,-1.14,-1.04,-710.00,77976.95\n",
+        "Account Trade History\n",
+    ]
+    trades = pd.DataFrame(
+        [
+            {
+                "statement_file": "trades.csv",
+                "statement_trade_row": 69,
+                "Exec Time": "6/8/26 11:13:44",
+                "Spread": "VERTICAL",
+                "Side": "SELL",
+                "Qty": -5,
+                "Pos Effect": "TO OPEN",
+                "Symbol": "SPX",
+                "Exp": "8 JUN 26",
+                "Strike": 7430,
+                "Type": "PUT",
+                "fees": 6.25,
+                "trade_pnl": 1175.0,
+                "net_pnl": 1168.75,
+            },
+            {
+                "statement_file": "trades.csv",
+                "statement_trade_row": 70,
+                "Exec Time": "6/8/26 11:13:44",
+                "Spread": "",
+                "Side": "BUY",
+                "Qty": 5,
+                "Pos Effect": "TO OPEN",
+                "Symbol": "SPX",
+                "Exp": "8 JUN 26",
+                "Strike": 7410,
+                "Type": "PUT",
+                "fees": 6.25,
+                "trade_pnl": 0.0,
+                "net_pnl": -6.25,
+            },
+        ]
+    )
+
+    for offset in range(5):
+        trades = pd.concat(
+            [
+                trades,
+                pd.DataFrame([
+                    {
+                        "statement_file": "trades.csv",
+                        "statement_trade_row": 71 + offset * 2,
+                        "Exec Time": "6/8/26 12:38:28",
+                        "Spread": "VERTICAL",
+                        "Side": "BUY",
+                        "Qty": 1,
+                        "Pos Effect": "TO CLOSE",
+                        "Symbol": "SPX",
+                        "Exp": "8 JUN 26",
+                        "Strike": 7430,
+                        "Type": "PUT",
+                        "fees": 1.25,
+                        "trade_pnl": -710.0,
+                        "net_pnl": -711.25,
+                    },
+                    {
+                        "statement_file": "trades.csv",
+                        "statement_trade_row": 72 + offset * 2,
+                        "Exec Time": "6/8/26 12:38:28",
+                        "Spread": "",
+                        "Side": "SELL",
+                        "Qty": -1,
+                        "Pos Effect": "TO CLOSE",
+                        "Symbol": "SPX",
+                        "Exp": "8 JUN 26",
+                        "Strike": 7410,
+                        "Type": "PUT",
+                        "fees": 1.25,
+                        "trade_pnl": 0.0,
+                        "net_pnl": -1.25,
+                    },
+                ]),
+            ],
+            ignore_index=True,
+        )
+
+    corrections = build_cash_trade_corrections(
+        parse_cash_ledger(lines),
+        trades,
+    )
+    corrected = apply_cash_trade_corrections(
+        trades,
+        corrections,
+    )
+    corrected_main_closes = corrected[
+        corrected["statement_trade_row"].isin([71, 73, 75, 77, 79])
+    ]
+
+    assert len(corrections) == 12
+    assert not corrections["corrected_trade_pnl"].eq(-3550.0).any()
+    assert corrected_main_closes["trade_pnl"].tolist() == [-710.0] * 5
+    assert [
+        round(value, 2)
+        for value in corrected_main_closes["fees"].tolist()
+    ] == [2.18, 2.18, 2.20, 2.18, 2.18]
+    assert round(corrected["net_pnl"].sum(), 2) == -2396.84
+    assert len({
+        correction_key(row)
+        for row in corrections.to_dict("records")
+    }) == len(corrections)
+
+
 def test_cash_trade_corrections_keep_same_second_futures_fills_separate():
     lines = [
         "Futures Statements\n",
@@ -665,8 +1146,11 @@ def test_cash_trade_corrections_keep_same_second_futures_fills_separate():
         trades,
     )
 
-    assert corrections["corrected_trade_pnl"].tolist() == [203.0, 204.0]
-    assert corrections["corrected_net_pnl"].tolist() == [200.03, 201.03]
+    assert corrections["corrected_trade_pnl"].tolist() == [218.5, 227.0]
+    assert [
+        round(value, 2)
+        for value in corrections["corrected_net_pnl"].tolist()
+    ] == [215.53, 224.03]
 
 
 def test_auto_approved_corrections_include_futures_and_opt026_only():
@@ -789,6 +1273,8 @@ def test_write_cash_reconciliation_dashboard_shows_trade_and_ledger_sides(tmp_pa
     trades = pd.DataFrame(
         [
             {
+                "statement_file": "trades.csv",
+                "statement_trade_row": 1,
                 "Exec Time": "1/2/26 10:00:00",
                 "Spread": "SINGLE",
                 "Side": "SELL",
@@ -810,19 +1296,32 @@ def test_write_cash_reconciliation_dashboard_shows_trade_and_ledger_sides(tmp_pa
         tolerance=1.0,
     )
     output_file = tmp_path / "cash_dashboard.html"
+    cash_ledger = parse_cash_ledger(lines)
+    correction_candidates = build_cash_trade_corrections(
+        cash_ledger,
+        trades,
+    )
 
     write_cash_reconciliation_dashboard(
         output_file,
         reconciliation,
-        parse_cash_ledger(lines),
+        cash_ledger,
         trades,
+        correction_candidates=correction_candidates,
     )
 
     html = output_file.read_text()
-    assert "Extracted Trade History" in html
+    assert "Extracted Trade History + Suggested Cash Adjustment" in html
     assert "Statement Cash Ledger" in html
     assert "Suggested delta" in html
     assert "Approved" in html
+    assert "Discrepancy" in html
+    assert "Current Net PnL" in html
+    assert "Cash Ledger Cash Flow" in html
+    assert "Suggested Net PnL" in html
+    assert "fee_mismatch" in html
+    assert "suggested_cash_net_pnl" in html
+    assert "matched_ledger_description" in html
     assert "Mark group reviewed" in html
     assert "reviewed_groups" in html
     assert "reviewed_no_auto_correction" in html
@@ -866,11 +1365,6 @@ def test_write_cash_reconciliation_dashboard_hides_saved_groups(tmp_path):
         "corrected_fees": 2.0,
         "corrected_net_pnl": 48.0,
     }
-    renamed_candidate = {
-        **correction,
-        "statement_file": "new-name.csv",
-        "statement_trade_row": 20,
-    }
     output_file = tmp_path / "cash_dashboard.html"
 
     write_cash_reconciliation_dashboard(
@@ -878,7 +1372,7 @@ def test_write_cash_reconciliation_dashboard_hides_saved_groups(tmp_path):
         reconciliation,
         pd.DataFrame(),
         pd.DataFrame(),
-        correction_candidates=pd.DataFrame([renamed_candidate]),
+        correction_candidates=pd.DataFrame([correction]),
         approved_corrections=pd.DataFrame([correction]),
     )
 

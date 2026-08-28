@@ -1,0 +1,32 @@
+// Gap Reversal Commodity Strategy
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+gapATR = Param("Gap ATR", 0.5, 0.1, 2, 0.1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+trendLen = Param("Trend EMA", 40, 10, 150, 5);
+maxHold = Param("Max Hold Bars", 2, 1, 5, 1);
+
+trendEMA = EMA(Close, trendLen);
+gapDown = Open < Ref(Close, -1) - gapATR * ATR(atrLen);
+gapUp = Open > Ref(Close, -1) + gapATR * ATR(atrLen);
+
+Buy = gapDown AND Close > Open AND Close > trendEMA;
+Sell = Close < Open OR Close < Ref(Low, -1);
+Short = gapUp AND Close < Open AND Close < trendEMA;
+Cover = Close > Open OR Close > Ref(High, -1);
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.25 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

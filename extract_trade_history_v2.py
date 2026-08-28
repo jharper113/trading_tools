@@ -1,8 +1,12 @@
 import argparse
 import csv
+import errno
 import json
 import os
+import re
+import threading
 import webbrowser
+from collections import deque
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import StringIO
@@ -18,12 +22,13 @@ from extract_trade_history import (
     VALID_MANUAL_STRATEGY_NAMES,
     add_trade_identity_columns,
     apply_cash_trade_corrections,
-    build_cash_trade_corrections,
+    build_cash_trade_corrections as build_base_cash_trade_corrections,
     build_fee_correction_suggestions,
     build_dedupe_key,
     combine_cash_trade_corrections,
     correction_key,
     current_statement_approved_corrections,
+    drop_existing_replaced_real_trades,
     filter_by_exec_date,
     filter_cash_ledger_by_date,
     fill_missing_execution_times,
@@ -36,14 +41,18 @@ from extract_trade_history import (
     parse_cash_ledger,
     parse_filter_date,
     parse_statement_ytd_summary,
+    preserve_existing_strategy_names,
     preserve_master_strategy_names,
+    recalculate_cleaned_trade_columns,
     reconcile_cash_balances,
     reset_cash_correction_columns,
     save_cash_trade_corrections,
     save_pnl_chart,
     summarize_cash_reconciliation,
     STATEMENT_IDENTITY_COLUMNS,
+    SYNTHETIC_CASH_SETTLEMENT_SOURCE,
     update_master_cleaned_trades,
+    restore_synthetic_cash_settlement_values,
 )
 from src.enrich import (
     add_log_return_columns,
@@ -52,6 +61,7 @@ from src.enrich import (
     build_equity_curve,
     calculate_margin_requirements,
     calculate_summary_statistics,
+    is_futures_trade,
     lookup_fees,
     normalize_root_symbol,
     parse_number,
@@ -110,6 +120,7 @@ def v2_output_paths(output_dir):
     )
     paths["ytd_reconciliation"] = f"{output_dir}/ytd_reconciliation.csv"
     paths["ytd_bridge_adjustments"] = f"{output_dir}/ytd_bridge_adjustments.csv"
+    paths["statement_ytd_history"] = f"{output_dir}/statement_ytd_history.csv"
     return paths
 
 
@@ -192,6 +203,159 @@ def overlap_dedupe_columns(existing_trades, new_trades):
     ]
 
 
+def overlap_aggregate_group_columns(existing_trades, new_trades):
+    candidates = [
+        "Trade Minute",
+        "Spread",
+        "Side",
+        "Pos Effect",
+        "Symbol",
+        "Exp",
+        "Strike",
+        "Type",
+        "Exp.1",
+        "Settlement Date",
+        "Type.1",
+    ]
+
+    return [
+        column
+        for column in candidates
+        if column in existing_trades.columns
+        and column in new_trades.columns
+    ]
+
+
+def add_overlap_aggregate_columns(trades):
+    result = trades.copy()
+    exec_times = pd.to_datetime(
+        result.get("Exec Time"),
+        format="%m/%d/%y %H:%M:%S",
+        errors="coerce",
+    )
+    result["Trade Minute"] = exec_times.dt.strftime("%Y-%m-%d %H:%M")
+    qty = pd.to_numeric(result.get("Qty"), errors="coerce").fillna(0.0)
+    price = pd.to_numeric(result.get("Price"), errors="coerce").fillna(0.0)
+    side = result.get(
+        "Side",
+        pd.Series("", index=result.index),
+    ).astype(str).str.upper()
+    signed_qty = qty.copy()
+    signed_qty.loc[side.eq("BUY")] = qty.abs()
+    signed_qty.loc[side.eq("SELL")] = -qty.abs()
+    result["_overlap_signed_qty"] = signed_qty
+    result["_overlap_gross_value"] = qty.abs() * price
+
+    return result
+
+
+def is_option_aggregate_group(group):
+    if "Type" not in group.columns:
+        return False
+
+    return group["Type"].astype(str).str.upper().isin({"CALL", "PUT"}).any()
+
+
+def aggregate_overlap_key(identity, signed_qty, gross_value):
+    return (
+        identity,
+        round(float(signed_qty), 8),
+        None if gross_value is None else round(float(gross_value), 4),
+    )
+
+
+def build_aggregate_overlap_keys(trades, group_columns):
+    if trades.empty:
+        return set()
+
+    if not group_columns:
+        return set()
+
+    keys = set()
+
+    for group_key, group in trades.groupby(
+        group_columns,
+        dropna=False,
+        sort=False,
+    ):
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
+        identity = tuple(
+            "" if pd.isna(value) else str(value)
+            for value in group_key
+        )
+        signed_qty = group["_overlap_signed_qty"].sum()
+        gross_value = group["_overlap_gross_value"].sum()
+        keys.add(
+            aggregate_overlap_key(identity, signed_qty, gross_value)
+        )
+        if is_option_aggregate_group(group):
+            keys.add(
+                aggregate_overlap_key(identity, signed_qty, None)
+            )
+
+    return keys
+
+
+def aggregate_overlap_skip_mask(incoming, exact_keep_mask, existing_trades):
+    if not exact_keep_mask:
+        return []
+
+    existing_aggregate = add_overlap_aggregate_columns(existing_trades)
+    incoming_aggregate = add_overlap_aggregate_columns(incoming)
+    group_columns = overlap_aggregate_group_columns(
+        existing_aggregate,
+        incoming_aggregate,
+    )
+
+    if not group_columns:
+        return exact_keep_mask
+
+    aggregate_keys = build_aggregate_overlap_keys(
+        existing_aggregate,
+        group_columns,
+    )
+    if not aggregate_keys:
+        return exact_keep_mask
+
+    result_mask = list(exact_keep_mask)
+    candidate_positions = [
+        position
+        for position, keep_row in enumerate(exact_keep_mask)
+        if keep_row
+    ]
+
+    if not candidate_positions:
+        return result_mask
+
+    candidates = incoming_aggregate.iloc[candidate_positions].copy()
+    candidates["_overlap_original_position"] = candidate_positions
+
+    for _, group in candidates.groupby(group_columns, dropna=False, sort=False):
+        identity = tuple(
+            "" if pd.isna(group.iloc[0][column]) else str(group.iloc[0][column])
+            for column in group_columns
+        )
+        signed_qty = group["_overlap_signed_qty"].sum()
+        gross_value = group["_overlap_gross_value"].sum()
+        possible_keys = {
+            aggregate_overlap_key(identity, signed_qty, gross_value),
+        }
+
+        if is_option_aggregate_group(group):
+            possible_keys.add(
+                aggregate_overlap_key(identity, signed_qty, None)
+            )
+
+        if not possible_keys.intersection(aggregate_keys):
+            continue
+
+        for original_position in group["_overlap_original_position"]:
+            result_mask[int(original_position)] = False
+
+    return result_mask
+
+
 def skip_existing_trade_overlaps(new_trades, master_file):
     if new_trades.empty or not os.path.exists(master_file):
         return new_trades, 0
@@ -231,6 +395,13 @@ def skip_existing_trade_overlaps(new_trades, master_file):
             skipped_count += 1
         else:
             keep_rows.append(True)
+
+    keep_rows = aggregate_overlap_skip_mask(
+        incoming,
+        keep_rows,
+        existing_trades,
+    )
+    skipped_count = len(keep_rows) - sum(keep_rows)
 
     filtered = (
         incoming.loc[keep_rows]
@@ -284,8 +455,370 @@ def prepare_base_trades(raw_trades, strategy_source_master=None):
     return trades
 
 
+def is_nonzero_futures_cash_settlement(row):
+    if str(row.get("account_bucket", "")).strip().lower() != "futures":
+        return False
+
+    if str(row.get("type", "")).strip().upper() != "TRD":
+        return False
+
+    description = str(row.get("description", "")).strip().lower()
+    if "cash settle future" not in description:
+        return False
+
+    return abs(parse_number(row.get("cash_flow")) or 0.0) > 0.000001
+
+
+def parse_expired_futures_option_removal(description):
+    match = re.search(
+        r"expiration of\s+"
+        r"(?P<symbol>/[A-Z0-9]+)\s+"
+        r"\S+\s+"
+        r"\d+"
+        r"(?:\s+\((?P<cycle>[^)]+)\))?\s+"
+        r"(?P<day>\d{1,2})\s+"
+        r"(?P<month>[A-Za-z]{3})\s+"
+        r"(?P<year>\d{4})\s+"
+        r"(?P<strike>[0-9]+(?:\.[0-9]+)?)\s+"
+        r"(?P<option_type>CALL|PUT)",
+        str(description),
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return {}
+
+    groups = match.groupdict()
+    expiration = (
+        f"{int(groups['day'])} "
+        f"{groups['month'].upper()} "
+        f"{str(groups['year'])[-2:]}"
+    )
+    cycle = str(groups.get("cycle") or "").strip().upper()
+    symbol = f"{groups['symbol'].upper()} {expiration}"
+
+    if cycle:
+        symbol = f"{symbol} ({cycle})"
+
+    strike = parse_number(groups.get("strike"))
+
+    return {
+        "symbol": symbol,
+        "expiration": expiration,
+        "strike": strike if strike is not None else groups.get("strike"),
+        "option_type": groups["option_type"].upper(),
+        "removal_description": str(description),
+    }
+
+
+def matching_expiration_removal(cash_ledger, settlement_row):
+    if cash_ledger is None or cash_ledger.empty:
+        return None
+
+    timestamp = pd.to_datetime(settlement_row.get("timestamp"), errors="coerce")
+    if pd.isna(timestamp):
+        return None
+
+    description = cash_ledger["description"].astype(str)
+    candidates = cash_ledger[
+        cash_ledger["account_bucket"].astype(str).str.lower().eq("futures")
+        & cash_ledger["type"].astype(str).str.upper().eq("TRD")
+        & cash_ledger["date"].astype(str).eq(str(settlement_row.get("date")))
+        & description.str.contains(
+            "Removal of option due to expiration",
+            case=False,
+            na=False,
+            regex=False,
+        )
+    ].copy()
+
+    if candidates.empty:
+        return None
+
+    candidates["_timestamp"] = pd.to_datetime(
+        candidates["timestamp"],
+        errors="coerce",
+    )
+    candidates = candidates[
+        candidates["_timestamp"].notna()
+        & (candidates["_timestamp"] <= timestamp)
+    ].sort_values("_timestamp")
+
+    if candidates.empty:
+        return None
+
+    return candidates.iloc[-1]
+
+
+def format_exec_time(timestamp):
+    timestamp = pd.to_datetime(timestamp, errors="coerce")
+
+    if pd.isna(timestamp):
+        return ""
+
+    return (
+        f"{timestamp.month}/{timestamp.day}/"
+        f"{timestamp.strftime('%y')} {timestamp.strftime('%H:%M:%S')}"
+    )
+
+
+def next_synthetic_statement_row(trades, sequence):
+    if "statement_trade_row" not in trades.columns or trades.empty:
+        return 100000 + sequence
+
+    statement_rows = pd.to_numeric(
+        trades["statement_trade_row"],
+        errors="coerce",
+    ).dropna()
+
+    if statement_rows.empty:
+        return 100000 + sequence
+
+    return int(statement_rows.max()) + 100000 + sequence
+
+
+def append_futures_cash_settlement_trades(trades, cash_ledger, input_file):
+    if trades is None or trades.empty or cash_ledger is None or cash_ledger.empty:
+        return trades
+
+    settlement_rows = cash_ledger[
+        cash_ledger.apply(is_nonzero_futures_cash_settlement, axis=1)
+    ].sort_values("timestamp")
+
+    if settlement_rows.empty:
+        return trades
+
+    synthetic_rows = []
+
+    for sequence, (_, settlement) in enumerate(
+        settlement_rows.iterrows(),
+        start=1,
+    ):
+        removal = matching_expiration_removal(cash_ledger, settlement)
+        removal_details = (
+            parse_expired_futures_option_removal(
+                removal.get("description", ""),
+            )
+            if removal is not None
+            else {}
+        )
+        ledger_amount = parse_number(settlement.get("amount")) or 0.0
+        ledger_cash_flow = parse_number(settlement.get("cash_flow")) or 0.0
+        ledger_fees = ledger_amount - ledger_cash_flow
+        timestamp = pd.to_datetime(
+            settlement.get("timestamp"),
+            errors="coerce",
+        )
+        ledger_description = str(settlement.get("description", "") or "")
+        removal_description = removal_details.get("removal_description", "")
+        description = ledger_description
+
+        if removal_description:
+            description = f"{removal_description} | {ledger_description}"
+
+        synthetic_rows.append(
+            {
+                "Exec Time": format_exec_time(timestamp),
+                "Spread": "SINGLE",
+                "Side": "CASH",
+                "Qty": 0,
+                "Pos Effect": "CASH SETTLE",
+                "Symbol": removal_details.get(
+                    "symbol",
+                    "FUTURES CASH SETTLEMENT",
+                ),
+                "Exp": removal_details.get("expiration", ""),
+                "Strike": removal_details.get("strike", ""),
+                "Type": removal_details.get("option_type", ""),
+                "Price": 0,
+                "Net Price": 0,
+                "Order Type": "CASH_SETTLE",
+                "Order ID": (
+                    f"cash-settle-"
+                    f"{timestamp.strftime('%Y%m%d%H%M%S')}"
+                    if not pd.isna(timestamp)
+                    else f"cash-settle-{sequence}"
+                ),
+                "Strategy_Name": "",
+                "statement_file": Path(input_file).name,
+                "statement_trade_row": next_synthetic_statement_row(
+                    trades,
+                    sequence,
+                ),
+                "synthetic_cash_settlement": True,
+                "synthetic_cash_settlement_description": description,
+                "synthetic_trade_pnl": ledger_amount,
+                "synthetic_fees": ledger_fees,
+                "synthetic_net_pnl": ledger_cash_flow,
+                "trade_pnl": ledger_amount,
+                "fees": ledger_fees,
+                "net_pnl": ledger_cash_flow,
+                "cash_correction_applied": True,
+                "cash_correction_status": "cash_ledger_applied",
+                "cash_correction_source": SYNTHETIC_CASH_SETTLEMENT_SOURCE,
+                "statement_cash_flow": ledger_cash_flow,
+            }
+        )
+
+    synthetic = pd.DataFrame(synthetic_rows)
+    combined = pd.concat(
+        [
+            trades,
+            synthetic,
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+    combined = combined.sort_values(
+        by="Exec Time",
+        key=lambda values: pd.to_datetime(
+            values,
+            format="%m/%d/%y %H:%M:%S",
+            errors="coerce",
+        ),
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    return restore_synthetic_cash_settlement_values(combined)
+
+
+def futures_unmatched_close_keys(trades):
+    if trades is None or trades.empty:
+        return set()
+
+    working = trades.copy()
+    working["_trade_time"] = pd.to_datetime(
+        working.get("Exec Time"),
+        format="%m/%d/%y %H:%M:%S",
+        errors="coerce",
+    )
+    working["_original_order"] = range(len(working))
+    working = working.sort_values(
+        ["_trade_time", "_original_order"],
+        na_position="last",
+    )
+    positions = {}
+    unmatched = set()
+
+    for _, row in working.iterrows():
+        if not is_futures_trade(row):
+            continue
+
+        root = normalize_root_symbol(row.get("Symbol"))
+        if not root:
+            continue
+
+        qty = abs(parse_number(row.get("Qty")) or 0.0)
+        if qty <= 0:
+            continue
+
+        side = str(row.get("Side", "")).strip().upper()
+        pos_effect = str(row.get("Pos Effect", "")).strip().upper()
+        direction = 1 if side == "BUY" else -1
+        positions.setdefault(root, [])
+
+        if pos_effect == "TO OPEN":
+            positions[root].append({
+                "direction": direction,
+                "qty_remaining": qty,
+            })
+            continue
+
+        if pos_effect != "TO CLOSE":
+            continue
+
+        remaining = qty
+        open_direction = -direction
+
+        for lot in positions[root]:
+            if remaining <= 0:
+                break
+
+            if lot["direction"] != open_direction:
+                continue
+
+            consumed = min(remaining, lot["qty_remaining"])
+            lot["qty_remaining"] -= consumed
+            remaining -= consumed
+
+        positions[root] = [
+            lot
+            for lot in positions[root]
+            if lot["qty_remaining"] > 0.000001
+        ]
+
+        if remaining > 0.000001:
+            unmatched.add(
+                (
+                    str(row.get("statement_file", "") or ""),
+                    row.get("statement_trade_row"),
+                )
+            )
+
+    return unmatched
+
+
+def build_cash_trade_corrections(cash_ledger, trades):
+    corrections = build_base_cash_trade_corrections(
+        cash_ledger,
+        trades,
+    )
+
+    if corrections is None or corrections.empty:
+        return corrections
+
+    unmatched_keys = futures_unmatched_close_keys(trades)
+    if not unmatched_keys:
+        return corrections
+
+    working = corrections.copy()
+
+    for index, correction in working.iterrows():
+        key = (
+            str(correction.get("statement_file", "") or ""),
+            correction.get("statement_trade_row"),
+        )
+
+        if key not in unmatched_keys:
+            continue
+
+        ledger_amount = parse_number(correction.get("ledger_amount"))
+        ledger_cash_flow = parse_number(correction.get("ledger_cash_flow"))
+
+        if ledger_amount is None or ledger_cash_flow is None:
+            continue
+
+        original_trade_pnl = (
+            parse_number(correction.get("original_trade_pnl")) or 0.0
+        )
+
+        if abs(ledger_amount - original_trade_pnl) <= 0.01:
+            continue
+
+        leg_sequence = parse_number(correction.get("event_leg_sequence")) or 1
+        if leg_sequence > 1:
+            working.at[index, "correction_source"] = (
+                "cash_ledger_unmatched_futures_close"
+            )
+            working.at[index, "corrected_trade_pnl"] = 0.0
+            working.at[index, "corrected_fees"] = 0.0
+            working.at[index, "corrected_net_pnl"] = 0.0
+            continue
+
+        corrected_fees = ledger_amount - ledger_cash_flow
+        working.at[index, "correction_source"] = (
+            "cash_ledger_unmatched_futures_close"
+        )
+        working.at[index, "corrected_trade_pnl"] = ledger_amount
+        working.at[index, "corrected_fees"] = corrected_fees
+        working.at[index, "corrected_net_pnl"] = ledger_cash_flow
+
+    return working.reindex(columns=CASH_CORRECTION_COLUMNS)
+
+
 def finalize_trades(base_trades, cash_trade_corrections, starting_equity):
     trades = reset_cash_correction_columns(base_trades)
+    trades = restore_synthetic_cash_settlement_values(trades)
     trades = apply_cash_trade_corrections(
         trades,
         cash_trade_corrections,
@@ -411,6 +944,253 @@ def numeric_sum(frame, column):
     return frame[column].apply(parse_number).fillna(0.0).sum()
 
 
+def bridge_key_value(value):
+    if pd.isna(value):
+        return ""
+
+    return str(value).strip()
+
+
+def bridge_normalized_spread(row):
+    spread = bridge_key_value(row.get("Spread")).upper()
+
+    if spread:
+        return spread
+
+    strategy_name = bridge_key_value(row.get("Strategy_Name")).upper()
+
+    if "STRADDLE" in strategy_name:
+        return "STRADDLE"
+
+    if "VERTICAL" in strategy_name or "SPREAD" in strategy_name:
+        return "VERTICAL"
+
+    return spread
+
+
+def bridge_is_option_trade(row):
+    return bridge_key_value(row.get("Type")).upper() in {"CALL", "PUT"}
+
+
+def bridge_position_key(row, include_strategy=True):
+    spread = bridge_normalized_spread(row)
+    strategy_key = (
+        (bridge_key_value(row.get("Strategy_Name")),)
+        if include_strategy
+        else ()
+    )
+
+    if bridge_is_option_trade(row):
+        if spread == "STRADDLE":
+            return strategy_key + (
+                bridge_key_value(row.get("Symbol")),
+                bridge_key_value(row.get("Exp")),
+                bridge_key_value(row.get("Strike")),
+                spread,
+            )
+
+        if spread == "VERTICAL":
+            return strategy_key + (
+                bridge_key_value(row.get("Symbol")),
+                bridge_key_value(row.get("Exp")),
+                bridge_key_value(row.get("Type")),
+                spread,
+            )
+
+        return strategy_key + (
+            bridge_key_value(row.get("Symbol")),
+            bridge_key_value(row.get("Exp")),
+            bridge_key_value(row.get("Strike")),
+            bridge_key_value(row.get("Type")),
+            spread,
+        )
+
+    return strategy_key + (
+        bridge_key_value(row.get("Symbol")),
+        spread,
+    )
+
+
+def bridge_find_open_lots(open_lots, row, side, require_opposite_side=False):
+    key = bridge_position_key(row)
+    lots = open_lots.get(key)
+
+    if lots:
+        return lots
+
+    fallback_key = bridge_position_key(row, include_strategy=False)
+    matches = []
+
+    for candidate_lots in open_lots.values():
+        if not candidate_lots:
+            continue
+
+        if require_opposite_side and candidate_lots[0]["side"] == side:
+            continue
+
+        candidate_row = candidate_lots[0].get("row")
+
+        if candidate_row is None:
+            continue
+
+        if bridge_position_key(
+            candidate_row,
+            include_strategy=False,
+        ) == fallback_key:
+            matches.append(candidate_lots)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
+
+
+def bridge_match_open_lots(lots, side, qty, drop_same_side=True):
+    remaining_qty = qty
+    matched_qty = 0.0
+
+    if not lots:
+        return matched_qty, remaining_qty
+
+    while remaining_qty > 0 and lots:
+        lot = lots[0]
+
+        if lot["side"] == side:
+            if drop_same_side:
+                lots.popleft()
+                continue
+
+            break
+
+        qty_to_match = min(
+            remaining_qty,
+            lot["remaining_qty"],
+        )
+        remaining_qty -= qty_to_match
+        matched_qty += qty_to_match
+        lot["remaining_qty"] -= qty_to_match
+
+        if lot["remaining_qty"] <= 0.000001:
+            lots.popleft()
+
+    return matched_qty, remaining_qty
+
+
+def bridge_prorated_value(row, column, qty):
+    total_qty = abs(parse_number(row.get("Qty")) or 0.0)
+    value = parse_number(row.get(column))
+
+    if total_qty == 0 or value is None:
+        return 0.0
+
+    return value * (qty / total_qty)
+
+
+def current_open_trade_lots(trades):
+    if trades is None or trades.empty:
+        return pd.DataFrame(columns=[])
+
+    working = trades.copy()
+
+    if "_trade_time" not in working.columns:
+        working["_trade_time"] = pd.to_datetime(
+            working.get("Exec Time"),
+            format="%m/%d/%y %H:%M:%S",
+            errors="coerce",
+        )
+
+    working["_original_order"] = range(len(working))
+    working = working.sort_values(
+        ["_trade_time", "_original_order"],
+        na_position="last",
+    )
+    open_lots = {}
+
+    for _, row in working.iterrows():
+        pos_effect = bridge_key_value(row.get("Pos Effect")).upper()
+        side = bridge_key_value(row.get("Side")).upper()
+        qty = abs(parse_number(row.get("Qty")) or 0.0)
+
+        if qty <= 0:
+            continue
+
+        if pos_effect == "TO OPEN":
+            lots = bridge_find_open_lots(
+                open_lots,
+                row,
+                side,
+                require_opposite_side=True,
+            )
+
+            if lots and lots[0]["side"] != side:
+                _, remaining_qty = bridge_match_open_lots(
+                    lots,
+                    side,
+                    qty,
+                    drop_same_side=False,
+                )
+
+                if remaining_qty <= 0.000001:
+                    continue
+
+                qty = remaining_qty
+
+            open_lots.setdefault(
+                bridge_position_key(row),
+                deque(),
+            ).append({
+                "remaining_qty": qty,
+                "side": side,
+                "row": row,
+            })
+            continue
+
+        if pos_effect != "TO CLOSE":
+            continue
+
+        lots = bridge_find_open_lots(
+            open_lots,
+            row,
+            side,
+            require_opposite_side=True,
+        )
+        bridge_match_open_lots(
+            lots,
+            side,
+            qty,
+        )
+
+    rows = []
+
+    for lots in open_lots.values():
+        for lot in lots:
+            remaining_qty = lot["remaining_qty"]
+
+            if remaining_qty <= 0.000001:
+                continue
+
+            row = dict(lot["row"])
+            row["_remaining_qty"] = remaining_qty
+            row["_open_lot_trade_pnl"] = bridge_prorated_value(
+                lot["row"],
+                "trade_pnl",
+                remaining_qty,
+            )
+            row["_open_lot_fees"] = bridge_prorated_value(
+                lot["row"],
+                "fees",
+                remaining_qty,
+            )
+            row["_open_lot_net_pnl"] = bridge_prorated_value(
+                lot["row"],
+                "net_pnl",
+                remaining_qty,
+            )
+            rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 def build_ytd_bridge_adjustments(
     statement_ytd_summary,
     statement_ytd_positions,
@@ -444,6 +1224,14 @@ def build_ytd_bridge_adjustments(
         trade_roots = trades.get("Symbol", pd.Series(dtype=object)).apply(
             normalized_trade_root
         )
+        open_lots = current_open_trade_lots(trades)
+        open_lot_roots = (
+            open_lots.get("Symbol", pd.Series(dtype=object)).apply(
+                normalized_trade_root
+            )
+            if not open_lots.empty
+            else pd.Series(dtype=object)
+        )
         position_rows = statement_ytd_positions.copy()
         position_rows["statement_open_pnl"] = (
             position_rows["statement_open_pnl"]
@@ -462,16 +1250,15 @@ def build_ytd_bridge_adjustments(
             if root_trades.empty:
                 continue
 
-            pos_effect = (
-                root_trades.get("Pos Effect", pd.Series(dtype=object))
-                .fillna("")
-                .astype(str)
-                .str.upper()
+            root_open_lots = (
+                open_lots[open_lot_roots == root].copy()
+                if not open_lots.empty
+                else pd.DataFrame()
             )
-            open_rows = root_trades[
-                pos_effect.str.contains("TO OPEN", na=False)
-            ].copy()
-            gross_open_cash_pnl = numeric_sum(open_rows, "trade_pnl")
+            gross_open_cash_pnl = numeric_sum(
+                root_open_lots,
+                "_open_lot_trade_pnl",
+            )
 
             if abs(gross_open_cash_pnl) <= 0.005:
                 continue
@@ -709,10 +1496,189 @@ def pending_correction_delta(correction_candidates):
     return numeric_sum(working, "net_pnl_delta")
 
 
+def statement_file_basename(statement_file):
+    if statement_file is None or pd.isna(statement_file):
+        return ""
+
+    return Path(str(statement_file)).name
+
+
+def statement_file_date(statement_file):
+    basename = statement_file_basename(statement_file)
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", basename)
+
+    if not match:
+        return ""
+
+    return match.group(1)
+
+
+def statement_ytd_history_row(statement_ytd_summary):
+    row = dict(statement_ytd_summary or {})
+    statement_file = row.get("statement_file", "")
+    row["statement_basename"] = statement_file_basename(statement_file)
+    row["statement_date"] = statement_file_date(statement_file)
+    return row
+
+
+def statement_ytd_history_sort(history):
+    if history is None or history.empty:
+        return pd.DataFrame(columns=[])
+
+    working = history.copy()
+
+    if "statement_basename" not in working.columns:
+        working["statement_basename"] = working.get(
+            "statement_file",
+            pd.Series("", index=working.index),
+        ).apply(statement_file_basename)
+
+    if "statement_date" not in working.columns:
+        working["statement_date"] = working.get(
+            "statement_file",
+            pd.Series("", index=working.index),
+        ).apply(statement_file_date)
+
+    working["_statement_date"] = pd.to_datetime(
+        working["statement_date"],
+        errors="coerce",
+    )
+    working["_original_order"] = range(len(working))
+    return working.sort_values(
+        ["_statement_date", "_original_order"],
+        na_position="last",
+    ).drop(
+        columns=["_statement_date", "_original_order"]
+    ).reset_index(drop=True)
+
+
+def statement_ytd_history_from_existing_outputs(paths):
+    history = load_output_csv(paths["statement_ytd_history"])
+    latest_summary = load_output_csv(paths["statement_ytd_summary"])
+
+    frames = []
+    if not history.empty:
+        frames.append(history)
+
+    if not latest_summary.empty:
+        frames.append(
+            pd.DataFrame([
+                statement_ytd_history_row(latest_summary.iloc[0].to_dict())
+            ])
+        )
+
+    if not frames:
+        return pd.DataFrame(columns=[])
+
+    combined = pd.concat(frames, ignore_index=True, sort=False)
+
+    if "statement_basename" not in combined.columns:
+        combined["statement_basename"] = combined.get(
+            "statement_file",
+            pd.Series("", index=combined.index),
+        ).apply(statement_file_basename)
+
+    combined = combined.drop_duplicates(
+        subset=["statement_basename"],
+        keep="last",
+    )
+    return statement_ytd_history_sort(combined)
+
+
+def update_statement_ytd_history(paths, statement_ytd_summary):
+    history = statement_ytd_history_from_existing_outputs(paths)
+    current = pd.DataFrame([statement_ytd_history_row(statement_ytd_summary)])
+    combined = pd.concat(
+        [
+            history,
+            current,
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+
+    if "statement_basename" not in combined.columns:
+        combined["statement_basename"] = combined.get(
+            "statement_file",
+            pd.Series("", index=combined.index),
+        ).apply(statement_file_basename)
+
+    combined = combined.drop_duplicates(
+        subset=["statement_basename"],
+        keep="last",
+    )
+    combined = statement_ytd_history_sort(combined)
+    combined.to_csv(paths["statement_ytd_history"], index=False)
+    return combined
+
+
+def previous_statement_ytd_summary(statement_ytd_summary, ytd_history):
+    if ytd_history is None or ytd_history.empty:
+        return {}
+
+    current = statement_ytd_history_row(statement_ytd_summary)
+    current_basename = current.get("statement_basename", "")
+    current_date = pd.to_datetime(
+        current.get("statement_date", ""),
+        errors="coerce",
+    )
+    history = statement_ytd_history_sort(ytd_history)
+    dates = pd.to_datetime(history.get("statement_date"), errors="coerce")
+
+    if not pd.isna(current_date):
+        previous = history[dates < current_date]
+    else:
+        current_matches = history[
+            history.get(
+                "statement_basename",
+                pd.Series("", index=history.index),
+            ).astype(str).eq(str(current_basename))
+        ]
+
+        if current_matches.empty:
+            previous = history
+        else:
+            previous = history.loc[: current_matches.index[-1]].iloc[:-1]
+
+    if previous.empty:
+        return {}
+
+    return previous.iloc[-1].to_dict()
+
+
+def statement_ytd_delta_fields(statement_ytd_summary, ytd_history):
+    current = dict(statement_ytd_summary or {})
+    previous = previous_statement_ytd_summary(current, ytd_history)
+    current_net = parse_number(current.get("statement_closed_net_ytd_pnl"))
+    previous_net = parse_number(previous.get("statement_closed_net_ytd_pnl"))
+    current_gross = parse_number(current.get("statement_gross_ytd_pnl"))
+    previous_gross = parse_number(previous.get("statement_gross_ytd_pnl"))
+
+    return {
+        "statement_file": current.get("statement_file"),
+        "statement_date": statement_file_date(current.get("statement_file")),
+        "previous_statement_file": previous.get("statement_file"),
+        "previous_statement_date": previous.get("statement_date"),
+        "previous_statement_closed_net_ytd_pnl": previous_net,
+        "statement_closed_net_ytd_pnl_change_since_previous": (
+            current_net - previous_net
+            if current_net is not None and previous_net is not None
+            else None
+        ),
+        "previous_statement_gross_ytd_pnl": previous_gross,
+        "statement_gross_ytd_pnl_change_since_previous": (
+            current_gross - previous_gross
+            if current_gross is not None and previous_gross is not None
+            else None
+        ),
+    }
+
+
 def dashboard_statement_totals(
     statement_ytd_summary,
     ytd_reconciliation,
     correction_candidates=None,
+    ytd_history=None,
 ):
     summary = dict(statement_ytd_summary or {})
     display = {
@@ -723,6 +1689,7 @@ def dashboard_statement_totals(
             "statement_total_ytd_commissions_and_fees"
         ),
     }
+    display.update(statement_ytd_delta_fields(summary, ytd_history))
 
     if ytd_reconciliation is not None and not ytd_reconciliation.empty:
         for _, row in ytd_reconciliation.iterrows():
@@ -906,6 +1873,11 @@ def add_suggested_reconciliation_columns(reconciliation, candidates):
 
 def likely_reconciliation_cause(group, candidates, tolerance=1.0):
     delta = parse_number(group.get("unreconciled_delta")) or 0.0
+
+    if str(group.get("status", "")).strip() == "explained" and bool(
+        group.get("settlement_basis_explained", False)
+    ):
+        return "Futures settlement basis differs from trade PnL"
 
     if abs(delta) <= tolerance:
         return "Reconciled"
@@ -1381,27 +2353,275 @@ def save_strategy_updates(paths, updates):
     }
 
 
-def write_outputs(context, cash_trade_corrections):
-    os.makedirs(context.output_dir, exist_ok=True)
-    cleaned = finalize_trades(
-        context.base_trades,
-        cash_trade_corrections,
-        context.starting_equity,
+def preserve_current_import_strategy_names(cleaned, master):
+    if cleaned is None or cleaned.empty:
+        return cleaned
+
+    if master is None or master.empty:
+        return ensure_strategy_column(cleaned)
+
+    preview = pd.concat(
+        [
+            master,
+            cleaned,
+        ],
+        ignore_index=True,
+        sort=False,
     )
-    reconciliation = reconcile_cash_balances(
-        context.lines,
+    strategy_dedupe_columns = [
+        column
+        for column in get_dedupe_columns(preview)
+        if column not in STATEMENT_IDENTITY_COLUMNS
+    ]
+
+    return preserve_existing_strategy_names(
+        master,
         cleaned,
-        tolerance=context.cash_validation_tolerance,
-        start_date=context.cash_reconciliation_start_date,
-        end_date=context.cash_reconciliation_end_date,
+        strategy_dedupe_columns,
     )
 
+
+def strategy_series(frame):
+    return ensure_strategy_column(frame)["Strategy_Name"].apply(
+        clean_strategy_name
+    )
+
+
+def backfill_missing_master_strategy_names(paths, strategy_source_master):
+    if not strategy_source_master:
+        return 0
+
+    master_path = Path(paths["master"])
+    source_path = Path(strategy_source_master)
+
+    if not master_path.exists() or not source_path.exists():
+        return 0
+
+    if master_path.resolve() == source_path.resolve():
+        return 0
+
+    master = pd.read_csv(master_path)
+    source = pd.read_csv(source_path)
+
+    if master.empty or source.empty or "Strategy_Name" not in source.columns:
+        return 0
+
+    before = strategy_series(master)
+    preview = pd.concat(
+        [
+            source,
+            master,
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+    strategy_dedupe_columns = [
+        column
+        for column in get_dedupe_columns(preview)
+        if column not in STATEMENT_IDENTITY_COLUMNS
+    ]
+    enriched = preserve_existing_strategy_names(
+        source,
+        master,
+        strategy_dedupe_columns,
+    )
+    after = strategy_series(enriched)
+    filled = before.eq("") & after.ne("")
+
+    if not filled.any():
+        return 0
+
+    enriched.loc[~before.eq(""), "Strategy_Name"] = ensure_strategy_column(
+        master
+    ).loc[~before.eq(""), "Strategy_Name"]
+    enriched.to_csv(master_path, index=False)
+
+    cleaned_path = Path(paths["cleaned"])
+    if cleaned_path.exists():
+        cleaned = pd.read_csv(cleaned_path)
+        cleaned = preserve_current_import_strategy_names(cleaned, enriched)
+        cleaned.to_csv(cleaned_path, index=False)
+
+    return int(filled.sum())
+
+
+def frame_starting_equity(frame):
+    if frame is None or frame.empty or "starting_equity" not in frame.columns:
+        return None
+
+    values = frame["starting_equity"].apply(parse_number).dropna()
+
+    if values.empty:
+        return None
+
+    return float(values.iloc[0])
+
+
+def refresh_existing_outputs_with_saved_corrections(paths, cash_corrections_path):
+    master_path = Path(paths["master"])
+
+    if not master_path.exists():
+        return 0
+
+    master = pd.read_csv(master_path)
+    if master.empty:
+        return 0
+
+    starting_equity = frame_starting_equity(master)
+    if starting_equity is None:
+        return 0
+
+    corrections = load_cash_trade_corrections(cash_corrections_path)
+    refreshed_master = master
+    applied = 0
+
+    if not corrections.empty:
+        refreshed_master = recalculate_cleaned_trade_columns(
+            master,
+            starting_equity,
+            cash_trade_corrections=corrections,
+        )
+        applied = int(refreshed_master.attrs.get("cash_corrections_applied", 0))
+
+        if applied > 0:
+            refreshed_master.to_csv(master_path, index=False)
+            build_equity_curve(refreshed_master).to_csv(
+                paths["equity_curve"],
+                index=False,
+            )
+            calculate_summary_statistics(refreshed_master).to_csv(
+                paths["summary_stats"],
+                index=False,
+            )
+
+    cleaned_path = Path(paths["cleaned"])
+    if cleaned_path.exists():
+        cleaned = pd.read_csv(cleaned_path)
+        if statement_identity_keys(cleaned):
+            refreshed_cleaned = select_current_import_rows(
+                refreshed_master,
+                cleaned,
+            )
+        else:
+            cleaned_starting_equity = (
+                frame_starting_equity(cleaned) or starting_equity
+            )
+            refreshed_cleaned = recalculate_cleaned_trade_columns(
+                cleaned,
+                cleaned_starting_equity,
+                cash_trade_corrections=corrections,
+            )
+        refreshed_cleaned = preserve_current_import_strategy_names(
+            refreshed_cleaned,
+            refreshed_master,
+        )
+        refreshed_cleaned.to_csv(cleaned_path, index=False)
+
+    statement_summary = load_output_csv(paths["statement_ytd_summary"])
+    if not statement_summary.empty:
+        statement_ytd_summary = statement_summary.iloc[0].to_dict()
+        statement_ytd_positions = load_output_csv(
+            paths["statement_ytd_positions"]
+        )
+        ytd_bridge_adjustments = build_ytd_bridge_adjustments(
+            statement_ytd_summary,
+            statement_ytd_positions,
+            refreshed_master,
+        )
+        ytd_reconciliation = ytd_reconciliation_rows(
+            statement_ytd_summary,
+            refreshed_master,
+            ytd_bridge_adjustments,
+        )
+        ytd_bridge_adjustments.to_csv(
+            paths["ytd_bridge_adjustments"],
+            index=False,
+        )
+        ytd_reconciliation.to_csv(
+            paths["ytd_reconciliation"],
+            index=False,
+        )
+
+    return applied
+
+
+def refresh_statement_ytd_outputs(paths, input_file):
+    master_path = Path(paths["master"])
+
+    if not master_path.exists():
+        return False
+
+    master = pd.read_csv(master_path)
+    if master.empty:
+        return False
+
+    lines = Path(input_file).read_text(errors="replace").splitlines(True)
+    statement_ytd_summary, statement_ytd_positions = (
+        parse_statement_ytd_summary(lines, input_file)
+    )
+    ytd_bridge_adjustments = build_ytd_bridge_adjustments(
+        statement_ytd_summary,
+        statement_ytd_positions,
+        master,
+    )
+    ytd_reconciliation = ytd_reconciliation_rows(
+        statement_ytd_summary,
+        master,
+        ytd_bridge_adjustments,
+    )
+
+    update_statement_ytd_history(paths, statement_ytd_summary)
+    pd.DataFrame([statement_ytd_summary]).to_csv(
+        paths["statement_ytd_summary"],
+        index=False,
+    )
+    statement_ytd_positions.to_csv(
+        paths["statement_ytd_positions"],
+        index=False,
+    )
+    ytd_bridge_adjustments.to_csv(
+        paths["ytd_bridge_adjustments"],
+        index=False,
+    )
+    ytd_reconciliation.to_csv(
+        paths["ytd_reconciliation"],
+        index=False,
+    )
+
+    return True
+
+
+def write_outputs(context, cash_trade_corrections):
+    os.makedirs(context.output_dir, exist_ok=True)
     master = update_master_cleaned_trades(
         context.base_trades.copy(),
         context.paths["master"],
         context.master_starting_equity,
         cash_trade_corrections=cash_trade_corrections,
         start_date=None,
+    )
+    cleaned = select_current_import_rows(
+        master,
+        context.base_trades,
+    )
+    reconciliation_trades = cash_reconciliation_trade_frame(
+        context,
+        master,
+        cleaned,
+    )
+    reconciliation = reconcile_cash_balances(
+        context.lines,
+        reconciliation_trades,
+        tolerance=context.cash_validation_tolerance,
+        start_date=context.cash_reconciliation_start_date,
+        end_date=context.cash_reconciliation_end_date,
+        include_futures_mtm_adjustments=False,
+    )
+    reconciliation = annotate_futures_settlement_basis(
+        reconciliation,
+        context.cash_ledger,
+        reconciliation_trades,
+        context.cash_validation_tolerance,
     )
     equity_curve = build_equity_curve(master)
     summary_statistics = calculate_summary_statistics(master)
@@ -1416,6 +2636,10 @@ def write_outputs(context, cash_trade_corrections):
         ytd_bridge_adjustments,
     )
 
+    update_statement_ytd_history(
+        context.paths,
+        context.statement_ytd_summary,
+    )
     cleaned.to_csv(context.paths["cleaned"], index=False)
     master.to_csv(context.paths["master"], index=False)
     equity_curve.to_csv(context.paths["equity_curve"], index=False)
@@ -1467,20 +2691,300 @@ def existing_master_for_preview(context):
     return pd.DataFrame(columns=context.base_trades.columns)
 
 
+def normalized_statement_row(value):
+    number = parse_number(value)
+
+    if number is not None:
+        return str(int(number)) if float(number).is_integer() else str(number)
+
+    return str(value or "").strip()
+
+
+def statement_identity_keys(trades):
+    if (
+        trades is None
+        or trades.empty
+        or "statement_file" not in trades.columns
+        or "statement_trade_row" not in trades.columns
+    ):
+        return set()
+
+    return {
+        (
+            str(row.get("statement_file", "") or "").strip(),
+            normalized_statement_row(row.get("statement_trade_row")),
+        )
+        for row in trades.to_dict("records")
+    }
+
+
+def select_current_import_rows(master_trades, current_import_trades):
+    if master_trades is None or master_trades.empty:
+        return master_trades
+
+    keys = statement_identity_keys(current_import_trades)
+
+    if not keys:
+        return master_trades.tail(len(current_import_trades)).copy()
+
+    working = master_trades.copy()
+    mask = working.apply(
+        lambda row: (
+            str(row.get("statement_file", "") or "").strip(),
+            normalized_statement_row(row.get("statement_trade_row")),
+        )
+        in keys,
+        axis=1,
+    )
+
+    return working.loc[mask].copy()
+
+
+def trade_rows_in_reconciliation_window(trades, start_date, end_date):
+    if trades is None or trades.empty:
+        return trades
+
+    working = trades.copy()
+    trade_times = pd.to_datetime(
+        working.get("Exec Time"),
+        format="%m/%d/%y %H:%M:%S",
+        errors="coerce",
+    )
+    keep = trade_times.notna()
+
+    if start_date is not None:
+        keep &= trade_times >= start_date
+
+    if end_date is not None:
+        keep &= trade_times < end_date + pd.Timedelta(days=1)
+
+    return working.loc[keep].copy()
+
+
+def cash_reconciliation_trade_frame(context, master, cleaned):
+    if not context.skipped_overlap_trades:
+        return cleaned
+
+    window_trades = trade_rows_in_reconciliation_window(
+        master,
+        context.cash_reconciliation_start_date,
+        context.cash_reconciliation_end_date,
+    )
+
+    if window_trades is None or window_trades.empty:
+        return cleaned
+
+    return window_trades
+
+
+def master_aware_trade_frame(context, cash_trade_corrections=None):
+    existing = existing_master_for_preview(context)
+
+    if existing is None or existing.empty:
+        return finalize_trades(
+            context.base_trades,
+            cash_trade_corrections,
+            context.starting_equity,
+        )
+
+    preview = pd.concat(
+        [
+            existing,
+            context.base_trades,
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+
+    dedupe_columns = get_dedupe_columns(preview)
+    if dedupe_columns:
+        strategy_dedupe_columns = [
+            column
+            for column in dedupe_columns
+            if column not in STATEMENT_IDENTITY_COLUMNS
+        ]
+        base_trades = preserve_existing_strategy_names(
+            existing,
+            context.base_trades,
+            strategy_dedupe_columns,
+        )
+        existing = drop_existing_replaced_real_trades(
+            existing,
+            base_trades,
+            dedupe_columns,
+        )
+        existing = existing.copy()
+        base_trades = base_trades.copy()
+        existing["_dedupe_key"] = build_dedupe_key(
+            existing,
+            dedupe_columns,
+        )
+        base_trades["_dedupe_key"] = build_dedupe_key(
+            base_trades,
+            dedupe_columns,
+        )
+        existing = existing.loc[
+            ~existing["_dedupe_key"].isin(base_trades["_dedupe_key"])
+        ].drop(columns=["_dedupe_key"])
+        base_trades = base_trades.drop(columns=["_dedupe_key"])
+        combined = pd.concat(
+            [
+                existing,
+                base_trades,
+            ],
+            ignore_index=True,
+            sort=False,
+        )
+    else:
+        combined = preview
+
+    return recalculate_cleaned_trade_columns(
+        combined,
+        context.master_starting_equity,
+        cash_trade_corrections=cash_trade_corrections,
+    )
+
+
+def master_aware_current_import_trades(context, cash_trade_corrections=None):
+    master = master_aware_trade_frame(
+        context,
+        cash_trade_corrections,
+    )
+    return select_current_import_rows(
+        master,
+        context.base_trades,
+    )
+
+
+def futures_settlement_basis_by_day(cash_ledger, trades):
+    candidates = build_base_cash_trade_corrections(
+        cash_ledger,
+        trades,
+    )
+
+    if candidates is None or candidates.empty:
+        return pd.DataFrame(columns=[
+            "date",
+            "account_bucket",
+            "futures_settlement_basis_delta",
+        ])
+
+    working = candidates[
+        candidates["account_bucket"].astype(str).eq("futures")
+    ].copy()
+    if working.empty:
+        return pd.DataFrame(columns=[
+            "date",
+            "account_bucket",
+            "futures_settlement_basis_delta",
+        ])
+
+    event_columns = [
+        "date",
+        "account_bucket",
+        "event_sequence",
+        "ledger_timestamp",
+        "ledger_description",
+    ]
+    event_rows = []
+
+    for key, event in working.groupby(event_columns, dropna=False):
+        event_rows.append({
+            "date": key[0],
+            "account_bucket": key[1],
+            "futures_settlement_basis_delta": (
+                event["original_net_pnl"].apply(parse_number).fillna(0.0).sum()
+                - (parse_number(event["ledger_cash_flow"].iloc[0]) or 0.0)
+            ),
+        })
+
+    if not event_rows:
+        return pd.DataFrame(columns=[
+            "date",
+            "account_bucket",
+            "futures_settlement_basis_delta",
+        ])
+
+    return (
+        pd.DataFrame(event_rows)
+        .groupby(["date", "account_bucket"], as_index=False)[
+            "futures_settlement_basis_delta"
+        ]
+        .sum()
+    )
+
+
+def annotate_futures_settlement_basis(
+    reconciliation,
+    cash_ledger,
+    trades,
+    tolerance,
+):
+    if reconciliation is None or reconciliation.empty:
+        return reconciliation
+
+    basis = futures_settlement_basis_by_day(
+        cash_ledger,
+        trades,
+    )
+    working = reconciliation.copy()
+    working = working.merge(
+        basis,
+        on=["date", "account_bucket"],
+        how="left",
+    )
+    working["futures_settlement_basis_delta"] = (
+        pd.to_numeric(
+            working["futures_settlement_basis_delta"],
+            errors="coerce",
+        )
+        .fillna(0.0)
+    )
+    working["futures_settlement_residual"] = (
+        working["unreconciled_delta"].apply(parse_number).fillna(0.0)
+        - working["futures_settlement_basis_delta"]
+    )
+    explained_mask = (
+        working["account_bucket"].astype(str).eq("futures")
+        & working["status"].astype(str).eq("unreconciled")
+        & working["futures_settlement_basis_delta"].abs().gt(tolerance)
+        & working["futures_settlement_residual"].abs().le(tolerance)
+    )
+    working["settlement_basis_explained"] = False
+    working.loc[explained_mask, "status"] = "explained"
+    working.loc[explained_mask, "settlement_basis_explained"] = True
+
+    return working
+
+
 def write_preview_outputs(context, cash_trade_corrections):
     os.makedirs(context.output_dir, exist_ok=True)
-    cleaned = finalize_trades(
-        context.base_trades,
+    master = master_aware_trade_frame(
+        context,
         cash_trade_corrections,
-        context.starting_equity,
     )
-    master = existing_master_for_preview(context)
+    cleaned = select_current_import_rows(
+        master,
+        context.base_trades,
+    )
+    reconciliation_trades = cash_reconciliation_trade_frame(
+        context,
+        master,
+        cleaned,
+    )
     reconciliation = reconcile_cash_balances(
         context.lines,
-        cleaned,
+        reconciliation_trades,
         tolerance=context.cash_validation_tolerance,
         start_date=context.cash_reconciliation_start_date,
         end_date=context.cash_reconciliation_end_date,
+        include_futures_mtm_adjustments=False,
+    )
+    reconciliation = annotate_futures_settlement_basis(
+        reconciliation,
+        context.cash_ledger,
+        reconciliation_trades,
+        context.cash_validation_tolerance,
     )
     ytd_bridge_adjustments = build_ytd_bridge_adjustments(
         context.statement_ytd_summary,
@@ -1493,6 +2997,10 @@ def write_preview_outputs(context, cash_trade_corrections):
         ytd_bridge_adjustments,
     )
 
+    update_statement_ytd_history(
+        context.paths,
+        context.statement_ytd_summary,
+    )
     cleaned.to_csv(context.paths["cleaned"], index=False)
     reconciliation.to_csv(context.paths["cash_reconciliation"], index=False)
     reconciliation.to_csv(
@@ -1557,6 +3065,7 @@ def html_payload(
         context.statement_ytd_summary,
         outputs["ytd_reconciliation"],
         candidates,
+        load_output_csv(context.paths["statement_ytd_history"]),
     )
 
     return {
@@ -1566,10 +3075,7 @@ def html_payload(
         ),
         "strategyNames": strategy_name_options(outputs.get("master")),
         "newTrades": json_safe_records(imported_trade_rows(outputs["cleaned"])),
-        "untaggedTrades": untagged_trade_rows(
-            outputs.get("master"),
-            exclude_trades=outputs["cleaned"],
-        ),
+        "untaggedTrades": untagged_trade_rows(outputs.get("master")),
         "openPositions": json_safe_records(
             open_position_rows(context.statement_ytd_positions)
         ),
@@ -1625,6 +3131,10 @@ def dashboard_payload_from_existing_outputs(
             paths["ytd_bridge_adjustments"]
         ),
     }
+    outputs["cleaned"] = preserve_current_import_strategy_names(
+        outputs["cleaned"],
+        outputs["master"],
+    )
     correction_candidates = load_output_csv(
         paths["cash_trade_correction_candidates"],
         columns=CASH_CORRECTION_COLUMNS,
@@ -1640,6 +3150,60 @@ def dashboard_payload_from_existing_outputs(
         correction_candidates,
         saved_corrections,
     )
+
+
+def save_corrections_to_existing_outputs(
+    paths,
+    submitted,
+    dashboard_path,
+    cash_validation_tolerance=1.0,
+    cash_corrections_path=None,
+):
+    corrections_path = cash_corrections_path or paths["cash_trade_corrections"]
+    submitted = (
+        submitted
+        if submitted is not None and not submitted.empty
+        else pd.DataFrame(columns=CASH_CORRECTION_COLUMNS)
+    )
+    submitted = submitted.reindex(columns=CASH_CORRECTION_COLUMNS)
+    existing = load_cash_trade_corrections(corrections_path)
+    combined = combine_cash_trade_corrections(existing, submitted)
+    save_cash_trade_corrections(corrections_path, combined)
+
+    applied = refresh_existing_outputs_with_saved_corrections(
+        paths,
+        corrections_path,
+    )
+    candidates = load_output_csv(
+        paths["cash_trade_correction_candidates"],
+        columns=CASH_CORRECTION_COLUMNS,
+    )
+    candidates = add_candidate_review_columns(candidates, combined)
+    candidates.to_csv(
+        paths["cash_trade_correction_candidates"],
+        index=False,
+    )
+    refreshed_payload = dashboard_payload_from_existing_outputs(
+        paths,
+        cash_validation_tolerance=cash_validation_tolerance,
+        cash_corrections_path=corrections_path,
+    )
+    write_dashboard(
+        dashboard_path,
+        refreshed_payload,
+        server_enabled=True,
+    )
+
+    return {
+        "saved_rows": len(combined),
+        "submitted_rows": len(submitted),
+        "master_updated": True,
+        "applied_rows": applied,
+        "message": (
+            f"Saved {len(combined)} correction rows and refreshed existing "
+            "v2 CSV outputs."
+        ),
+    }
 
 
 def dashboard_html(payload, server_enabled=False):
@@ -1754,6 +3318,7 @@ def dashboard_html(payload, server_enabled=False):
       font-size: 13px;
     }}
     .banner.good {{ background: var(--good-bg); color: var(--good); border-color: #9bd8b5; }}
+    .banner.warn {{ background: #fff7db; color: #7a4b00; border-color: #e8c86f; }}
     .banner.bad {{ background: var(--bad-bg); color: var(--bad); border-color: #f0aaa4; }}
     .panel {{
       background: var(--panel);
@@ -2004,6 +3569,10 @@ def dashboard_html(payload, server_enabled=False):
       'difference_after_ytd_bridge',
       'pending_suggested_correction_delta',
       'difference',
+      'previous_statement_closed_net_ytd_pnl',
+      'statement_closed_net_ytd_pnl_change_since_previous',
+      'previous_statement_gross_ytd_pnl',
+      'statement_gross_ytd_pnl_change_since_previous',
       'gross_pnl','fees','net_pnl','open_position_pnl','ytd_pnl',
       'closed_gross_pnl','difference','statement_trade_cash_flow',
       'extracted_net_pnl','suggested_net_pnl','suggested_adjustment',
@@ -2084,9 +3653,17 @@ def dashboard_html(payload, server_enabled=False):
       }});
       return options.join('');
     }}
+    function controlsForStrategyKey(attributeName, key) {{
+      return Array.from(document.querySelectorAll(`[${{attributeName}}]`))
+        .filter(control => control.dataset.strategySelect === key || control.dataset.strategyManual === key);
+    }}
     function strategyValueForKey(key) {{
-      const manual = document.querySelector(`[data-strategy-manual="${{CSS.escape(key)}}"]`)?.value.trim() || '';
-      const selected = document.querySelector(`[data-strategy-select="${{CSS.escape(key)}}"]`)?.value.trim() || '';
+      const manual = controlsForStrategyKey('data-strategy-manual', key)
+        .map(control => control.value.trim())
+        .find(value => value) || '';
+      const selected = controlsForStrategyKey('data-strategy-select', key)
+        .map(control => control.value.trim())
+        .find(value => value) || '';
       return manual || selected;
     }}
     function strategyControl(row) {{
@@ -2134,6 +3711,7 @@ def dashboard_html(payload, server_enabled=False):
       }}
       const totals = [
         ['statement_closed_net_ytd_pnl', 'YTD Net PNL From Account Statement'],
+        ['statement_closed_net_ytd_pnl_change_since_previous', 'Change Since Prior Statement'],
         ['trade_history_adjusted_closed_net_ytd_pnl', 'YTD Net PNL From Trade History'],
         ['difference_after_adjustments', 'Difference'],
       ];
@@ -2151,6 +3729,10 @@ def dashboard_html(payload, server_enabled=False):
         'closed_gross_ytd_pnl',
         'total_ytd_commissions_and_fees',
         'statement_closed_net_ytd_pnl',
+        'previous_statement_file',
+        'previous_statement_date',
+        'previous_statement_closed_net_ytd_pnl',
+        'statement_closed_net_ytd_pnl_change_since_previous',
         'trade_history_closed_net_ytd_pnl',
         'open_trade_exclusion',
         'ytd_bridge_adjustment',
@@ -2211,11 +3793,15 @@ def dashboard_html(payload, server_enabled=False):
     }}
     function selectedRows() {{
       const keys = selected;
-      return (DATA.correctionCandidates || []).filter(row => keys.has(row.correction_key));
+      return (DATA.correctionCandidates || []).filter(row => keys.has(row.correction_key) && correctionIsActionable(row));
+    }}
+    function correctionIsActionable(row) {{
+      if (!row || row.is_saved) return false;
+      return ['trade_pnl_delta', 'fee_delta', 'net_pnl_delta'].some(column => Math.abs(Number(row[column]) || 0) > 0.005);
     }}
     function selectFeeOnly() {{
       (DATA.correctionCandidates || []).forEach(row => {{
-        if (row.is_fee_only && !row.is_saved) selected.add(row.correction_key);
+        if (row.is_fee_only && correctionIsActionable(row)) selected.add(row.correction_key);
       }});
       dirty = true;
       renderCorrections();
@@ -2242,7 +3828,13 @@ def dashboard_html(payload, server_enabled=False):
         headers: {{ 'Content-Type': 'application/json' }},
         body: JSON.stringify({{ corrections: rows }}),
       }});
-      const payload = await response.json();
+      const responseText = await response.text();
+      let payload = {{}};
+      try {{
+        payload = responseText ? JSON.parse(responseText) : {{}};
+      }} catch (error) {{
+        payload = {{ error: responseText }};
+      }}
       if (!response.ok) {{
         updateBanner(`Save failed: ${{payload.error || response.statusText}}`, 'bad');
         return;
@@ -2250,7 +3842,11 @@ def dashboard_html(payload, server_enabled=False):
       dirty = false;
       savedSinceLoad = true;
       selected.clear();
-      updateBanner(`Saved ${{payload.saved_rows}} correction rows and refreshed v2 CSV outputs.`, 'good');
+      if (payload.master_updated === false) {{
+        updateBanner(payload.message || `Saved ${{payload.saved_rows}} correction rows. Master update is still blocked by unreconciled groups.`, 'warn');
+      }} else {{
+        updateBanner(payload.message || `Saved ${{payload.saved_rows}} correction rows and refreshed v2 CSV outputs.`, 'good');
+      }}
       setTimeout(() => window.location.reload(), 400);
     }}
     async function saveStrategies() {{
@@ -2286,13 +3882,30 @@ def dashboard_html(payload, server_enabled=False):
       updateBanner(`Saved ${{payload.saved_rows}} strategy row(s) and refreshed v2 CSV outputs.`, 'good');
       setTimeout(() => window.location.reload(), 400);
     }}
-    function exitDashboard() {{
+    async function stopDashboardServer() {{
+      if (!DATA.serverEnabled) return true;
+      try {{
+        const response = await fetch('/api/shutdown', {{ method: 'POST' }});
+        if (!response.ok) {{
+          const payload = await response.json().catch(() => ({{}}));
+          updateBanner(`Exit failed: ${{payload.error || response.statusText}}`, 'bad');
+          return false;
+        }}
+        return true;
+      }} catch (error) {{
+        updateBanner(`Exit failed: ${{error.message || error}}`, 'bad');
+        return false;
+      }}
+    }}
+    async function exitDashboard() {{
       if ((dirty || dirtyStrategyRows.size) && !confirm('You have unsaved dashboard changes. Close anyway?')) return;
+      const stopped = await stopDashboardServer();
+      if (!stopped) return;
+      updateBanner('Dashboard server stopped. The command line should be available again.', 'good');
       window.close();
-      updateBanner('If the tab did not close, it is safe to close it manually after saving corrections.', savedSinceLoad ? 'good' : '');
     }}
     function renderCorrections() {{
-      const rows = (DATA.correctionCandidates || []).filter(row => !row.is_saved);
+      const rows = (DATA.correctionCandidates || []).filter(correctionIsActionable);
       const columns = [
         '_select','net_pnl_delta','trade_pnl_delta','fee_delta',
         'date','account_bucket','statement_trade_row','likely_cause',
@@ -2358,6 +3971,59 @@ def write_dashboard(path, payload, server_enabled=False):
     return str(path)
 
 
+def shutdown_dashboard_server(server):
+    thread = threading.Thread(
+        target=server.shutdown,
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def create_dashboard_server(host, port, handler_class, port_attempts=25):
+    requested_port = int(port)
+    candidate_ports = (
+        [0]
+        if requested_port == 0
+        else range(requested_port, requested_port + port_attempts)
+    )
+    last_error = None
+
+    for candidate_port in candidate_ports:
+        try:
+            server = HTTPServer((host, candidate_port), handler_class)
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+
+            last_error = error
+            continue
+
+        if requested_port and server.server_port != requested_port:
+            print(
+                f"Dashboard port {requested_port} is in use; "
+                f"using {server.server_port} instead."
+            )
+
+        return server
+
+    try:
+        server = HTTPServer((host, 0), handler_class)
+    except OSError:
+        if last_error is not None:
+            raise last_error
+        raise
+
+    if requested_port:
+        print(
+            f"Dashboard ports {requested_port}-"
+            f"{requested_port + port_attempts - 1} are in use; "
+            f"using {server.server_port} instead."
+        )
+
+    return server
+
+
 class V2DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
@@ -2391,6 +4057,14 @@ class V2DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
 
+        if path == "/api/shutdown":
+            self.send_json(
+                200,
+                {"message": "Dashboard server is stopping."},
+            )
+            shutdown_dashboard_server(self.server)
+            return
+
         if path == "/api/save-strategies":
             self.save_strategies()
             return
@@ -2421,13 +4095,37 @@ class V2DashboardHandler(BaseHTTPRequestHandler):
                 )
 
                 if not failures.empty:
+                    candidates = add_candidate_review_columns(
+                        self.server.correction_candidates,
+                        combined,
+                    )
+                    candidates.to_csv(
+                        self.server.run_context.paths[
+                            "cash_trade_correction_candidates"
+                        ],
+                        index=False,
+                    )
+                    refreshed_payload = html_payload(
+                        self.server.run_context,
+                        preview_outputs,
+                        self.server.correction_candidates,
+                        combined,
+                    )
+                    write_dashboard(
+                        self.server.dashboard_path,
+                        refreshed_payload,
+                        server_enabled=True,
+                    )
                     self.send_json(
-                        409,
+                        200,
                         {
-                            "error": (
-                                "Corrections were saved, but this import still "
-                                "has unreconciled cash-balance groups, so the "
-                                "rebuild master was not updated."
+                            "saved_rows": len(combined),
+                            "submitted_rows": len(submitted),
+                            "master_updated": False,
+                            "message": (
+                                "Corrections saved. The rebuild master was not "
+                                f"updated because {len(failures)} cash-balance "
+                                "group(s) are still unreconciled."
                             ),
                             "unreconciled_groups": json_safe_records(
                                 failures[
@@ -2475,6 +4173,11 @@ class V2DashboardHandler(BaseHTTPRequestHandler):
                 {
                     "saved_rows": len(combined),
                     "submitted_rows": len(submitted),
+                    "master_updated": True,
+                    "message": (
+                        f"Saved {len(combined)} correction rows and refreshed "
+                        "v2 CSV outputs."
+                    ),
                     "master": self.server.run_context.paths["master"],
                     "cleaned": self.server.run_context.paths["cleaned"],
                     "dashboard": self.server.dashboard_path,
@@ -2526,7 +4229,7 @@ def serve_dashboard(
     port=8770,
     open_browser=False,
 ):
-    server = HTTPServer((host, port), V2DashboardHandler)
+    server = create_dashboard_server(host, port, V2DashboardHandler)
     server.dashboard_path = str(dashboard_path)
     server.run_context = context
     server.correction_candidates = correction_candidates
@@ -2580,14 +4283,46 @@ class StaticDashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
 
+        if path == "/api/shutdown":
+            self.send_json(
+                200,
+                {"message": "Dashboard server is stopping."},
+            )
+            shutdown_dashboard_server(self.server)
+            return
+
         if path == "/api/save-strategies":
             self.save_strategies()
             return
 
-        self.send_error(
-            405,
-            "No new import context is active; only strategy names can be saved.",
-        )
+        if path == "/api/save-corrections":
+            self.save_corrections()
+            return
+
+        self.send_error(404)
+
+    def save_corrections(self):
+        try:
+            payload = self.read_json_body()
+            submitted = pd.DataFrame(payload.get("corrections", []))
+            result = save_corrections_to_existing_outputs(
+                self.server.paths,
+                submitted,
+                self.server.dashboard_path,
+                cash_validation_tolerance=self.server.cash_validation_tolerance,
+                cash_corrections_path=self.server.cash_corrections_path,
+            )
+            self.send_json(
+                200,
+                {
+                    **result,
+                    "master": self.server.paths["master"],
+                    "cleaned": self.server.paths["cleaned"],
+                    "dashboard": self.server.dashboard_path,
+                },
+            )
+        except Exception as error:
+            self.send_json(500, {"error": str(error)})
 
     def save_strategies(self):
         try:
@@ -2628,7 +4363,7 @@ def serve_existing_dashboard(
     cash_validation_tolerance=1.0,
     cash_corrections_path=None,
 ):
-    server = HTTPServer((host, port), StaticDashboardHandler)
+    server = create_dashboard_server(host, port, StaticDashboardHandler)
     server.dashboard_path = str(dashboard_path)
     server.paths = paths
     server.cash_validation_tolerance = cash_validation_tolerance
@@ -2666,13 +4401,18 @@ def view_existing_dashboard(
 
     print(f"Existing v2 reconciliation dashboard available at {dashboard_path}")
 
+    payload = dashboard_payload_from_existing_outputs(
+        paths,
+        cash_validation_tolerance=cash_validation_tolerance,
+        cash_corrections_path=cash_corrections_path,
+    )
+    write_dashboard(
+        dashboard_path,
+        payload,
+        server_enabled=serve,
+    )
+
     if serve:
-        payload = dashboard_payload_from_existing_outputs(
-            paths,
-            cash_validation_tolerance=cash_validation_tolerance,
-            cash_corrections_path=cash_corrections_path,
-        )
-        write_dashboard(dashboard_path, payload, server_enabled=True)
         serve_existing_dashboard(
             dashboard_path,
             paths,
@@ -2730,6 +4470,11 @@ def build_context(
         raw_trades,
         strategy_source_master=strategy_source_master,
     )
+    base_trades = append_futures_cash_settlement_trades(
+        base_trades,
+        cash_ledger,
+        input_file,
+    )
     starting_equity = lookup_starting_equity(
         lines[:trade_section_start],
         first_trade_time,
@@ -2782,6 +4527,11 @@ def run_v2(
     if reset_master:
         reset_output_files(output_dir)
 
+    backfilled_strategy_names = backfill_missing_master_strategy_names(
+        v2_output_paths(output_dir),
+        strategy_source_master,
+    )
+
     try:
         context = build_context(
             input_file,
@@ -2794,11 +4544,41 @@ def run_v2(
         )
     except NoNewTradesAfterOverlap as error:
         paths = v2_output_paths(output_dir)
+        refreshed_corrections = (
+            0
+            if ignore_saved_corrections
+            else refresh_existing_outputs_with_saved_corrections(
+                paths,
+                cash_corrections_file or paths["cash_trade_corrections"],
+            )
+        )
+        refreshed_statement_ytd = refresh_statement_ytd_outputs(
+            paths,
+            input_file,
+        )
         print(
             "No new trades to import after skipping overlapping "
             f"already-imported trades: {error.skipped_overlap_trades}"
         )
-        print(f"Master was not updated at {paths['master']}")
+        if refreshed_corrections:
+            print(
+                "Refreshed existing master with saved cash corrections: "
+                f"{refreshed_corrections} row(s)"
+            )
+        if backfilled_strategy_names:
+            print(
+                "Backfilled missing Strategy_Name values from strategy source: "
+                f"{backfilled_strategy_names}"
+            )
+        if refreshed_statement_ytd:
+            print(
+                "Refreshed statement YTD totals and open positions from "
+                f"{Path(input_file).name}"
+            )
+        if refreshed_corrections:
+            print(f"Updated existing master at {paths['master']}")
+        else:
+            print(f"Master was not updated at {paths['master']}")
         dashboard_path = view_existing_dashboard(
             paths,
             serve=serve,
@@ -2817,9 +4597,10 @@ def run_v2(
             "dashboard_path": dashboard_path,
             "skipped_overlap_trades": error.skipped_overlap_trades,
         }
+    correction_candidate_trades = master_aware_trade_frame(context)
     correction_candidates = build_cash_trade_corrections(
         context.cash_ledger,
-        context.base_trades,
+        correction_candidate_trades,
     )
     saved_corrections = (
         pd.DataFrame(columns=CASH_CORRECTION_COLUMNS)
@@ -2900,6 +4681,11 @@ def run_v2(
     else:
         print(f"Saved v2 master trade data to {context.paths['master']}")
     print(f"Saved v2 reconciliation dashboard to {dashboard_path}")
+    if backfilled_strategy_names:
+        print(
+            "Backfilled missing Strategy_Name values from strategy source: "
+            f"{backfilled_strategy_names}"
+        )
     if context.skipped_overlap_trades:
         print(
             "Skipped overlapping already-imported trades: "

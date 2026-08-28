@@ -1,0 +1,33 @@
+// Calendar-Day Commodity Bias
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+trendLen = Param("Trend EMA", 40, 10, 150, 5);
+entryDay = Param("Entry Day Of Week", 2, 1, 5, 1);
+maxHold = Param("Max Hold Bars", 3, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+momentumLen = Param("Momentum Lookback", 5, 2, 20, 1);
+
+trendEMA = EMA(Close, trendLen);
+dayOk = DayOfWeek() == entryDay;
+mom = ROC(Close, momentumLen);
+
+Buy = dayOk AND Close > trendEMA AND mom > 0;
+Sell = mom < 0 OR Close < trendEMA;
+Short = dayOk AND Close < trendEMA AND mom < 0;
+Cover = mom > 0 OR Close > trendEMA;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.4 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

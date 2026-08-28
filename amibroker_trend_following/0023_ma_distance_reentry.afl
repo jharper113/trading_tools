@@ -1,0 +1,35 @@
+// Moving Average Distance Reentry Trend System
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+longTrendLen = Param("Long EMA", 200, 50, 400, 10);
+fastLen = Param("Fast EMA", 20, 5, 80, 5);
+pullbackPct = Param("Pullback %", 3, 0.5, 15, 0.5);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+
+longEMA = EMA(Close, longTrendLen);
+fastEMA = EMA(Close, fastLen);
+distFromFast = 100 * (Close - fastEMA) / fastEMA;
+
+longSetup = Close > longEMA AND BarsSince(distFromFast < -pullbackPct) < 15;
+shortSetup = Close < longEMA AND BarsSince(distFromFast > pullbackPct) < 15;
+
+Buy = longSetup AND Cross(Close, fastEMA);
+Sell = Close < longEMA OR Cross(fastEMA, Close);
+Short = shortSetup AND Cross(fastEMA, Close);
+Cover = Close > longEMA OR Cross(Close, fastEMA);
+
+ApplyStop(stopTypeTrailing, stopModePoint, 3 * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(longEMA, "Long EMA", colorBlue, styleLine);
+Plot(fastEMA, "Fast EMA", colorGreen, styleLine);

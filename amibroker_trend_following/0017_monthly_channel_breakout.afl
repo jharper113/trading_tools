@@ -1,0 +1,39 @@
+// Monthly Channel Breakout
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+entryMonths = Param("Entry Months", 6, 2, 24, 1);
+exitMonths = Param("Exit Months", 3, 1, 12, 1);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+
+TimeFrameSet(inMonthly);
+mUpperEntry = Ref(HHV(High, entryMonths), -1);
+mLowerEntry = Ref(LLV(Low, entryMonths), -1);
+mUpperExit = Ref(HHV(High, exitMonths), -1);
+mLowerExit = Ref(LLV(Low, exitMonths), -1);
+TimeFrameRestore();
+
+upperEntry = TimeFrameExpand(mUpperEntry, inMonthly);
+lowerEntry = TimeFrameExpand(mLowerEntry, inMonthly);
+upperExit = TimeFrameExpand(mUpperExit, inMonthly);
+lowerExit = TimeFrameExpand(mLowerExit, inMonthly);
+
+Buy = Close > upperEntry;
+Sell = Close < lowerExit;
+Short = Close < lowerEntry;
+Cover = Close > upperExit;
+
+ApplyStop(stopTypeTrailing, stopModePoint, 5 * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(upperEntry, "Monthly Entry High", colorGreen, styleLine);
+Plot(lowerEntry, "Monthly Entry Low", colorRed, styleLine);

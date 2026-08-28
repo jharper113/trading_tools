@@ -1,0 +1,35 @@
+// Weekly Trend With Daily Pullback Entry
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+weeklyEMALen = Param("Weekly EMA", 40, 10, 100, 5);
+dailyEMALen = Param("Daily EMA", 20, 5, 80, 5);
+rsiLen = Param("RSI Length", 14, 5, 40, 1);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+
+TimeFrameSet(inWeekly);
+weeklyTrend = Close > EMA(Close, weeklyEMALen);
+TimeFrameRestore();
+
+wTrend = TimeFrameExpand(weeklyTrend, inWeekly);
+dailyEMA = EMA(Close, dailyEMALen);
+r = RSI(rsiLen);
+
+Buy = wTrend AND Close > dailyEMA AND Cross(r, 45);
+Sell = Close < dailyEMA OR NOT wTrend;
+Short = NOT wTrend AND Close < dailyEMA AND Cross(55, r);
+Cover = Close > dailyEMA OR wTrend;
+
+ApplyStop(stopTypeTrailing, stopModePoint, 3 * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(dailyEMA, "Daily EMA", colorBlue, styleLine);

@@ -1,0 +1,32 @@
+// CCI Pullback In Trend
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+trendLen = Param("Trend EMA", 200, 50, 400, 10);
+cciLen = Param("CCI Length", 20, 5, 80, 1);
+exitLen = Param("Exit EMA", 30, 5, 100, 5);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+
+trendEMA = EMA(Close, trendLen);
+exitEMA = EMA(Close, exitLen);
+c = CCI(cciLen);
+
+Buy = Close > trendEMA AND Cross(c, -100);
+Sell = Close < exitEMA OR Cross(0, c);
+Short = Close < trendEMA AND Cross(100, c);
+Cover = Close > exitEMA OR Cross(c, 0);
+
+ApplyStop(stopTypeTrailing, stopModePoint, 3 * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);
+Plot(c, "CCI", colorGreen, styleOwnScale);

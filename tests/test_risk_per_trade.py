@@ -2,11 +2,19 @@ import pandas as pd
 import pytest
 
 from calculate_risk_per_trade import (
+    DEFAULT_DRAWDOWN_LIMIT,
+    DEFAULT_SIMULATIONS,
+    calculate_growth_optimal_risk_by_strategy,
     calculate_risk_per_trade_by_strategy,
     calculate_strategy_risk,
     load_risk_input,
     prepare_strategy_returns,
 )
+
+
+def test_live_position_sizing_defaults_to_5000_paths_and_20_percent_drawdown():
+    assert DEFAULT_SIMULATIONS == 5000
+    assert DEFAULT_DRAWDOWN_LIMIT == -0.20
 
 
 def test_prepare_strategy_returns_uses_last_n_trades_by_strategy():
@@ -160,3 +168,65 @@ def test_calculate_risk_per_trade_by_strategy_writes_reports(tmp_path):
     assert (tmp_path / "risk_per_trade_simulations.csv").exists()
     assert (tmp_path / "A_Strategy_risk_per_trade.txt").exists()
     assert (tmp_path / "B_Strategy_risk_metric_quantiles.csv").exists()
+
+
+def test_growth_optimal_live_sizing_respects_drawdown_probability(tmp_path):
+    returns = [0.40, -0.25, 0.35, -0.15, 0.55, -0.30] * 4
+    trades = pd.DataFrame([
+        {
+            "Strategy_Name": "Live Strategy",
+            "timestamp": pd.Timestamp("2025-01-01") + pd.Timedelta(days=index),
+            "return_on_margin": value,
+        }
+        for index, value in enumerate(returns)
+    ])
+
+    summary, reports, performance, iqr, search = (
+        calculate_growth_optimal_risk_by_strategy(
+            trades,
+            output_dir=tmp_path,
+            simulations=500,
+            bankroll=100000,
+            drawdown_limit=-0.20,
+            pct_above_dd_limit=0.95,
+            random_seed=13,
+        )
+    )
+    result = summary.iloc[0]
+
+    assert result["sizing_method"] == "drawdown_constrained_car25"
+    assert result["safe_f"] > 0
+    assert result["drawdown_breach_probability"] <= 0.05
+    assert result["risk_per_trade_dollars"] == pytest.approx(
+        result["safe_f"] * 100000
+    )
+    assert len(performance) == 500
+    assert not iqr.empty
+    assert not search.empty
+    assert len(reports) == 2
+    assert (tmp_path / "risk_metric_iqr.csv").exists()
+    assert (tmp_path / "risk_fraction_search.csv").exists()
+
+
+def test_growth_optimal_live_sizing_reduces_declining_strategy_to_zero():
+    trades = pd.DataFrame([
+        {
+            "Strategy_Name": "Declining Strategy",
+            "timestamp": pd.Timestamp("2026-01-01") + pd.Timedelta(days=index),
+            "return_on_margin": value,
+        }
+        for index, value in enumerate([-0.10, -0.15, -0.05, -0.20] * 3)
+    ])
+
+    summary, _, _, _, _ = calculate_growth_optimal_risk_by_strategy(
+        trades,
+        simulations=250,
+        bankroll=100000,
+        random_seed=21,
+        write_files=False,
+    )
+    result = summary.iloc[0]
+
+    assert result["safe_f"] == 0
+    assert result["risk_per_trade_dollars"] == 0
+    assert result["CAR25"] == 0

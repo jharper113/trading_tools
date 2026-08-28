@@ -47,6 +47,29 @@ python download_market_data.py \
   --frequencies daily
 ```
 
+Create or replace saved Schwab tokens without downloading market data:
+
+```bash
+python download_market_data.py \
+  --provider schwab \
+  --auth-only \
+  --force-reauth
+```
+
+Update every configured symbol while allowing the remaining jobs to finish
+when Schwab rejects one symbol/frequency:
+
+```bash
+python download_market_data.py \
+  --provider schwab \
+  --frequencies daily 5min 60min \
+  --continue-on-error \
+  --notify
+```
+
+Omitting `--symbols` selects every configured symbol. The `--all` flag controls
+history depth and is not required to select all symbols.
+
 ## Outputs
 
 Normalized bars are written to `data/market_data/<frequency>/<symbol>.csv` by default.
@@ -58,12 +81,15 @@ Quality reports are written under `data/market_data/quality/`:
 - `daily_intraday_quality.csv`
 - `daily_intraday_fix_candidates.csv`
 
-The symbol manifest is written to `data/market_data/symbols.csv`.
+The generated symbol manifest is written to `data/market_data/symbols.csv`.
+It records the symbols requested for the latest run; the authoritative default
+list is defined by `FUTURES_PRODUCTS` and `EQUITY_PRODUCTS` in
+`download_market_data.py`.
 
 ## Flags
 
 `--symbols SYMBOLS [SYMBOLS ...]`
-: Symbols to download, such as futures roots/contracts (`/ES`, `/6E`, `/GC`) or equities/ETFs (`SPY`). Omit this flag to use the full default futures universe.
+: Symbols to download, such as futures roots/contracts (`/ES`, `/6E`, `/GC`) or equities/ETFs (`SPY`). Omit this flag to use the full configured default universe.
 
 `--frequencies FREQUENCIES [FREQUENCIES ...]`
 : Frequencies to download or check. Supported values are `daily`, `5min`, and `60min`.
@@ -104,6 +130,18 @@ The symbol manifest is written to `data/market_data/symbols.csv`.
 `--redirect-uri REDIRECT_URI`
 : Schwab OAuth redirect URI configured for your app.
 
+`--auth-only`
+: Prepare and save Schwab tokens, then exit without downloading data or running quality checks.
+
+`--force-reauth`
+: Ignore saved Schwab access and refresh tokens and start browser authorization. Use this with `--auth-only` when Schwab expires or revokes the saved refresh token.
+
+`--continue-on-error`
+: Continue remaining symbol/frequency jobs after a provider error. The command runs quality checks and then exits nonzero if any jobs failed.
+
+`--notify`
+: Send a desktop notification when the command succeeds or fails. Delivery is best effort and does not change the command's exit status.
+
 `--all`
 : Request as much Schwab price history as the script can ask for. This controls history depth, not symbol selection.
 
@@ -124,4 +162,14 @@ Long Schwab runs can take a while because the script requests each symbol/freque
 
 Schwab does not accept `60` as a minute frequency. When you request `60min`, the script asks Schwab for 30-minute bars and aggregates them into 60-minute bars locally before saving.
 
-For cron, client id and client secret are not enough by themselves on the first run because Schwab OAuth requires browser approval. Run the command manually once, paste the authorization redirect URL/code, and the script will save tokens to `data/market_data/schwab_tokens.json` with `0600` permissions. Later cron runs can renew access with the saved refresh token as long as `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET` are available.
+For cron, client id and client secret are not enough by themselves on the first run because Schwab OAuth requires browser approval. Run `--provider schwab --auth-only --force-reauth` manually once, paste the authorization redirect URL/code, and the script will save tokens to `data/market_data/schwab_tokens.json` with `0600` permissions. Later cron runs can renew access with the saved refresh token as long as `SCHWAB_CLIENT_ID` and `SCHWAB_CLIENT_SECRET` are available. Browser authorization is still required again whenever Schwab expires or revokes the refresh token.
+
+Desktop notifications from `--notify` use `notify-send` and can reach the normal Ubuntu desktop session from cron. The notification appears only while the user is logged in; an unavailable desktop session does not make the market-data command fail.
+
+Example daily cron entry for all configured symbols:
+
+```cron
+SHELL=/bin/bash
+CRON_TZ=America/New_York
+15 17 * * * cd /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools && . /home/jon/.schwab_env && /home/jon/anaconda3/bin/python download_market_data.py --provider schwab --frequencies daily 5min 60min --continue-on-error --notify >> /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/logs/market_data.log 2>&1
+```

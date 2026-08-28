@@ -1,0 +1,30 @@
+// 12-Month Time-Series Momentum
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+lookback = Param("Momentum Lookback", 252, 63, 360, 21);
+exitLookback = Param("Exit Lookback", 63, 21, 180, 21);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+atrStop = Param("ATR Stop", 5, 1, 12, 0.25);
+
+mom = ROC(Close, lookback);
+exitMom = ROC(Close, exitLookback);
+
+Buy = Cross(mom, 0);
+Sell = Cross(0, exitMom);
+Short = Cross(0, mom);
+Cover = Cross(exitMom, 0);
+
+ApplyStop(stopTypeTrailing, stopModePoint, atrStop * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(mom, "12M Momentum", colorBlue, styleOwnScale);

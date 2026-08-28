@@ -21,10 +21,13 @@ os.environ.setdefault(
 )
 
 import matplotlib
+import matplotlib.dates as mdates
+import numpy as np
 import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 from calculate_risk_per_trade import (
     DEFAULT_BANKROLL,
@@ -33,6 +36,7 @@ from calculate_risk_per_trade import (
     DEFAULT_SAFE_F_INCREMENT,
     DEFAULT_SAFE_F_START,
     DEFAULT_SIMULATIONS,
+    calculate_growth_optimal_risk_by_strategy,
     calculate_risk_per_trade_by_strategy,
 )
 from extract_trade_history import (
@@ -45,6 +49,26 @@ from extract_trade_history import (
 from extract_trade_history_v2 import (
     build_ytd_bridge_adjustments,
     ytd_reconciliation_rows,
+)
+from normalize_amibroker_wfa_trade_export import (
+    normalize_file as normalize_wfa_file,
+)
+from live_degradation_monitor import (
+    DEFAULT_LIVE_MONITOR_SIMULATIONS,
+    build_live_degradation_monitor,
+)
+from prepare_amibroker_wfa_for_strategy_analysis import (
+    REQUIRED_COLUMNS as WFA_TRADE_REQUIRED_COLUMNS,
+    prepare_file as prepare_wfa_file,
+)
+from wfa_performance_simulation import (
+    DEFAULT_WFA_BLOCK_LENGTH,
+    DEFAULT_WFA_CAGR_QUANTILE,
+    DEFAULT_WFA_DRAWDOWN_LIMIT,
+    DEFAULT_WFA_MAX_DRAWDOWN_BREACH_PROBABILITY,
+    DEFAULT_WFA_MAX_RISK_FRACTION,
+    DEFAULT_WFA_SIMULATIONS,
+    build_wfa_simulation,
 )
 from src.enrich import (
     FUTURES_CONTRACT_PATTERN,
@@ -97,12 +121,27 @@ CAPITAL_ALLOCATION_FILE = f"{OUTPUT_DIR}/capital_allocation.csv"
 PNL_CORRELATION_FILE = f"{OUTPUT_DIR}/strategy_pnl_correlation.csv"
 DRAWDOWN_CORRELATION_FILE = f"{OUTPUT_DIR}/strategy_drawdown_correlation.csv"
 DRAWDOWN_OVERLAP_FILE = f"{OUTPUT_DIR}/strategy_drawdown_overlap.csv"
+WFA_VALIDATION_GATES_FILE = f"{OUTPUT_DIR}/wfa_validation_gates.csv"
+WFA_SEGMENT_SUMMARY_FILE = f"{OUTPUT_DIR}/wfa_segment_summary.csv"
+WFA_SIMULATION_RESULTS_FILE = f"{OUTPUT_DIR}/wfa_simulation_results.csv"
+WFA_SIMULATION_IQR_FILE = f"{OUTPUT_DIR}/wfa_simulation_iqr.csv"
+WFA_RISK_SEARCH_FILE = f"{OUTPUT_DIR}/wfa_risk_search.csv"
+WFA_PREPARED_INPUT_FILE = f"{OUTPUT_DIR}/wfa_prepared_analyzer_input.csv"
+WFA_NORMALIZED_INPUT_FILE = f"{OUTPUT_DIR}/wfa_normalized_trade_export.csv"
+LIVE_DEGRADATION_SUMMARY_FILE = (
+    f"{OUTPUT_DIR}/live_degradation_monitor.csv"
+)
+LIVE_DEGRADATION_BANDS_FILE = (
+    f"{OUTPUT_DIR}/live_degradation_metric_bands.csv"
+)
 DASHBOARD_FILE = f"{OUTPUT_DIR}/strategy_dashboard.html"
+DEFAULT_STRATEGY_LIBRARY_DIR = "./output/strategy_library"
 OPTION_TYPES = {
     "CALL",
     "PUT",
 }
 HIGH_CORRELATION_THRESHOLD = 0.7
+STRATEGY_LIBRARY_MIN_CORRELATION_DAYS = 20
 ACCOUNT_STATEMENT_PATTERNS = (
     "*AccountStatement*.csv",
     "*Statement*.csv",
@@ -435,6 +474,99 @@ def load_cleaned_trades(path):
     )
 
     return df
+
+
+def infer_wfa_starting_equity(input_path):
+    input_path = Path(input_path)
+    inferred_values = []
+
+    for candidate in sorted(input_path.parent.glob("*.csv")):
+        if candidate.resolve() == input_path.resolve():
+            continue
+
+        try:
+            report = pd.read_csv(candidate)
+        except (OSError, pd.errors.ParserError, UnicodeError):
+            continue
+
+        required = {"Mode", "Net Profit", "Net % Profit"}
+        if not required.issubset(report.columns):
+            continue
+
+        in_sample = report[
+            report["Mode"].astype(str).str.upper() == "IS"
+        ].copy()
+        net_profit = pd.to_numeric(in_sample["Net Profit"], errors="coerce")
+        net_profit_pct = pd.to_numeric(
+            in_sample["Net % Profit"], errors="coerce"
+        )
+        valid = net_profit.notna() & net_profit_pct.notna() & net_profit_pct.ne(0)
+        inferred_values.extend(
+            (net_profit[valid] / (net_profit_pct[valid] / 100)).tolist()
+        )
+
+    if not inferred_values:
+        return None
+
+    median_equity = float(pd.Series(inferred_values).median())
+    rounding_unit = 1000 if median_equity >= 10000 else 1
+    return round(median_equity / rounding_unit) * rounding_unit
+
+
+def default_wfa_strategy_name(input_path):
+    parent_name = Path(input_path).parent.name
+    base = re.sub(r"_reports$", "", parent_name, flags=re.IGNORECASE).strip()
+    return f"{base or Path(input_path).stem}_OOS"
+
+
+def prepare_wfa_analysis_input(
+    input_path,
+    output_path,
+    starting_equity=None,
+    strategy_name=None,
+    normalized_output_path=None,
+):
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+    normalized_output_path = Path(
+        normalized_output_path
+        or output_path.with_name("wfa_normalized_trade_export.csv")
+    )
+    normalize_wfa_file(input_path, normalized_output_path)
+
+    header = pd.read_csv(
+        normalized_output_path,
+        nrows=0,
+        encoding="utf-8-sig",
+    )
+    missing = set(WFA_TRADE_REQUIRED_COLUMNS) - set(header.columns)
+    if missing:
+        raise ValueError(
+            "--wfa-validation received an input that is neither cleaned trade "
+            "history nor a recognized AmiBroker WFA trade export. Missing WFA "
+            "column(s): "
+            + ", ".join(sorted(missing))
+        )
+
+    resolved_equity = (
+        float(starting_equity)
+        if starting_equity is not None
+        else infer_wfa_starting_equity(input_path)
+    )
+    if resolved_equity is None:
+        raise ValueError(
+            "Could not infer WFA starting equity from a companion summary CSV. "
+            "Pass --wfa-starting-equity explicitly."
+        )
+
+    resolved_strategy = strategy_name or default_wfa_strategy_name(input_path)
+    prepare_wfa_file(
+        normalized_output_path,
+        output_path,
+        resolved_strategy,
+        resolved_equity,
+    )
+    return Path(output_path), resolved_equity, resolved_strategy
 
 
 def is_option_trade(row):
@@ -1115,7 +1247,7 @@ def build_realized_trade_record(
 
     source_row_ids = sorted(set(source_row_ids))
 
-    return {
+    record = {
         "Exec Time": exec_time,
         "timestamp": timestamp,
         "Strategy_Name": source_row.get("Strategy_Name"),
@@ -1143,6 +1275,12 @@ def build_realized_trade_record(
         "log_return_on_margin": log_return_on_margin,
         "starting_equity": source_row.get("starting_equity"),
     }
+
+    for column in source_row.index:
+        if str(column).startswith("WFA_"):
+            record[column] = source_row.get(column)
+
+    return record
 
 
 def aggregate_realized_trades(df, as_of_date=None):
@@ -2124,9 +2262,14 @@ def build_ytd_statement_reports(
         "timestamp",
         year,
     )
+    cleaned_timestamp_column = (
+        "Exec Time"
+        if cleaned_trades is not None and "Exec Time" in cleaned_trades.columns
+        else "timestamp"
+    )
     cleaned_ytd = ytd_filter(
         cleaned_trades,
-        "Exec Time",
+        cleaned_timestamp_column,
         year,
     )
     realized_closed_gross = numeric_column(
@@ -3342,10 +3485,17 @@ def build_data_quality_warnings(
         realized_trades.get("return_on_margin"),
         errors="coerce",
     )
+    wfa_risk = pd.to_numeric(
+        realized_trades.get(
+            "WFA_Risk_Per_Contract",
+            pd.Series(index=realized_trades.index, dtype=float),
+        ),
+        errors="coerce",
+    )
     add_warning(
         "return_on_margin_loss_exceeds_100_percent",
         "medium",
-        (return_on_margin <= -1).sum(),
+        ((return_on_margin <= -1) & ~wfa_risk.gt(0)).sum(),
         "These trades are included in Safe-F using simple margin returns.",
     )
     add_warning(
@@ -3748,6 +3898,234 @@ def save_strategy_trade_ledgers(strategy_trade_ledgers):
         output_files.append(output_file)
 
     return output_files
+
+
+def rebuild_strategy_library_correlations(library_dir):
+    library_path = Path(library_dir).expanduser()
+    series_by_strategy = {}
+    manifest_rows = []
+
+    for metadata_file in sorted(library_path.glob("*/metadata.json")):
+        try:
+            metadata = json.loads(metadata_file.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        metadata["strategy_directory"] = metadata_file.parent.name
+        tested_symbols = metadata.get("tested_symbols", [])
+        metadata["tested_symbols"] = ", ".join(tested_symbols)
+        manifest_rows.append(metadata)
+
+    for daily_file in sorted(library_path.glob("*/daily_pnl.csv")):
+        try:
+            daily = pd.read_csv(daily_file)
+        except (OSError, pd.errors.ParserError, UnicodeError):
+            continue
+
+        required = {"date", "Strategy_Name", "daily_pnl"}
+        if daily.empty or not required.issubset(daily.columns):
+            continue
+
+        strategy_name = clean_strategy_name(daily["Strategy_Name"].iloc[0])
+        dates = pd.to_datetime(daily["date"], errors="coerce").dt.normalize()
+        pnl = pd.to_numeric(daily["daily_pnl"], errors="coerce")
+        valid = dates.notna() & pnl.notna()
+        if not strategy_name or not valid.any():
+            continue
+
+        series = pnl[valid].groupby(dates[valid]).sum().sort_index()
+        series_by_strategy[strategy_name] = series
+
+    manifest = pd.DataFrame(manifest_rows)
+    if not manifest.empty and "strategy_name" in manifest.columns:
+        manifest = manifest.sort_values("strategy_name")
+    manifest_file = library_path / "strategy_manifest.csv"
+    manifest.to_csv(manifest_file, index=False)
+
+    combined = pd.DataFrame()
+    correlation = pd.DataFrame()
+    overlap_days = pd.DataFrame()
+    if series_by_strategy:
+        all_dates = pd.DatetimeIndex(sorted({
+            date
+            for series in series_by_strategy.values()
+            for date in series.index
+        }))
+        combined = pd.DataFrame(index=all_dates)
+
+        for strategy_name in sorted(series_by_strategy):
+            series = series_by_strategy[strategy_name]
+            coverage_dates = all_dates[
+                (all_dates >= series.index.min())
+                & (all_dates <= series.index.max())
+            ]
+            combined.loc[coverage_dates, strategy_name] = series.reindex(
+                coverage_dates,
+                fill_value=0.0,
+            )
+
+        combined.index.name = "date"
+        correlation = combined.corr(
+            min_periods=STRATEGY_LIBRARY_MIN_CORRELATION_DAYS
+        )
+        availability = combined.notna().astype(int)
+        overlap_days = availability.T.dot(availability)
+        overlap_days.index.name = "Strategy_Name"
+
+    combined_file = library_path / "combined_daily_pnl.csv"
+    correlation_file = library_path / "pnl_correlation.csv"
+    overlap_file = library_path / "correlation_overlap_days.csv"
+    combined.to_csv(combined_file)
+    correlation.to_csv(correlation_file)
+    overlap_days.to_csv(overlap_file)
+
+    return {
+        "manifest": str(manifest_file),
+        "combined_daily_pnl": str(combined_file),
+        "pnl_correlation": str(correlation_file),
+        "correlation_overlap_days": str(overlap_file),
+        "strategy_count": len(series_by_strategy),
+    }
+
+
+def export_strategy_library(
+    strategy_trade_ledgers,
+    equity_curves,
+    library_dir,
+    source_input=None,
+    analysis_mode="strategy_analysis",
+    capital_allocation=None,
+):
+    library_path = Path(library_dir).expanduser()
+    library_path.mkdir(parents=True, exist_ok=True)
+    exported_strategies = []
+
+    for strategy_name, trades in strategy_trade_ledgers.groupby(
+        "Strategy_Name",
+        sort=True,
+    ):
+        strategy_name = clean_strategy_name(strategy_name)
+        if not strategy_name:
+            continue
+
+        strategy_dir = library_path / safe_filename(strategy_name)
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        strategy_curve = equity_curves[
+            equity_curves["Strategy_Name"].astype(str) == strategy_name
+        ].copy()
+        strategy_curve["timestamp"] = pd.to_datetime(
+            strategy_curve["timestamp"],
+            errors="coerce",
+        )
+        strategy_curve = strategy_curve.sort_values("timestamp")
+
+        daily_events = strategy_curve.dropna(subset=["timestamp"]).copy()
+        daily_events["strategy_pnl"] = pd.to_numeric(
+            daily_events["strategy_pnl"],
+            errors="coerce",
+        )
+        daily_events = daily_events.dropna(subset=["strategy_pnl"])
+        daily_events["date"] = daily_events["timestamp"].dt.normalize()
+        daily_pnl = (
+            daily_events.groupby("date", as_index=False)["strategy_pnl"]
+            .sum()
+            .rename(columns={"strategy_pnl": "daily_pnl"})
+        )
+        daily_pnl.insert(1, "Strategy_Name", strategy_name)
+
+        trades.sort_values("timestamp").to_csv(
+            strategy_dir / "trades.csv",
+            index=False,
+        )
+        strategy_curve.to_csv(
+            strategy_dir / "equity_curve.csv",
+            index=False,
+        )
+        daily_pnl.to_csv(
+            strategy_dir / "daily_pnl.csv",
+            index=False,
+        )
+
+        trade_timestamps = pd.to_datetime(
+            trades.get("timestamp"),
+            errors="coerce",
+        ).dropna()
+        tested_symbols = sorted({
+            str(symbol).strip()
+            for symbol in trades.get("Symbol", pd.Series(dtype=object)).dropna()
+            if str(symbol).strip()
+        })
+        metadata = {
+            "schema_version": 1,
+            "strategy_name": strategy_name,
+            "analysis_mode": analysis_mode,
+            "source_input": str(source_input or ""),
+            "tested_symbols": tested_symbols,
+            "trade_count": int(len(trades)),
+            "pnl_event_count": int(len(strategy_curve)),
+            "first_trade_date": (
+                trade_timestamps.min().date().isoformat()
+                if not trade_timestamps.empty
+                else None
+            ),
+            "last_trade_date": (
+                trade_timestamps.max().date().isoformat()
+                if not trade_timestamps.empty
+                else None
+            ),
+            "exported_at_utc": pd.Timestamp.now(tz="UTC").isoformat(),
+        }
+        if capital_allocation is not None and not capital_allocation.empty:
+            allocation_rows = capital_allocation[
+                capital_allocation["Strategy_Name"].astype(str)
+                == strategy_name
+            ]
+            if not allocation_rows.empty:
+                allocation = allocation_rows.iloc[0]
+                for column in (
+                    "recommended_instrument",
+                    "contracts_or_shares_to_trade",
+                    "risk_budget_dollars",
+                    "allocated_risk_per_trade_dollars",
+                    "wfa_risk_per_contract_dollars",
+                    "wfa_optimal_risk_fraction",
+                ):
+                    value = allocation.get(column)
+                    if pd.notna(value):
+                        if isinstance(value, np.generic):
+                            value = value.item()
+                        metadata[column] = value
+        (strategy_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2) + "\n"
+        )
+        if analysis_mode == "wfa":
+            baseline_dir = (
+                library_path
+                / "_wfa_baselines"
+                / safe_filename(strategy_name)
+            )
+            baseline_dir.mkdir(parents=True, exist_ok=True)
+            trades.sort_values("timestamp").to_csv(
+                baseline_dir / "trades.csv",
+                index=False,
+            )
+            strategy_curve.to_csv(
+                baseline_dir / "equity_curve.csv",
+                index=False,
+            )
+            daily_pnl.to_csv(
+                baseline_dir / "daily_pnl.csv",
+                index=False,
+            )
+            (baseline_dir / "metadata.json").write_text(
+                json.dumps(metadata, indent=2) + "\n"
+            )
+        exported_strategies.append(strategy_name)
+
+    result = rebuild_strategy_library_correlations(library_path)
+    result["library_dir"] = str(library_path)
+    result["exported_strategies"] = exported_strategies
+    return result
 
 
 def build_account_equity_curve(df):
@@ -4583,6 +4961,13 @@ def calculate_strategy_summary(realized_trades, equity_curves):
             group["return_on_margin"],
             errors="coerce",
         )
+        is_wfa_stop_risk = (
+            "WFA_Risk_Per_Contract" in group.columns
+            and pd.to_numeric(
+                group["WFA_Risk_Per_Contract"],
+                errors="coerce",
+            ).gt(0).any()
+        )
         wins = net_pnl[net_pnl > 0]
         losses = net_pnl[net_pnl < 0]
         curve_group = equity_curves[
@@ -4760,7 +5145,7 @@ def calculate_strategy_summary(realized_trades, equity_curves):
                 (margin_requirement.isna() | (margin_requirement <= 0)).sum()
             ),
             "extreme_margin_loss_count": int(
-                (return_on_margin <= -1).sum()
+                0 if is_wfa_stop_risk else (return_on_margin <= -1).sum()
             ),
             "average_return_on_margin": group["return_on_margin"].mean(),
             "cumulative_log_return_on_margin": (
@@ -4833,15 +5218,27 @@ def calculate_correlation_outputs(equity_curves):
 
 
 def save_strategy_equity_chart(equity_curves):
-    fig, ax = plt.subplots(
-        figsize=(12, 7)
-    )
+    fig, ax = plt.subplots(figsize=(13, 7.4))
+    fig.patch.set_facecolor("#f8fafc")
+    ax.set_facecolor("#ffffff")
     starting_equities = []
+    colors = [
+        "#0f766e",
+        "#2563eb",
+        "#d97706",
+        "#db2777",
+        "#7c3aed",
+        "#dc2626",
+        "#65a30d",
+        "#0891b2",
+    ]
 
-    for strategy_name, group in equity_curves.groupby("Strategy_Name", sort=True):
+    for color_index, (strategy_name, group) in enumerate(
+        equity_curves.groupby("Strategy_Name", sort=True)
+    ):
         group = group[
             group["timestamp"].notna()
-        ]
+        ].sort_values("timestamp")
 
         if group.empty:
             continue
@@ -4852,20 +5249,44 @@ def save_strategy_equity_chart(equity_curves):
         )
         starting_equities.append(starting_equity)
 
+        color = colors[color_index % len(colors)]
+        label = (
+            f"{strategy_name}  "
+            f"({float(group['CMPNL'].iloc[-1]):+,.0f})"
+        )
         ax.plot(
             group["timestamp"],
             group["strategy_equity"],
-            linewidth=1.6,
-            label=strategy_name,
+            color=color,
+            linewidth=7,
+            alpha=0.09,
+            solid_capstyle="round",
+        )
+        ax.plot(
+            group["timestamp"],
+            group["strategy_equity"],
+            color=color,
+            linewidth=2.2,
+            label=label,
+            solid_capstyle="round",
+        )
+        ax.scatter(
+            group["timestamp"].iloc[-1],
+            group["strategy_equity"].iloc[-1],
+            color=color,
+            edgecolor="#ffffff",
+            linewidth=1.2,
+            s=42,
+            zorder=4,
         )
 
     if starting_equities:
         baseline = min(starting_equities)
         ax.axhline(
             baseline,
-            color="#444444",
-            linewidth=0.9,
-            linestyle="--",
+            color="#475569",
+            linewidth=1.1,
+            linestyle=(0, (5, 4)),
             label="Starting equity",
         )
         y_min = min(
@@ -4882,25 +5303,72 @@ def save_strategy_equity_chart(equity_curves):
             y_min - padding,
             y_max + padding,
         )
+        ax.axhspan(
+            baseline,
+            y_max + padding,
+            color="#16a34a",
+            alpha=0.025,
+            zorder=0,
+        )
+        ax.axhspan(
+            y_min - padding,
+            baseline,
+            color="#dc2626",
+            alpha=0.025,
+            zorder=0,
+        )
 
-    ax.set_title("Strategy Equity Curves")
-    ax.set_xlabel("Date")
+    ax.set_title(
+        "Strategy Equity Curves",
+        loc="left",
+        fontsize=18,
+        fontweight="bold",
+        color="#17202a",
+        pad=16,
+    )
+    ax.text(
+        0,
+        1.01,
+        "Realized-trade equity; legend shows cumulative PNL",
+        transform=ax.transAxes,
+        color="#64748b",
+        fontsize=10,
+        va="bottom",
+    )
     ax.set_ylabel("Equity ($)")
+    ax.yaxis.set_major_formatter(FuncFormatter(
+        lambda value, _: f"${value:,.0f}"
+    ))
     ax.grid(
         True,
         axis="y",
-        alpha=0.25,
+        color="#cbd5e1",
+        alpha=0.48,
+        linewidth=0.8,
     )
+    ax.grid(True, axis="x", color="#e2e8f0", alpha=0.25, linewidth=0.6)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#cbd5e1")
+    ax.spines["bottom"].set_color("#cbd5e1")
     ax.legend(
-        fontsize=8,
+        fontsize=8.5,
         ncol=2,
+        loc="upper left",
+        frameon=True,
+        facecolor="#ffffff",
+        edgecolor="#e2e8f0",
+        framealpha=0.94,
     )
-    fig.autofmt_xdate()
+    locator = mdates.AutoDateLocator(minticks=5, maxticks=9)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
     fig.tight_layout()
     output_file = f"{CHART_DIR}/strategy_equity_curves.png"
     fig.savefig(
         output_file,
-        dpi=150,
+        dpi=170,
+        facecolor=fig.get_facecolor(),
     )
     plt.close(fig)
 
@@ -4910,51 +5378,208 @@ def save_strategy_equity_chart(equity_curves):
 def save_account_equity_chart(account_curve):
     plot_df = account_curve[
         account_curve["timestamp"].notna()
-    ]
+    ].sort_values("timestamp").copy()
+    plot_df["ending_equity"] = pd.to_numeric(
+        plot_df["ending_equity"],
+        errors="coerce",
+    )
+    plot_df["account_drawdown"] = pd.to_numeric(
+        plot_df["account_drawdown"],
+        errors="coerce",
+    )
+    plot_df = plot_df.dropna(subset=["ending_equity", "account_drawdown"])
 
-    fig, ax = plt.subplots(
-        figsize=(12, 6)
+    fig = plt.figure(figsize=(13, 7.6), facecolor="#f8fafc")
+    grid = fig.add_gridspec(4, 1, hspace=0.08)
+    ax = fig.add_subplot(grid[:3, 0])
+    ax_drawdown = fig.add_subplot(grid[3, 0], sharex=ax)
+    ax.set_facecolor("#ffffff")
+    ax_drawdown.set_facecolor("#ffffff")
+    timestamps = plot_df["timestamp"]
+    equity = plot_df["ending_equity"]
+    drawdown = plot_df["account_drawdown"]
+    starting_values = pd.to_numeric(
+        plot_df.get("starting_equity", pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna()
+    baseline = (
+        float(starting_values.iloc[0])
+        if not starting_values.empty
+        else float(equity.iloc[0])
+    )
+    high_water = equity.cummax()
+
+    ax.fill_between(
+        timestamps,
+        baseline,
+        equity,
+        where=equity >= baseline,
+        color="#14b8a6",
+        alpha=0.11,
+        interpolate=True,
+    )
+    ax.fill_between(
+        timestamps,
+        baseline,
+        equity,
+        where=equity < baseline,
+        color="#ef4444",
+        alpha=0.08,
+        interpolate=True,
     )
     ax.plot(
-        plot_df["timestamp"],
-        plot_df["ending_equity"],
-        color="#1565c0",
-        linewidth=2,
-        label="Account equity",
+        timestamps,
+        equity,
+        color="#99f6e4",
+        linewidth=8,
+        alpha=0.20,
+        solid_capstyle="round",
     )
-    ax.set_title("Account Equity Curve")
-    ax.set_xlabel("Date")
+    ax.plot(
+        timestamps,
+        equity,
+        color="#0f766e",
+        linewidth=2.6,
+        label="Account equity",
+        solid_capstyle="round",
+    )
+    ax.plot(
+        timestamps,
+        high_water,
+        color="#64748b",
+        linewidth=1.1,
+        linestyle=(0, (4, 4)),
+        alpha=0.8,
+        label="High-water mark",
+    )
+    ax.scatter(
+        timestamps.iloc[-1],
+        equity.iloc[-1],
+        color="#0f766e",
+        edgecolor="#ffffff",
+        linewidth=1.5,
+        s=58,
+        zorder=5,
+    )
+    ax.annotate(
+        f"${equity.iloc[-1]:,.0f}",
+        xy=(timestamps.iloc[-1], equity.iloc[-1]),
+        xytext=(-8, 14),
+        textcoords="offset points",
+        ha="right",
+        color="#0f766e",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.set_title(
+        "Account Equity Curve",
+        loc="left",
+        fontsize=18,
+        fontweight="bold",
+        color="#17202a",
+        pad=16,
+    )
+    ax.text(
+        0,
+        1.01,
+        "Realized equity with high-water mark and drawdown regime",
+        transform=ax.transAxes,
+        color="#64748b",
+        fontsize=10,
+        va="bottom",
+    )
     ax.set_ylabel("Equity ($)")
+    ax.yaxis.set_major_formatter(FuncFormatter(
+        lambda value, _: f"${value:,.0f}"
+    ))
     ax.grid(
         True,
         axis="y",
-        alpha=0.25,
+        color="#cbd5e1",
+        alpha=0.48,
+        linewidth=0.8,
+    )
+    ax.grid(True, axis="x", color="#e2e8f0", alpha=0.2, linewidth=0.6)
+    ax.legend(
+        loc="upper left",
+        frameon=True,
+        facecolor="#ffffff",
+        edgecolor="#e2e8f0",
+        framealpha=0.94,
     )
 
-    ax2 = ax.twinx()
-    ax2.fill_between(
-        plot_df["timestamp"],
-        plot_df["account_drawdown"],
+    ax_drawdown.fill_between(
+        timestamps,
+        drawdown,
         0,
-        color="#c62828",
-        alpha=0.18,
+        color="#ef4444",
+        alpha=0.22,
+    )
+    ax_drawdown.plot(
+        timestamps,
+        drawdown,
+        color="#b42336",
+        linewidth=1.4,
         label="Drawdown",
     )
-    ax2.set_ylabel("Drawdown")
-
-    handles, labels = ax.get_legend_handles_labels()
-    handles2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(
-        handles + handles2,
-        labels + labels2,
+    ax_drawdown.axhline(
+        -0.20,
+        color="#d97706",
+        linewidth=1.0,
+        linestyle=(0, (5, 4)),
+        label="-20% reference",
+    )
+    if not drawdown.empty:
+        minimum_position = int(np.nanargmin(drawdown.to_numpy()))
+        ax_drawdown.scatter(
+            timestamps.iloc[minimum_position],
+            drawdown.iloc[minimum_position],
+            color="#b42336",
+            edgecolor="#ffffff",
+            linewidth=1.0,
+            s=36,
+            zorder=4,
+        )
+        ax_drawdown.annotate(
+            f"Max DD {drawdown.iloc[minimum_position]:.1%}",
+            xy=(
+                timestamps.iloc[minimum_position],
+                drawdown.iloc[minimum_position],
+            ),
+            xytext=(7, -14),
+            textcoords="offset points",
+            color="#991b1b",
+            fontsize=9,
+        )
+    ax_drawdown.set_ylabel("DD")
+    ax_drawdown.yaxis.set_major_formatter(FuncFormatter(
+        lambda value, _: f"{value:.0%}"
+    ))
+    ax_drawdown.grid(True, axis="y", color="#cbd5e1", alpha=0.42)
+    ax_drawdown.legend(
+        loc="lower left",
+        ncol=2,
+        frameon=False,
+        fontsize=8.5,
     )
 
-    fig.autofmt_xdate()
-    fig.tight_layout()
+    for chart_axis in [ax, ax_drawdown]:
+        chart_axis.spines["top"].set_visible(False)
+        chart_axis.spines["right"].set_visible(False)
+        chart_axis.spines["left"].set_color("#cbd5e1")
+        chart_axis.spines["bottom"].set_color("#cbd5e1")
+
+    locator = mdates.AutoDateLocator(minticks=5, maxticks=9)
+    ax_drawdown.xaxis.set_major_locator(locator)
+    ax_drawdown.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    plt.setp(ax.get_xticklabels(), visible=False)
+
+    fig.subplots_adjust(left=0.09, right=0.98, top=0.90, bottom=0.10)
     output_file = f"{CHART_DIR}/account_equity_curve.png"
     fig.savefig(
         output_file,
-        dpi=150,
+        dpi=170,
+        facecolor=fig.get_facecolor(),
     )
     plt.close(fig)
 
@@ -5277,7 +5902,12 @@ def build_strategy_dashboard_highlights(summary, risk_summary):
     )
 
 
-def calculate_strategy_position_sizing(risk_summary, realized_trades):
+def calculate_strategy_position_sizing(
+    risk_summary,
+    realized_trades,
+    wfa_pilot_risk_pct=None,
+    wfa_risk_optimization=None,
+):
     if risk_summary.empty:
         return risk_summary
 
@@ -5286,6 +5916,21 @@ def calculate_strategy_position_sizing(risk_summary, realized_trades):
     sized["estimated_max_risk_per_contract_or_share"] = None
     sized["estimated_margin_per_contract_or_share"] = None
     sized["contracts_or_shares_to_trade"] = None
+    wfa_sizing_enabled = (
+        wfa_pilot_risk_pct is not None
+        or wfa_risk_optimization is not None
+    )
+    if wfa_sizing_enabled:
+        sized["recommended_instrument"] = None
+        sized["risk_budget_dollars"] = None
+        sized["allocated_risk_per_trade_dollars"] = None
+        sized["pilot_risk_cap_pct"] = None
+        sized["safe_f_risk_ceiling_dollars"] = None
+        sized["wfa_risk_per_contract_dollars"] = None
+        sized["wfa_optimal_risk_fraction"] = None
+        sized["wfa_drawdown_breach_probability"] = None
+        sized["wfa_drawdown_limit"] = None
+        sized["wfa_car25"] = None
 
     for index, row in sized.iterrows():
         strategy_name = row.get("Strategy_Name")
@@ -5314,6 +5959,98 @@ def calculate_strategy_position_sizing(risk_summary, realized_trades):
                 index,
                 "sizing_basis",
             ] = "N/A"
+            continue
+
+        wfa_risk = pd.to_numeric(
+            group.get(
+                "WFA_Risk_Per_Contract",
+                pd.Series(index=group.index, dtype=float),
+            ),
+            errors="coerce",
+        )
+        valid_wfa_risk = wfa_risk[wfa_risk > 0]
+        if wfa_sizing_enabled and not valid_wfa_risk.empty:
+            latest_index = valid_wfa_risk.index[-1]
+            standard_risk = float(valid_wfa_risk.loc[latest_index])
+            symbol = str(group.loc[latest_index].get("Symbol", "")).strip()
+            micro_contracts = {
+                "/ES": ("/MES", 0.10),
+            }
+            instrument, risk_multiplier = micro_contracts.get(
+                symbol,
+                (symbol or "FUTURE", 1.0),
+            )
+            contract_risk = standard_risk * risk_multiplier
+            safe_f_budget = parse_number(row.get("risk_per_trade_dollars")) or 0.0
+            bankroll = parse_number(row.get("bankroll")) or 0.0
+            optimized_fraction = None
+            pilot_cap_fraction = None
+            if wfa_risk_optimization is not None:
+                optimized_fraction = max(
+                    parse_number(
+                        wfa_risk_optimization.get("risk_fraction")
+                    ) or 0.0,
+                    0.0,
+                )
+                optimized_budget = bankroll * optimized_fraction
+                risk_budget = optimized_budget
+                safe_f_budget = optimized_budget
+                sized.at[index, "safe_f"] = optimized_fraction
+                sized.at[index, "risk_per_trade_dollars"] = optimized_budget
+                sized.at[index, "CAR25"] = wfa_risk_optimization.get(
+                    "cagr_objective"
+                )
+            else:
+                risk_budget = safe_f_budget
+
+            if wfa_pilot_risk_pct is not None:
+                pilot_cap_fraction = (
+                    max(float(wfa_pilot_risk_pct), 0.0) / 100.0
+                )
+                risk_budget = min(
+                    risk_budget,
+                    bankroll * pilot_cap_fraction,
+                )
+            quantity = (
+                int(risk_budget // contract_risk)
+                if contract_risk > 0
+                else 0
+            )
+            allocated_risk = quantity * contract_risk
+
+            sized.at[index, "sizing_basis"] = (
+                "wfa_bandy_safe_f_initial_stop_risk"
+                if wfa_risk_optimization is not None
+                else "wfa_initial_stop_risk"
+            )
+            sized.at[index, "recommended_instrument"] = instrument
+            sized.at[
+                index,
+                "estimated_max_risk_per_contract_or_share",
+            ] = contract_risk
+            sized.at[index, "contracts_or_shares_to_trade"] = quantity
+            sized.at[index, "risk_budget_dollars"] = risk_budget
+            sized.at[
+                index,
+                "allocated_risk_per_trade_dollars",
+            ] = allocated_risk
+            sized.at[index, "pilot_risk_cap_pct"] = pilot_cap_fraction
+            sized.at[index, "safe_f_risk_ceiling_dollars"] = safe_f_budget
+            sized.at[index, "wfa_risk_per_contract_dollars"] = contract_risk
+            sized.at[index, "wfa_optimal_risk_fraction"] = optimized_fraction
+            if wfa_risk_optimization is not None:
+                sized.at[
+                    index,
+                    "wfa_drawdown_breach_probability",
+                ] = wfa_risk_optimization.get(
+                    "drawdown_breach_probability"
+                )
+                sized.at[index, "wfa_drawdown_limit"] = (
+                    wfa_risk_optimization.get("drawdown_limit")
+                )
+                sized.at[index, "wfa_car25"] = (
+                    wfa_risk_optimization.get("cagr_objective")
+                )
             continue
 
         qty = pd.to_numeric(
@@ -5380,6 +6117,13 @@ def calculate_strategy_position_sizing(risk_summary, realized_trades):
             index,
             "contracts_or_shares_to_trade",
         ] = quantity
+        if wfa_sizing_enabled:
+            sized.at[index, "recommended_instrument"] = "As traded"
+            sized.at[index, "risk_budget_dollars"] = risk_dollars
+            sized.at[
+                index,
+                "allocated_risk_per_trade_dollars",
+            ] = quantity * estimated_max_risk
 
     return sized
 
@@ -5465,29 +6209,201 @@ def save_risk_simulation_boxplots(risk_simulations):
     return chart_files
 
 
+def save_wfa_simulation_boxplots(validation):
+    simulation = (validation or {}).get("simulation")
+    if not simulation:
+        return []
+
+    results = simulation.get("results", pd.DataFrame())
+    observed = simulation.get("observed", {})
+    if results.empty:
+        return []
+
+    chart_files = []
+    metrics = [
+        ("cagr", "WFA Simulated CAGR", "percent"),
+        ("profit_factor", "WFA Simulated Profit Factor", "ratio"),
+        ("max_drawdown", "WFA Simulated Maximum Drawdown", "percent"),
+        ("expectancy_r", "WFA Simulated Expectancy", "R / trade"),
+        ("total_r", "WFA Simulated Total Return", "R"),
+    ]
+
+    for metric, title, unit in metrics:
+        if metric not in results.columns:
+            continue
+        values = pd.to_numeric(results[metric], errors="coerce").replace(
+            [np.inf, -np.inf],
+            np.nan,
+        ).dropna()
+        if values.empty:
+            continue
+
+        fig, ax = plt.subplots(figsize=(10, 2.8))
+        ax.boxplot(
+            [values.to_numpy()],
+            vert=False,
+            whis=(5, 95),
+            showfliers=False,
+            patch_artist=True,
+            widths=0.45,
+            boxprops={"facecolor": "#bfdbfe", "color": "#1d4ed8"},
+            medianprops={"color": "#0f172a", "linewidth": 2.0},
+            whiskerprops={"color": "#1d4ed8"},
+            capprops={"color": "#1d4ed8"},
+        )
+        observed_value = parse_number(observed.get(metric))
+        if observed_value is not None and math.isfinite(observed_value):
+            ax.scatter(
+                [observed_value],
+                [1],
+                marker="D",
+                s=54,
+                color="#b42336",
+                zorder=4,
+                label="Observed WFA",
+            )
+            ax.legend(loc="upper right", frameon=False, fontsize=9)
+        if unit == "percent":
+            ax.xaxis.set_major_formatter(FuncFormatter(
+                lambda value, _: f"{value * 100:.1f}%"
+            ))
+        ax.set_yticks([])
+        ax.set_xlabel(unit)
+        ax.set_title(title)
+        ax.grid(True, axis="x", alpha=0.2)
+        ax.text(
+            0.0,
+            -0.28,
+            "Box: Q25-Q75 | whiskers: P05-P95 | diamond: observed WFA",
+            transform=ax.transAxes,
+            color="#475569",
+            fontsize=9,
+        )
+        fig.tight_layout()
+
+        output_file = f"{CHART_DIR}/wfa_simulation_{metric}_boxplot.png"
+        fig.savefig(output_file, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        chart_files.append(output_file)
+
+    simulation["boxplot_files"] = chart_files
+    return chart_files
+
+
 def risk_summary_for_merge(risk_summary):
     if risk_summary is None or risk_summary.empty:
         return pd.DataFrame(columns=["Strategy_Name"])
+
+    working = risk_summary.copy()
+    if "trade_count" in working.columns:
+        working["risk_model_trade_count"] = working["trade_count"]
 
     columns = [
         column
         for column in [
             "Strategy_Name",
+            "simulations",
             "safe_f",
             "risk_per_trade_dollars",
             "CAR25",
             "profit_factor_Q25",
+            "sizing_method",
+            "return_basis",
+            "drawdown_limit",
+            "drawdown_breach_probability",
+            "pct_above_drawdown_limit",
+            "risk_ceiling_fraction",
+            "cagr_objective_quantile",
+            "mean_block_length",
+            "elapsed_years",
+            "risk_model_trade_count",
             "sizing_basis",
             "estimated_max_risk_per_contract_or_share",
             "estimated_margin_per_contract_or_share",
             "contracts_or_shares_to_trade",
+            "recommended_instrument",
+            "risk_budget_dollars",
+            "allocated_risk_per_trade_dollars",
+            "pilot_risk_cap_pct",
+            "safe_f_risk_ceiling_dollars",
+            "wfa_risk_per_contract_dollars",
+            "wfa_optimal_risk_fraction",
+            "wfa_drawdown_breach_probability",
+            "wfa_drawdown_limit",
+            "wfa_car25",
         ]
-        if column in risk_summary.columns
+        if column in working.columns
     ]
-    return risk_summary[columns].copy()
+    return working[columns].copy()
+
+
+def uses_growth_optimal_sizing(row):
+    return str(row.get("sizing_method", "")) == "drawdown_constrained_car25"
+
+
+def allocation_readiness_for_strategy(row):
+    if not uses_growth_optimal_sizing(row):
+        return (
+            "Blocked"
+            if str(row.get("data_confidence", "")).lower() == "low"
+            else "Ready"
+        )
+
+    if str(row.get("Strategy_Name", "")).strip().lower() == "discretionary":
+        return "Not Sized"
+
+    risk_trade_count = parse_number(row.get("risk_model_trade_count")) or 0
+    unit_risk = parse_number(
+        row.get("estimated_max_risk_per_contract_or_share")
+    )
+    if risk_trade_count < 20 or unit_risk is None or unit_risk <= 0:
+        return "Blocked"
+
+    if str(row.get("data_confidence", "")).lower() == "low":
+        return "Ready With Warnings"
+
+    return "Ready"
 
 
 def action_for_strategy(row):
+    if uses_growth_optimal_sizing(row):
+        readiness = allocation_readiness_for_strategy(row)
+        if readiness == "Not Sized":
+            return "Not Sized"
+        if readiness == "Blocked":
+            return "Needs Data"
+
+        safe_f = parse_number(row.get("safe_f")) or 0.0
+        car25 = parse_number(row.get("CAR25")) or 0.0
+        if safe_f <= 0 or car25 <= 0:
+            return "No Allocation"
+
+        quantity = parse_number(row.get("contracts_or_shares_to_trade"))
+        if quantity is None:
+            return "Needs Data"
+        if quantity < 1:
+            return "Below Minimum Size"
+
+        status = str(row.get("strategy_status", "")).lower()
+        if status == "pause":
+            return "Pause"
+        if status == "watch":
+            return "Watch"
+
+        profit_factor = parse_number(row.get("profit_factor"))
+        total_return = parse_number(row.get("total_return"))
+        max_drawdown = parse_number(row.get("max_drawdown"))
+        if (
+            profit_factor is not None
+            and profit_factor >= 1.10
+            and total_return is not None
+            and total_return > 0
+            and max_drawdown is not None
+            and max_drawdown > -0.20
+        ):
+            return "Allocate"
+        return "Watch"
+
     if str(row.get("data_confidence", "")).lower() == "low":
         return "Needs Data"
 
@@ -5516,6 +6432,43 @@ def action_for_strategy(row):
 
 
 def action_reason_for_strategy(row):
+    if uses_growth_optimal_sizing(row):
+        action = action_for_strategy(row)
+        data_warning = str(row.get("data_confidence_reason", "")).strip()
+        if action == "Not Sized":
+            return "Discretionary activity is excluded from mechanical sizing."
+        if action == "Needs Data":
+            risk_trades = int(
+                parse_number(row.get("risk_model_trade_count")) or 0
+            )
+            return (
+                f"Sizing requires at least 20 valid margin-return trades and "
+                f"a positive per-unit risk estimate; found {risk_trades} trades."
+            )
+        if action == "No Allocation":
+            return (
+                "The CAR25 optimizer selected 0% risk because no positive "
+                "allocation improved conservative simulated growth."
+            )
+        if action == "Below Minimum Size":
+            budget = parse_number(row.get("risk_per_trade_dollars")) or 0.0
+            unit_risk = parse_number(
+                row.get("estimated_max_risk_per_contract_or_share")
+            ) or 0.0
+            return (
+                f"The ${budget:,.2f} risk budget is below one unit at "
+                f"${unit_risk:,.2f}; use a smaller instrument or allocate zero."
+            )
+
+        reason = (
+            f"CAR25 {float(row.get('CAR25')):.2%}; "
+            f"drawdown breach probability "
+            f"{float(row.get('drawdown_breach_probability')):.2%}."
+        )
+        if data_warning:
+            reason += f" Data warning: {data_warning}."
+        return reason
+
     if str(row.get("data_confidence", "")).lower() == "low":
         return row.get("data_confidence_reason", "Data needs review")
 
@@ -5558,6 +6511,10 @@ def build_strategy_decision_board(
             pnl_correlation,
         )
     )
+    decision["allocation_readiness"] = decision.apply(
+        allocation_readiness_for_strategy,
+        axis=1,
+    )
     decision["suggested_action"] = decision.apply(
         action_for_strategy,
         axis=1,
@@ -5567,22 +6524,13 @@ def build_strategy_decision_board(
         axis=1,
     )
 
-    action_order = {
-        "Allocate": 0,
-        "Watch": 1,
-        "Needs Data": 2,
-        "Pause": 3,
-    }
-    decision["_action_order"] = decision["suggested_action"].map(
-        action_order
-    ).fillna(99)
-
     columns = [
         "Strategy_Name",
         "suggested_action",
         "strategy_status",
         "data_confidence",
         "data_confidence_reason",
+        "allocation_readiness",
         "total_pnl",
         "total_return",
         "cagr",
@@ -5590,6 +6538,31 @@ def build_strategy_decision_board(
         "profit_factor",
         "safe_f",
         "risk_per_trade_dollars",
+        "simulations",
+        "CAR25",
+        "sizing_method",
+        "return_basis",
+        "drawdown_limit",
+        "drawdown_breach_probability",
+        "pct_above_drawdown_limit",
+        "risk_ceiling_fraction",
+        "cagr_objective_quantile",
+        "mean_block_length",
+        "elapsed_years",
+        "risk_model_trade_count",
+        "sizing_basis",
+        "estimated_max_risk_per_contract_or_share",
+        "estimated_margin_per_contract_or_share",
+        "recommended_instrument",
+        "risk_budget_dollars",
+        "allocated_risk_per_trade_dollars",
+        "pilot_risk_cap_pct",
+        "safe_f_risk_ceiling_dollars",
+        "wfa_risk_per_contract_dollars",
+        "wfa_optimal_risk_fraction",
+        "wfa_drawdown_breach_probability",
+        "wfa_drawdown_limit",
+        "wfa_car25",
         "contracts_or_shares_to_trade",
         "settlement_coverage_ratio",
         "settlement_missing_count",
@@ -5600,18 +6573,44 @@ def build_strategy_decision_board(
         "decision_reason",
     ]
 
-    return decision.sort_values(
-        [
-            "_action_order",
-            "total_pnl",
-        ],
-        ascending=[
-            True,
-            False,
-        ],
-    )[[column for column in columns if column in decision.columns]].reset_index(
-        drop=True,
+    decision["_strategy_sort"] = decision["Strategy_Name"].astype(str).str.lower()
+    return decision.sort_values("_strategy_sort")[
+        [column for column in columns if column in decision.columns]
+    ].reset_index(drop=True)
+
+
+def apply_wfa_validation_decision(
+    strategy_decision,
+    realized_trades,
+    validation,
+):
+    if (
+        validation is None
+        or strategy_decision is None
+        or strategy_decision.empty
+        or "WFA_01_Segment" not in realized_trades.columns
+    ):
+        return strategy_decision
+
+    wfa_strategy_names = set(
+        realized_trades.loc[
+            realized_trades["WFA_01_Segment"].notna(),
+            "Strategy_Name",
+        ].astype(str)
     )
+    result = strategy_decision.copy()
+    mask = result["Strategy_Name"].astype(str).isin(wfa_strategy_names)
+    verdict = validation.get("verdict", "FAIL")
+    action = {
+        "PASS": "Allocate",
+        "PILOT": "Pilot",
+        "FAIL": "Pause",
+    }.get(verdict, "Watch")
+    result.loc[mask, "suggested_action"] = action
+    result.loc[mask, "decision_reason"] = (
+        f"Walk-forward verdict {verdict}; size from initial stop risk."
+    )
+    return result
 
 
 def build_capital_allocation_table(strategy_decision):
@@ -5622,11 +6621,41 @@ def build_capital_allocation_table(strategy_decision):
 
     def allocation_note(row):
         action = str(row.get("suggested_action", ""))
+        if (
+            pd.notna(row.get("pilot_risk_cap_pct"))
+            and action in {"Allocate", "Pilot"}
+        ):
+            contracts = row.get("contracts_or_shares_to_trade")
+            instrument = row.get("recommended_instrument")
+            allocated_risk = parse_number(
+                row.get("allocated_risk_per_trade_dollars")
+            ) or 0.0
+            risk_budget = parse_number(row.get("risk_budget_dollars")) or 0.0
+            return (
+                f"Pilot size: {contracts} {instrument} contract(s), "
+                f"${allocated_risk:,.2f} initial stop risk within a "
+                f"${risk_budget:,.2f} budget; recalculate from each signal's stop."
+            )
+        if pd.notna(row.get("pilot_risk_cap_pct")):
+            return "WFA gates do not permit deployment; retain sizing for research only."
         if action == "Allocate":
             contracts = row.get("contracts_or_shares_to_trade")
             return f"Candidate size: {contracts} contracts/shares at Safe-F risk."
+        if action == "No Allocation":
+            return "CAR25 is not positive at nonzero risk; allocate zero."
+        if action == "Below Minimum Size":
+            risk_budget = parse_number(row.get("risk_per_trade_dollars")) or 0.0
+            unit_risk = parse_number(
+                row.get("estimated_max_risk_per_contract_or_share")
+            ) or 0.0
+            return (
+                f"Allocate zero: ${risk_budget:,.2f} risk budget is below "
+                f"one unit at ${unit_risk:,.2f}."
+            )
+        if action == "Not Sized":
+            return "Discretionary activity is not mechanically sized."
         if action == "Needs Data":
-            return "Resolve data-confidence blockers before allocating more capital."
+            return "Valid return or per-unit risk data is insufficient for sizing."
         if action == "Pause":
             return "Do not add capital until status improves."
         return "Keep small or unchanged until metrics/data improve."
@@ -5639,8 +6668,34 @@ def build_capital_allocation_table(strategy_decision):
         "Strategy_Name",
         "suggested_action",
         "data_confidence",
+        "allocation_readiness",
         "safe_f",
         "risk_per_trade_dollars",
+        "simulations",
+        "CAR25",
+        "sizing_method",
+        "return_basis",
+        "drawdown_limit",
+        "drawdown_breach_probability",
+        "pct_above_drawdown_limit",
+        "risk_ceiling_fraction",
+        "cagr_objective_quantile",
+        "mean_block_length",
+        "elapsed_years",
+        "risk_model_trade_count",
+        "sizing_basis",
+        "estimated_max_risk_per_contract_or_share",
+        "estimated_margin_per_contract_or_share",
+        "recommended_instrument",
+        "risk_budget_dollars",
+        "allocated_risk_per_trade_dollars",
+        "pilot_risk_cap_pct",
+        "safe_f_risk_ceiling_dollars",
+        "wfa_risk_per_contract_dollars",
+        "wfa_optimal_risk_fraction",
+        "wfa_drawdown_breach_probability",
+        "wfa_drawdown_limit",
+        "wfa_car25",
         "contracts_or_shares_to_trade",
         "total_return",
         "max_drawdown",
@@ -5659,11 +6714,51 @@ def build_compact_capital_allocation_table(capital_allocation):
         return pd.DataFrame(columns=[])
 
     compact = capital_allocation.copy()
-    columns = [
-        "Strategy_Name",
-        "contracts_or_shares_to_trade",
-        "risk_per_trade_dollars",
-    ]
+    has_wfa_sizing = (
+        (
+            "wfa_optimal_risk_fraction" in compact.columns
+            and compact["wfa_optimal_risk_fraction"].notna().any()
+        )
+        or (
+            "pilot_risk_cap_pct" in compact.columns
+            and compact["pilot_risk_cap_pct"].notna().any()
+        )
+    )
+    has_growth_sizing = (
+        "sizing_method" in compact.columns
+        and compact["sizing_method"].eq(
+            "drawdown_constrained_car25"
+        ).any()
+    )
+    if has_wfa_sizing:
+        columns = [
+            "Strategy_Name",
+            "recommended_instrument",
+            "contracts_or_shares_to_trade",
+            "allocated_risk_per_trade_dollars",
+            "risk_budget_dollars",
+            "safe_f_risk_ceiling_dollars",
+            "wfa_optimal_risk_fraction",
+            "wfa_drawdown_breach_probability",
+        ]
+    elif has_growth_sizing:
+        columns = [
+            "Strategy_Name",
+            "suggested_action",
+            "allocation_readiness",
+            "contracts_or_shares_to_trade",
+            "sizing_basis",
+            "safe_f",
+            "risk_per_trade_dollars",
+            "CAR25",
+            "drawdown_breach_probability",
+        ]
+    else:
+        columns = [
+            "Strategy_Name",
+            "contracts_or_shares_to_trade",
+            "risk_per_trade_dollars",
+        ]
 
     return compact[
         [column for column in columns if column in compact.columns]
@@ -5708,6 +6803,17 @@ def format_dashboard_metric(metric, value):
         "rolling_20_max_drawdown",
         "rolling_20_win_rate",
         "average_return_on_margin",
+        "pilot_risk_cap_pct",
+        "wfa_optimal_risk_fraction",
+        "wfa_drawdown_breach_probability",
+        "wfa_drawdown_limit",
+        "wfa_car25",
+        "CAR25",
+        "drawdown_limit",
+        "drawdown_breach_probability",
+        "pct_above_drawdown_limit",
+        "risk_ceiling_fraction",
+        "cagr_objective_quantile",
     }:
         return f"{numeric_value * 100:,.2f}%"
 
@@ -5733,6 +6839,10 @@ def format_dashboard_metric(metric, value):
         "largest_win",
         "largest_loss",
         "risk_per_trade_dollars",
+        "risk_budget_dollars",
+        "allocated_risk_per_trade_dollars",
+        "safe_f_risk_ceiling_dollars",
+        "wfa_risk_per_contract_dollars",
         "estimated_max_risk_per_contract_or_share",
         "estimated_margin_per_contract_or_share",
         "statement_gross_ytd_pnl",
@@ -5794,7 +6904,7 @@ def status_badge_class(status):
     if normalized == "healthy":
         return "status-healthy"
 
-    if normalized == "watch":
+    if normalized in {"watch", "below minimum size"}:
         return "status-watch"
 
     if normalized == "pause":
@@ -5812,7 +6922,10 @@ def action_badge_class(action):
     if normalized == "watch":
         return "status-watch"
 
-    if normalized in {"pause", "needs data"}:
+    if normalized == "pilot":
+        return "status-watch"
+
+    if normalized in {"pause", "needs data", "no allocation"}:
         return "status-pause"
 
     return "status-neutral"
@@ -5945,14 +7058,18 @@ def build_account_kpi_cards(
 
     if ytd_summary is not None and not ytd_summary.empty:
         ytd = ytd_summary.iloc[0]
-        trade_history_net_metric = (
-            "trade_history_adjusted_closed_net_ytd_pnl"
-            if "trade_history_adjusted_closed_net_ytd_pnl" in ytd
+        raw_trade_history_net_metric = (
+            "trade_history_closed_net_ytd_pnl"
+            if "trade_history_closed_net_ytd_pnl" in ytd
             else "script_realized_closed_net_pnl"
         )
-        trade_history_net_value = ytd.get(
-            "trade_history_adjusted_closed_net_ytd_pnl",
+        raw_trade_history_net_value = ytd.get(
+            "trade_history_closed_net_ytd_pnl",
             ytd.get("script_realized_closed_net_pnl"),
+        )
+        adjusted_trade_history_net_value = ytd.get(
+            "trade_history_adjusted_closed_net_ytd_pnl",
+            raw_trade_history_net_value,
         )
         discrepancy_metric = (
             "closed_net_delta_statement_minus_trade_history"
@@ -5963,31 +7080,56 @@ def build_account_kpi_cards(
             "closed_net_delta_statement_minus_trade_history",
             ytd.get("closed_net_delta_statement_minus_script"),
         )
+        ytd_cards = [
+            (
+                "Net YTD PNL",
+                "statement_closed_net_ytd_pnl",
+                ytd.get("statement_closed_net_ytd_pnl"),
+                "Closed net YTD PnL from the account statement.",
+            ),
+            (
+                "Raw Trade History Net PNL",
+                raw_trade_history_net_metric,
+                raw_trade_history_net_value,
+                "Closed net YTD PnL directly from imported trade history.",
+            ),
+        ]
+
+        if "total_closed_pnl_adjustment" in ytd:
+            ytd_cards.append(
+                (
+                    "YTD Bridge Adjustment",
+                    "total_closed_pnl_adjustment",
+                    ytd.get("total_closed_pnl_adjustment"),
+                    (
+                        "Open-position exclusions, carryover residuals, and "
+                        "fee true-ups applied for statement reconciliation."
+                    ),
+                )
+            )
+
+        if "trade_history_adjusted_closed_net_ytd_pnl" in ytd:
+            ytd_cards.append(
+                (
+                    "Adjusted Trade History Net PNL",
+                    "trade_history_adjusted_closed_net_ytd_pnl",
+                    adjusted_trade_history_net_value,
+                    "Raw trade history plus YTD bridge adjustments.",
+                )
+            )
+
+        ytd_cards.append(
+            (
+                "Discrepancy",
+                discrepancy_metric,
+                discrepancy_value,
+                "Statement minus adjusted trade history. This should be near zero.",
+            )
+        )
+
         sections.append(
             render_account_kpi_grid(
-                [
-                    (
-                        "Net YTD PNL",
-                        "statement_closed_net_ytd_pnl",
-                        ytd.get("statement_closed_net_ytd_pnl"),
-                        "Closed net YTD PnL from the account statement.",
-                    ),
-                    (
-                        "Trade History Net PNL",
-                        trade_history_net_metric,
-                        trade_history_net_value,
-                        (
-                            "Closed net YTD PnL from imported trade history "
-                            "after open-position and YTD bridge adjustments."
-                        ),
-                    ),
-                    (
-                        "Discrepancy",
-                        discrepancy_metric,
-                        discrepancy_value,
-                        "Statement minus trade history. This should be near zero.",
-                    ),
-                ],
+                ytd_cards,
                 heading="YTD Reconciliation",
             )
         )
@@ -6288,8 +7430,9 @@ def strategy_trade_browser_html(realized_trades, summary=None, server_enabled=Fa
     payload_json = dashboard_json_payload(payload)
 
     return f"""
-  <section>
-    <h2>Strategy Trades</h2>
+  <details class="strategy-trades-details">
+    <summary>Strategy Trades</summary>
+    <div class="strategy-trades-content">
     <div class="strategy-trade-browser">
       <label for="strategy-trade-select">Strategy</label>
       <select id="strategy-trade-select"></select>
@@ -6326,7 +7469,8 @@ def strategy_trade_browser_html(realized_trades, summary=None, server_enabled=Fa
       No realized trades for this strategy.
     </div>
     <script type="application/json" id="strategy-trade-data">{payload_json}</script>
-  </section>
+    </div>
+  </details>
 """
 
 
@@ -6733,6 +7877,7 @@ def decision_dataframe_to_html_table(df, max_rows=None):
         "suggested_action": "Action",
         "strategy_status": "Status",
         "data_confidence": "Data",
+        "allocation_readiness": "Sizing Data",
         "total_pnl": "PNL",
         "total_return": "Total Return",
         "cagr": "Ann. Return",
@@ -6740,6 +7885,30 @@ def decision_dataframe_to_html_table(df, max_rows=None):
         "profit_factor": "PF",
         "safe_f": "Safe-F",
         "risk_per_trade_dollars": "Risk $",
+        "simulations": "Simulations",
+        "CAR25": "CAR25",
+        "sizing_method": "Sizing Method",
+        "return_basis": "Return Basis",
+        "drawdown_limit": "DD Limit",
+        "drawdown_breach_probability": "DD Breach Probability",
+        "pct_above_drawdown_limit": "Required DD Survival",
+        "risk_ceiling_fraction": "Risk Ceiling",
+        "cagr_objective_quantile": "CAGR Quantile",
+        "mean_block_length": "Avg. Block Trades",
+        "elapsed_years": "History Years",
+        "risk_model_trade_count": "Sizing Trades",
+        "recommended_instrument": "Instrument",
+        "risk_budget_dollars": "Risk Budget",
+        "allocated_risk_per_trade_dollars": "Allocated Risk",
+        "pilot_risk_cap_pct": "Pilot Risk Cap",
+        "safe_f_risk_ceiling_dollars": "Safe-F Risk $ Ceiling",
+        "wfa_risk_per_contract_dollars": "Risk / Contract",
+        "wfa_optimal_risk_fraction": "Optimized Risk %",
+        "wfa_drawdown_breach_probability": "DD Breach Probability",
+        "wfa_drawdown_limit": "DD Limit",
+        "wfa_car25": "CAR25",
+        "sizing_basis": "Sizing Basis",
+        "estimated_max_risk_per_contract_or_share": "Risk / Contract",
         "contracts_or_shares_to_trade": "Size",
         "settlement_coverage_ratio": "Settlement",
         "settlement_missing_count": "Missing Settle",
@@ -6798,6 +7967,8 @@ def decision_dataframe_to_html_table(df, max_rows=None):
                 "allocation_note",
                 "data_confidence_reason",
                 "contracts_or_shares_to_trade",
+                "recommended_instrument",
+                "sizing_basis",
             }:
                 text = str(value) if not pd.isna(value) else ""
                 class_name = (
@@ -6952,6 +8123,818 @@ def split_dashboard_chart_files(chart_files, bottom_chart_files=None):
     return primary_chart_files, detail_chart_files
 
 
+def wfa_profit_factor(pnl):
+    values = pd.to_numeric(pd.Series(pnl), errors="coerce").dropna()
+    gross_profit = values[values > 0].sum()
+    gross_loss = abs(values[values < 0].sum())
+
+    if gross_loss == 0:
+        return float("inf") if gross_profit > 0 else None
+
+    return float(gross_profit / gross_loss)
+
+
+def wfa_gate(
+    key,
+    label,
+    display_value,
+    target,
+    status,
+    description,
+    blocking=True,
+):
+    return {
+        "key": key,
+        "label": label,
+        "display_value": display_value,
+        "target": target,
+        "status": status,
+        "description": description,
+        "blocking": blocking,
+    }
+
+
+def wfa_metric_display(value, suffix="", decimals=2):
+    if value is None or pd.isna(value):
+        return "n/a"
+    if math.isinf(float(value)):
+        return "inf"
+    return f"{float(value):,.{decimals}f}{suffix}"
+
+
+def bootstrap_wfa_metrics(
+    pnl,
+    starting_equity,
+    elapsed_years,
+    simulations,
+    random_seed,
+):
+    values = pd.to_numeric(pd.Series(pnl), errors="coerce").dropna().to_numpy()
+    if len(values) == 0 or simulations <= 0:
+        return {"cagr_q25": None, "profit_factor_q25": None}
+
+    rng = np.random.default_rng(random_seed)
+    sampled = values[
+        rng.integers(0, len(values), size=(len(values), simulations))
+    ]
+    ending_equity = starting_equity + sampled.sum(axis=0)
+    valid_ending = ending_equity > 0
+    cagr = np.full(simulations, np.nan)
+    cagr[valid_ending] = (
+        (ending_equity[valid_ending] / starting_equity)
+        ** (1 / max(elapsed_years, 1.0))
+        - 1
+    )
+    gross_profit = np.where(sampled > 0, sampled, 0).sum(axis=0)
+    gross_loss = np.abs(np.where(sampled < 0, sampled, 0).sum(axis=0))
+    profit_factor = np.divide(
+        gross_profit,
+        gross_loss,
+        out=np.full(simulations, np.nan),
+        where=gross_loss > 0,
+    )
+
+    return {
+        "cagr_q25": float(np.nanquantile(cagr, 0.25)),
+        "profit_factor_q25": float(np.nanquantile(profit_factor, 0.25)),
+    }
+
+
+def build_wfa_validation(
+    cleaned_trades,
+    simulations=DEFAULT_WFA_SIMULATIONS,
+    round_trip_cost=0.0,
+    cost_stress_multiple=2.0,
+    random_seed=42,
+    as_of_date=None,
+    minimum_total_trades=50,
+    minimum_segment_count=5,
+    minimum_trades_per_segment=5,
+    minimum_latest_segment_trades=5,
+    mean_block_length=DEFAULT_WFA_BLOCK_LENGTH,
+    drawdown_limit=DEFAULT_WFA_DRAWDOWN_LIMIT,
+    max_drawdown_breach_probability=(
+        DEFAULT_WFA_MAX_DRAWDOWN_BREACH_PROBABILITY
+    ),
+    max_risk_fraction=DEFAULT_WFA_MAX_RISK_FRACTION,
+    cagr_objective_quantile=DEFAULT_WFA_CAGR_QUANTILE,
+):
+    required = {
+        "WFA_01_Segment",
+        "net_pnl",
+        "starting_equity",
+        "timestamp",
+        "Qty",
+        "Symbol",
+    }
+    missing = required - set(cleaned_trades.columns)
+    if missing:
+        raise ValueError(
+            "--wfa-validation requires WFA analyzer input columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    if "WFA_Execution_Type" in cleaned_trades.columns:
+        closes = cleaned_trades[
+            cleaned_trades["WFA_Execution_Type"].astype(str).str.upper() == "EXIT"
+        ].copy()
+    else:
+        closes = cleaned_trades[
+            cleaned_trades["Pos Effect"].astype(str).str.upper() == "TO CLOSE"
+        ].copy()
+
+    if closes.empty:
+        raise ValueError("--wfa-validation found no WFA close executions.")
+
+    closes["timestamp"] = pd.to_datetime(closes["timestamp"], errors="coerce")
+    closes["_raw_pnl"] = pd.to_numeric(closes["net_pnl"], errors="coerce")
+    closes = closes.dropna(subset=["timestamp", "_raw_pnl"])
+    if closes.empty:
+        raise ValueError("WFA close executions have no valid dates or P&L values.")
+    closes = closes.sort_values("timestamp").copy()
+    strategy_names = closes.get(
+        "Strategy_Name",
+        pd.Series(dtype=object),
+    ).dropna().astype(str).str.strip()
+    strategy_names = strategy_names[strategy_names != ""]
+    strategy_name = (
+        strategy_names.iloc[0]
+        if not strategy_names.empty
+        else "WFA Strategy"
+    )
+    tested_symbols = sorted({
+        str(symbol).strip()
+        for symbol in closes["Symbol"].dropna()
+        if str(symbol).strip()
+    })
+
+    starting_values = pd.to_numeric(
+        closes["starting_equity"], errors="coerce"
+    ).dropna()
+    if starting_values.empty or starting_values.iloc[0] <= 0:
+        raise ValueError("WFA validation requires positive starting equity.")
+    starting_equity = float(starting_values.iloc[0])
+    stressed_cost = max(float(round_trip_cost), 0.0) * max(
+        float(cost_stress_multiple), 0.0
+    )
+    closes["_adjusted_pnl"] = closes["_raw_pnl"] - stressed_cost
+
+    segment_rows = []
+    for segment, group in closes.groupby("WFA_01_Segment", sort=True):
+        pnl = group["_adjusted_pnl"]
+        segment_rows.append({
+            "Segment": str(segment),
+            "Trades": int(len(group)),
+            "Net PNL": float(pnl.sum()),
+            "Profit Factor": wfa_profit_factor(pnl),
+            "Win Rate": float((pnl > 0).mean()),
+            "Positive": bool(pnl.sum() > 0),
+        })
+    segment_summary = pd.DataFrame(segment_rows)
+
+    pnl = closes.sort_values("timestamp")["_adjusted_pnl"]
+    aggregate_pf = wfa_profit_factor(pnl)
+    equity = starting_equity + pnl.cumsum()
+    peak = pd.concat([
+        pd.Series([starting_equity]),
+        equity.reset_index(drop=True),
+    ]).cummax().iloc[1:].reset_index(drop=True)
+    max_drawdown = float((equity.reset_index(drop=True) / peak - 1).min())
+    elapsed_days = max(
+        (closes["timestamp"].max() - closes["timestamp"].min()).days,
+        1,
+    )
+
+    positive_segment_pct = float(segment_summary["Positive"].mean() * 100)
+    segment_profit_factors = pd.to_numeric(
+        segment_summary["Profit Factor"], errors="coerce"
+    ).replace([np.inf, -np.inf], np.nan).dropna()
+    median_segment_pf = (
+        float(segment_profit_factors.median())
+        if not segment_profit_factors.empty
+        else None
+    )
+    minimum_segment_trades = int(segment_summary["Trades"].min())
+    positive_segment_pnl = segment_summary.loc[
+        segment_summary["Net PNL"] > 0,
+        "Net PNL",
+    ]
+    concentration = (
+        float(positive_segment_pnl.max() / positive_segment_pnl.sum())
+        if not positive_segment_pnl.empty and positive_segment_pnl.sum() > 0
+        else None
+    )
+
+    def numeric_wfa_column(column):
+        if column not in closes.columns:
+            return pd.Series(float("nan"), index=closes.index)
+        return pd.to_numeric(closes[column], errors="coerce")
+
+    risk_per_contract = numeric_wfa_column("WFA_Risk_Per_Contract")
+    dollars_per_point = numeric_wfa_column("WFA_13_DollarsPerPt").abs()
+    stop_distance = numeric_wfa_column("WFA_14_StopDist").abs()
+    calculated_risk = dollars_per_point * stop_distance
+    valid_risk = risk_per_contract.gt(0) & calculated_risk.gt(0)
+    missing_risk_count = int((~valid_risk).sum())
+    relative_risk_error = (
+        (risk_per_contract - calculated_risk).abs() / calculated_risk
+    )
+    inconsistent_risk_count = int(
+        (valid_risk & relative_risk_error.gt(0.01)).sum()
+    )
+    symbol_count = int(closes["Symbol"].astype(str).nunique())
+
+    total_initial_risk = numeric_wfa_column("WFA_Total_Initial_Risk").abs()
+    calculated_total_risk = (
+        pd.to_numeric(closes["Qty"], errors="coerce").abs()
+        * risk_per_contract
+    )
+    total_initial_risk = total_initial_risk.where(
+        total_initial_risk > 0,
+        calculated_total_risk,
+    )
+    valid_simulation_risk = total_initial_risk.gt(0)
+    wfa_simulation = None
+    bootstrap = {
+        "cagr_q25": None,
+        "profit_factor_q25": None,
+    }
+    if valid_simulation_risk.any():
+        trade_r = (
+            closes.loc[valid_simulation_risk, "_adjusted_pnl"]
+            / total_initial_risk.loc[valid_simulation_risk]
+        )
+        wfa_simulation = build_wfa_simulation(
+            trade_r,
+            elapsed_days / 365.25,
+            strategy_name,
+            simulations=simulations,
+            mean_block_length=mean_block_length,
+            drawdown_limit=drawdown_limit,
+            max_breach_probability=max_drawdown_breach_probability,
+            max_risk_fraction=max_risk_fraction,
+            cagr_quantile=cagr_objective_quantile,
+            random_seed=random_seed,
+        )
+        iqr = wfa_simulation["summary"].set_index("metric_key")
+        if "cagr" in iqr.index:
+            bootstrap["cagr_q25"] = float(iqr.loc["cagr", "Q25"])
+        if "profit_factor" in iqr.index:
+            bootstrap["profit_factor_q25"] = float(
+                iqr.loc["profit_factor", "Q25"]
+            )
+
+    latest_row = closes.loc[closes["timestamp"].idxmax()]
+    latest_segment = str(latest_row["WFA_01_Segment"])
+    latest_segment_trades = closes[
+        closes["WFA_01_Segment"].astype(str) == latest_segment
+    ]
+    latest_segment_pf = wfa_profit_factor(
+        latest_segment_trades["_adjusted_pnl"]
+    )
+    latest_segment_passed = (
+        len(latest_segment_trades) >= minimum_latest_segment_trades
+        and latest_segment_trades["_adjusted_pnl"].sum() > 0
+        and latest_segment_pf is not None
+        and latest_segment_pf > 1.0
+    )
+
+    if positive_segment_pct >= 65:
+        positive_segment_status = "good"
+    elif positive_segment_pct >= 50:
+        positive_segment_status = "review"
+    else:
+        positive_segment_status = "bad"
+
+    gates = [
+        wfa_gate(
+            "aggregate_profit_factor",
+            "Aggregate OOS Profit Factor",
+            wfa_metric_display(aggregate_pf),
+            ">= 1.10 after stressed costs",
+            "good" if aggregate_pf is not None and aggregate_pf >= 1.10 else "bad",
+            f"Uses an additional ${stressed_cost:,.2f} cost per completed trade.",
+        ),
+        wfa_gate(
+            "bootstrap_downside",
+            "Bootstrap Downside",
+            (
+                f"PF Q25 {wfa_metric_display(bootstrap['profit_factor_q25'])}; "
+                "CAGR Q25 "
+                f"{wfa_metric_display(bootstrap['cagr_q25'] * 100 if bootstrap['cagr_q25'] is not None else None, '%', 2)}"
+            ),
+            "PF Q25 > 1.00 and CAGR Q25 > 0%",
+            (
+                "good"
+                if bootstrap["profit_factor_q25"] is not None
+                and bootstrap["profit_factor_q25"] > 1.0
+                and bootstrap["cagr_q25"] is not None
+                and bootstrap["cagr_q25"] > 0
+                else "bad"
+            ),
+            (
+                f"{simulations:,} stationary block resamples using "
+                f"{mean_block_length:g}-trade average blocks and the OOS horizon."
+            ),
+        ),
+        wfa_gate(
+            "bandy_safe_f",
+            "Drawdown-Constrained Safe-F",
+            (
+                "n/a"
+                if wfa_simulation is None
+                else (
+                    f"{wfa_simulation['optimization']['risk_fraction'] * 100:.2f}% risk; "
+                    f"CAR25 {wfa_simulation['optimization']['cagr_objective'] * 100:.2f}%; "
+                    "breach "
+                    f"{wfa_simulation['optimization']['drawdown_breach_probability'] * 100:.2f}%"
+                )
+            ),
+            (
+                f"maximize CAR{cagr_objective_quantile * 100:.0f} with <= "
+                f"{max_drawdown_breach_probability * 100:.1f}% probability "
+                f"of drawdown below {drawdown_limit * 100:.0f}%"
+            ),
+            (
+                "bad"
+                if wfa_simulation is None
+                else (
+                    "good"
+                    if wfa_simulation["optimization"]["risk_fraction"] > 0
+                    and wfa_simulation["optimization"]["cagr_objective"] > 0
+                    and wfa_simulation["optimization"][
+                        "drawdown_breach_probability"
+                    ]
+                    <= max_drawdown_breach_probability
+                    else "bad"
+                )
+            ),
+            (
+                "Risk is a fraction of current account equity. A non-positive "
+                "conservative growth optimum reduces the allocation to zero."
+            ),
+        ),
+        wfa_gate(
+            "positive_segments",
+            "Profitable OOS Segments",
+            wfa_metric_display(positive_segment_pct, "%", 1),
+            ">= 65% pass; 50-64.9% pilot",
+            positive_segment_status,
+            "Measures persistence across windows; a mixed result limits deployment size.",
+        ),
+        wfa_gate(
+            "median_segment_pf",
+            "Median Segment Profit Factor",
+            wfa_metric_display(median_segment_pf),
+            "> 1.00",
+            "good" if median_segment_pf is not None and median_segment_pf > 1 else "bad",
+            "Prevents one exceptional segment from hiding weak typical performance.",
+        ),
+        wfa_gate(
+            "maximum_drawdown",
+            "Stitched OOS Max Drawdown",
+            wfa_metric_display(max_drawdown * 100, "%", 1),
+            ">= -20%",
+            "good" if max_drawdown >= -0.20 else "bad",
+            "Drawdown from the chronologically stitched OOS trade stream.",
+        ),
+        wfa_gate(
+            "trade_coverage",
+            "Trade Coverage",
+            (
+                f"{len(closes):,} total; {len(segment_summary):,} segments; "
+                f"{minimum_segment_trades:,} minimum/segment"
+            ),
+            (
+                f">= {minimum_total_trades} total, >= {minimum_segment_count} "
+                f"segments, >= {minimum_trades_per_segment}/segment"
+            ),
+            (
+                "good"
+                if len(closes) >= minimum_total_trades
+                and len(segment_summary) >= minimum_segment_count
+                and minimum_segment_trades >= minimum_trades_per_segment
+                else "bad"
+            ),
+            "Uses coverage plus bootstrap uncertainty rather than requiring 100 trades.",
+        ),
+        wfa_gate(
+            "segment_concentration",
+            "Profit Concentration",
+            wfa_metric_display(
+                concentration * 100 if concentration is not None else None,
+                "%",
+                1,
+            ),
+            "largest positive segment <= 50% of positive-segment PNL",
+            "good" if concentration is not None and concentration <= 0.50 else "bad",
+            "Flags results dominated by one favorable period.",
+        ),
+        wfa_gate(
+            "position_sizing_integrity",
+            "Stop-Risk Field Integrity",
+            (
+                f"{missing_risk_count} missing; "
+                f"{inconsistent_risk_count} inconsistent"
+            ),
+            "risk/contract present and within 1% of point value x stop distance",
+            (
+                "good"
+                if missing_risk_count == 0 and inconsistent_risk_count == 0
+                else "bad"
+            ),
+            "Fractional AmiBroker backtest quantities are expected; live size uses whole contracts.",
+        ),
+        wfa_gate(
+            "cross_market_robustness",
+            "Parameter and Cross-Market Robustness",
+            f"{symbol_count} symbol(s); neighborhood data not in trade export",
+            "not evaluated from a WFA trade list",
+            "na",
+            "Use the optimization-surface and cross-sector dashboards separately when available.",
+            blocking=False,
+        ),
+        wfa_gate(
+            "recent_untouched_data",
+            "Latest Complete OOS Segment",
+            (
+                f"{latest_segment}: {len(latest_segment_trades)} trades; "
+                f"PNL ${latest_segment_trades['_adjusted_pnl'].sum():,.0f}; "
+                f"PF {wfa_metric_display(latest_segment_pf)}"
+            ),
+            (
+                f">= {minimum_latest_segment_trades} trades, positive PNL, "
+                "and PF > 1.00"
+            ),
+            "good" if latest_segment_passed else "bad",
+            "Uses the latest completed WFA segment instead of a partial calendar year.",
+        ),
+    ]
+
+    statuses = [gate["status"] for gate in gates if gate["blocking"]]
+    verdict = (
+        "FAIL"
+        if "bad" in statuses
+        else "PILOT"
+        if "review" in statuses
+        else "PASS"
+    )
+    return {
+        "verdict": verdict,
+        "gates": gates,
+        "segments": segment_summary,
+        "starting_equity": starting_equity,
+        "stressed_cost": stressed_cost,
+        "simulations": simulations,
+        "latest_segment": latest_segment,
+        "simulation": wfa_simulation,
+        "strategy_name": strategy_name,
+        "tested_symbols": tested_symbols,
+    }
+
+
+def attach_wfa_deployment_recommendation(validation, capital_allocation):
+    if not validation:
+        return validation
+
+    result = validation.copy()
+    result["deployment"] = None
+    if capital_allocation is None or capital_allocation.empty:
+        return result
+
+    strategy_name = str(validation.get("strategy_name", "")).strip()
+    matches = capital_allocation[
+        capital_allocation["Strategy_Name"].astype(str) == strategy_name
+    ]
+    if matches.empty:
+        matches = capital_allocation.head(1)
+    if matches.empty:
+        return result
+
+    row = matches.iloc[0]
+    result["deployment"] = {
+        "strategy_name": strategy_name or str(row.get("Strategy_Name", "")),
+        "tested_symbols": list(validation.get("tested_symbols", [])),
+        "recommended_instrument": str(
+            row.get("recommended_instrument", "") or ""
+        ),
+        "contracts": parse_number(row.get("contracts_or_shares_to_trade")),
+        "risk_per_contract": parse_number(
+            row.get("wfa_risk_per_contract_dollars")
+        ),
+        "risk_budget": parse_number(row.get("risk_budget_dollars")),
+        "allocated_risk": parse_number(
+            row.get("allocated_risk_per_trade_dollars")
+        ),
+        "action": str(row.get("suggested_action", "")),
+    }
+    return result
+
+
+def wfa_validation_panel_html(validation):
+    if not validation:
+        return ""
+
+    cards = []
+    for gate in validation["gates"]:
+        cards.append(f"""
+<article class="wfa-gate-card {html.escape(gate['status'])}">
+  <div class="wfa-gate-label">{html.escape(gate['label'])}</div>
+  <div class="wfa-gate-value">{html.escape(gate['display_value'])}</div>
+  <div class="wfa-gate-target">Target {html.escape(gate['target'])}</div>
+  <div class="wfa-gate-description">{html.escape(gate['description'])}</div>
+</article>
+""")
+
+    deployment = validation.get("deployment") or {}
+    tested_symbol_text = ", ".join(deployment.get("tested_symbols", [])) or "n/a"
+    recommended_instrument = deployment.get("recommended_instrument") or "n/a"
+    contracts = deployment.get("contracts")
+    contract_text = (
+        "n/a"
+        if contracts is None
+        else f"{int(contracts):,} contract{'s' if int(contracts) != 1 else ''}"
+    )
+    risk_per_contract = deployment.get("risk_per_contract")
+    allocated_risk = deployment.get("allocated_risk")
+    risk_budget = deployment.get("risk_budget")
+    deployment_html = ""
+    if deployment:
+        deployment_html = f"""
+  <div class="wfa-deployment-heading">
+    <div>
+      <h2>{html.escape(deployment.get('strategy_name') or 'WFA Strategy')}</h2>
+      <p>Walk-forward deployment estimate based on the current risk bankroll and the latest initial-stop risk.</p>
+    </div>
+    <span class="status-badge {action_badge_class(deployment.get('action'))}">{html.escape(deployment.get('action') or 'Research')}</span>
+  </div>
+  <div class="wfa-deployment-strip">
+    <div><span>Tested On</span><strong>{html.escape(tested_symbol_text)}</strong></div>
+    <div><span>Live Instrument</span><strong>{html.escape(recommended_instrument)}</strong></div>
+    <div><span>Estimated Size</span><strong>{html.escape(contract_text)}</strong></div>
+    <div><span>Risk / Contract</span><strong>{'n/a' if risk_per_contract is None else f'${risk_per_contract:,.2f}'}</strong></div>
+    <div><span>Allocated Risk</span><strong>{'n/a' if allocated_risk is None else f'${allocated_risk:,.2f}'}</strong></div>
+    <div><span>Risk Budget</span><strong>{'n/a' if risk_budget is None else f'${risk_budget:,.2f}'}</strong></div>
+  </div>
+"""
+
+    segment_display = validation["segments"].copy()
+    segment_display["Net PNL"] = segment_display["Net PNL"].map(
+        lambda value: f"${value:,.2f}"
+    )
+    segment_display["Profit Factor"] = segment_display["Profit Factor"].map(
+        wfa_metric_display
+    )
+    segment_display["Win Rate"] = segment_display["Win Rate"].map(
+        lambda value: f"{value:.1%}"
+    )
+    segment_display["Positive"] = segment_display["Positive"].map(
+        lambda value: "Yes" if value else "No"
+    )
+    simulation = validation.get("simulation")
+    simulation_html = ""
+    if simulation:
+        optimization = simulation["optimization"]
+        optimization_display = pd.DataFrame([
+            {
+                "Measure": "Optimized risk per trade",
+                "Value": (
+                    f"{optimization['risk_fraction'] * 100:.2f}% of equity"
+                ),
+            },
+            {
+                "Measure": "Risk ceiling at drawdown constraint",
+                "Value": (
+                    f"{optimization['risk_ceiling_fraction'] * 100:.2f}%"
+                ),
+            },
+            {
+                "Measure": "Conservative growth objective",
+                "Value": (
+                    f"CAR{optimization['cagr_objective_quantile'] * 100:.0f} "
+                    f"{optimization['cagr_objective'] * 100:.2f}%"
+                ),
+            },
+            {
+                "Measure": "Median simulated CAGR",
+                "Value": f"{optimization['median_cagr'] * 100:.2f}%",
+            },
+            {
+                "Measure": "Probability of breaching drawdown limit",
+                "Value": (
+                    f"{optimization['drawdown_breach_probability'] * 100:.2f}% "
+                    f"below {optimization['drawdown_limit'] * 100:.0f}%"
+                ),
+            },
+            {
+                "Measure": "Simulation design",
+                "Value": (
+                    f"{optimization['simulations']:,} paths; "
+                    f"{optimization['source_trades']} trades/path; "
+                    f"{optimization['mean_block_length']:g}-trade average blocks"
+                ),
+            },
+        ])
+        iqr_display = simulation["summary"].copy()
+
+        def format_distribution_value(row, column):
+            value = row[column]
+            if pd.isna(value):
+                return "n/a"
+            if row["Unit"] == "percent":
+                return f"{float(value) * 100:.2f}%"
+            if row["Unit"] == "trades":
+                return f"{float(value):.1f}"
+            return f"{float(value):.3f}"
+
+        for column in [
+            "Q05",
+            "Q25",
+            "Median",
+            "Q75",
+            "Q95",
+            "IQR",
+            "Observed WFA",
+        ]:
+            iqr_display[column] = iqr_display.apply(
+                lambda row, current=column: format_distribution_value(
+                    row,
+                    current,
+                ),
+                axis=1,
+            )
+        iqr_display = iqr_display[
+            [
+                "Metric",
+                "Unit",
+                "Q05",
+                "Q25",
+                "Median",
+                "Q75",
+                "Q95",
+                "IQR",
+                "Observed WFA",
+            ]
+        ]
+        chart_html = "".join(
+            (
+                '<figure class="wfa-simulation-chart">'
+                f'<img src="{html.escape(os.path.relpath(path, OUTPUT_DIR))}" '
+                f'alt="{html.escape(dashboard_chart_title(path))}">'
+                "</figure>"
+            )
+            for path in simulation.get("boxplot_files", [])
+        )
+        simulation_html = f"""
+  <h3>WFA Simulation And Position Sizing</h3>
+  <p class="wfa-simulation-note">Risk uses initial-stop R multiples. The optimizer selects the CAR25-maximizing fraction of current equity while limiting the chance of a drawdown below 20% to 5%.</p>
+  <div class="table-scroll">{dataframe_to_html_table(optimization_display)}</div>
+  <h3>Simulation IQR Values</h3>
+  <div class="table-scroll">{dataframe_to_html_table(iqr_display)}</div>
+  <div class="wfa-simulation-chart-grid">{chart_html}</div>
+"""
+    return f"""
+<section class="wfa-validation-panel">
+  {deployment_html}
+  <div class="wfa-verdict-row">
+    <div>
+      <h2>Walk-Forward Pass Gates</h2>
+      <p>Opt-in research checks. Passing improves confidence but does not guarantee live performance.</p>
+    </div>
+    <div class="wfa-verdict {html.escape(validation['verdict'].lower())}">{html.escape(validation['verdict'])}</div>
+  </div>
+  <div class="wfa-gate-grid">{"".join(cards)}</div>
+  {simulation_html}
+  <h3>OOS Segment Detail</h3>
+  <div class="table-scroll">{dataframe_to_html_table(segment_display)}</div>
+</section>
+"""
+
+
+def degradation_status_badge_class(status):
+    normalized = str(status).strip().lower()
+    if normalized == "normal":
+        return "status-healthy"
+    if normalized in {"watch", "informational"}:
+        return "status-watch"
+    if normalized == "critical":
+        return "status-pause"
+    return "status-neutral"
+
+
+def live_degradation_monitor_html(monitor):
+    if monitor is None:
+        return ""
+
+    strategies = monitor.get("strategies", pd.DataFrame())
+    horizons = monitor.get("horizons", pd.DataFrame())
+    bands = monitor.get("metric_bands", pd.DataFrame())
+    if strategies.empty:
+        return """
+<section class="degradation-panel">
+  <h2>Live Degradation Monitor</h2>
+  <div class="empty-state">No immutable WFA baselines were found in the strategy library.</div>
+</section>
+"""
+
+    strategy_sections = []
+    for _, strategy in strategies.iterrows():
+        strategy_name = str(strategy["Strategy_Name"])
+        strategy_horizons = horizons[
+            horizons["Strategy_Name"].astype(str) == strategy_name
+        ]
+        cards = []
+        for _, horizon in strategy_horizons.iterrows():
+            status = str(horizon["Status"])
+            observed_trades = int(horizon["Observed Trades"])
+            expected_trades = (
+                f"{horizon['Expected Trades Q25']:.0f}-"
+                f"{horizon['Expected Trades Q75']:.0f}"
+            )
+            has_performance = observed_trades > 0 and status not in {
+                "Awaiting Live Trades",
+            }
+            total_r = (
+                f"{horizon['Observed Total R']:.2f} R"
+                if has_performance
+                and pd.notna(horizon["Observed Total R"])
+                else "n/a"
+            )
+            drawdown_r = (
+                f"{horizon['Observed Max Drawdown R']:.2f} R"
+                if has_performance
+                and pd.notna(horizon["Observed Max Drawdown R"])
+                else "n/a"
+            )
+            cards.append(f"""
+<article class="degradation-horizon-card">
+  <div class="degradation-card-heading">
+    <strong>{html.escape(str(horizon['Horizon']))}</strong>
+    <span class="status-badge {degradation_status_badge_class(status)}">{html.escape(status)}</span>
+  </div>
+  <dl>
+    <div><dt>Live Trades</dt><dd>{observed_trades} <small>expected IQR {expected_trades}</small></dd></div>
+    <div><dt>Total Return</dt><dd>{total_r} <small>IQR {horizon['Total R Q25']:.2f} to {horizon['Total R Q75']:.2f} R</small></dd></div>
+    <div><dt>Max Drawdown</dt><dd>{drawdown_r} <small>IQR {horizon['Max Drawdown R Q25']:.2f} to {horizon['Max Drawdown R Q75']:.2f} R</small></dd></div>
+  </dl>
+</article>
+""")
+
+        detail_html = ""
+        if not bands.empty:
+            strategy_bands = bands[
+                bands["Strategy_Name"].astype(str) == strategy_name
+            ].copy()
+            display_columns = [
+                "Horizon",
+                "Metric",
+                "Unit",
+                "Q05",
+                "Q25",
+                "Median",
+                "Q75",
+                "Q95",
+                "Observed Live",
+                "Metric Status",
+            ]
+            strategy_bands = strategy_bands[
+                [column for column in display_columns if column in strategy_bands]
+            ]
+            detail_html = f"""
+<details class="degradation-details">
+  <summary>Simulation percentile details</summary>
+  <div class="table-scroll">{dataframe_to_html_table(strategy_bands)}</div>
+</details>
+"""
+
+        overall_status = str(strategy["Status"])
+        strategy_sections.append(f"""
+<div class="degradation-strategy">
+  <div class="degradation-strategy-heading">
+    <div>
+      <h3>{html.escape(strategy_name)}</h3>
+      <p>{int(strategy['Live Trades'])} live trades; WFA reference {html.escape(str(strategy['WFA Start']))} through {html.escape(str(strategy['WFA End']))}. R basis: {html.escape(str(strategy['R Basis']))}.</p>
+    </div>
+    <span class="status-badge {degradation_status_badge_class(overall_status)}">{html.escape(overall_status)}</span>
+  </div>
+  <div class="degradation-horizon-grid">{"".join(cards)}</div>
+  {detail_html}
+</div>
+""")
+
+    return f"""
+<section class="degradation-panel">
+  <div class="degradation-panel-heading">
+    <div>
+      <h2>Live Degradation Monitor</h2>
+      <p>{monitor.get('simulations', 0):,} horizon-matched WFA simulations. Q25 is an early warning; Q05 is an unusually adverse result. Monitoring does not change allocation automatically.</p>
+    </div>
+  </div>
+  {"".join(strategy_sections)}
+</section>
+"""
+
+
 def save_dashboard(
     account_summary,
     benchmark_summary,
@@ -6970,6 +8953,8 @@ def save_dashboard(
     ytd_reports=None,
     realized_trades=None,
     server_enabled=False,
+    wfa_validation=None,
+    live_degradation_monitor=None,
 ):
     primary_chart_files, detail_chart_files = split_dashboard_chart_files(
         chart_files,
@@ -7030,6 +9015,45 @@ def save_dashboard(
     detail_capital_allocation_table = decision_dataframe_to_html_table(
         capital_allocation,
     )
+    capital_allocation_method_note = ""
+    if (
+        capital_allocation is not None
+        and not capital_allocation.empty
+        and "sizing_method" in capital_allocation.columns
+        and (
+            capital_allocation["sizing_method"]
+            == "drawdown_constrained_car25"
+        ).any()
+    ):
+        method_row = capital_allocation.loc[
+            capital_allocation["sizing_method"]
+            == "drawdown_constrained_car25"
+        ].iloc[0]
+        method_simulations = int(
+            parse_number(method_row.get("simulations")) or 0
+        )
+        method_drawdown = parse_number(method_row.get("drawdown_limit"))
+        method_survival = parse_number(
+            method_row.get("pct_above_drawdown_limit")
+        )
+        capital_allocation_method_note = (
+            '<p class="allocation-method-note">Automated strategy size uses '
+            f'{method_simulations:,} block-bootstrap paths to maximize CAR25 '
+            f'while requiring {method_survival:.0%} of paths to remain above '
+            f'a {method_drawdown:.0%} drawdown. Defined-risk spreads use '
+            'estimated maximum loss; uncovered positions use broker margin as '
+            'a sizing proxy.</p>'
+        )
+    wfa_validation_panel = wfa_validation_panel_html(wfa_validation)
+    degradation_panel = live_degradation_monitor_html(
+        live_degradation_monitor
+    )
+    drawdown_overlap_display = drawdown_overlap
+    if "drawdown_overlap_ratio" in drawdown_overlap.columns:
+        drawdown_overlap_display = drawdown_overlap.sort_values(
+            "drawdown_overlap_ratio",
+            ascending=False,
+        )
 
     dashboard = f"""<!doctype html>
 <html lang="en">
@@ -7344,6 +9368,257 @@ def save_dashboard(
     .strategy-trade-empty[hidden] {{
       display: none;
     }}
+    .wfa-validation-panel {{
+      border-top: 5px solid var(--navy);
+    }}
+    .wfa-deployment-heading {{
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      padding-bottom: 13px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 0;
+    }}
+    .wfa-deployment-heading h2 {{
+      margin: 0;
+      font-size: 21px;
+      overflow-wrap: anywhere;
+    }}
+    .wfa-deployment-heading p {{
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .wfa-deployment-strip {{
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 20px;
+    }}
+    .wfa-deployment-strip > div {{
+      min-width: 0;
+      padding: 12px 12px 13px 0;
+    }}
+    .wfa-deployment-strip > div + div {{
+      border-left: 1px solid var(--line);
+      padding-left: 12px;
+    }}
+    .wfa-deployment-strip span {{
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }}
+    .wfa-deployment-strip strong {{
+      display: block;
+      margin-top: 5px;
+      color: var(--ink);
+      font-size: 17px;
+      overflow-wrap: anywhere;
+    }}
+    .wfa-verdict-row {{
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 18px;
+      margin-bottom: 14px;
+    }}
+    .wfa-verdict-row p {{
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .wfa-verdict {{
+      border-left: 5px solid var(--amber);
+      padding: 7px 10px;
+      color: var(--amber);
+      font-size: 18px;
+      font-weight: 850;
+    }}
+    .wfa-verdict.pass {{ border-color: var(--green); color: var(--green); }}
+    .wfa-verdict.fail {{ border-color: var(--red); color: var(--red); }}
+    .wfa-verdict.pilot {{ border-color: var(--amber); color: var(--amber); }}
+    .wfa-gate-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(245px, 1fr));
+      gap: 10px;
+      margin-bottom: 18px;
+    }}
+    .wfa-gate-card {{
+      min-height: 172px;
+      border: 1px solid var(--line);
+      border-left: 5px solid var(--amber);
+      border-radius: 8px;
+      background: #fffaf0;
+      padding: 13px;
+    }}
+    .wfa-gate-card.good {{ border-left-color: var(--green); background: #f0fdf4; }}
+    .wfa-gate-card.bad {{ border-left-color: var(--red); background: #fff1f2; }}
+    .wfa-gate-card.na {{ border-left-color: #64748b; background: #f8fafc; }}
+    .wfa-gate-label {{
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }}
+    .wfa-gate-value {{
+      margin-top: 7px;
+      color: var(--ink);
+      font-size: 20px;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }}
+    .wfa-gate-target {{
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .wfa-gate-description {{
+      margin-top: 8px;
+      color: #475569;
+      font-size: 12px;
+    }}
+    .wfa-validation-panel h3 {{
+      margin: 18px 0 9px;
+      font-size: 14px;
+    }}
+    .wfa-simulation-note {{
+      margin: -3px 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .allocation-method-note {{
+      margin: -5px 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .wfa-simulation-chart-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }}
+    .wfa-simulation-chart {{
+      margin: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 8px;
+    }}
+    .degradation-panel {{
+      border-top: 5px solid var(--teal);
+    }}
+    .degradation-panel-heading h2 {{
+      margin-bottom: 3px;
+    }}
+    .degradation-panel-heading p,
+    .degradation-strategy-heading p {{
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .degradation-strategy {{
+      padding-top: 17px;
+      margin-top: 17px;
+      border-top: 1px solid var(--line);
+    }}
+    .degradation-strategy-heading,
+    .degradation-card-heading {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+    }}
+    .degradation-strategy-heading h3 {{
+      margin: 0 0 4px;
+      font-size: 16px;
+      overflow-wrap: anywhere;
+    }}
+    .degradation-horizon-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }}
+    .degradation-horizon-card {{
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      padding: 12px;
+    }}
+    .degradation-horizon-card dl {{
+      margin: 11px 0 0;
+    }}
+    .degradation-horizon-card dl > div + div {{
+      margin-top: 9px;
+      padding-top: 9px;
+      border-top: 1px solid #e6ebf1;
+    }}
+    .degradation-horizon-card dt {{
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }}
+    .degradation-horizon-card dd {{
+      margin: 3px 0 0;
+      color: var(--ink);
+      font-size: 17px;
+      font-weight: 800;
+    }}
+    .degradation-horizon-card small {{
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 600;
+    }}
+    .degradation-details {{
+      margin-top: 12px;
+    }}
+    .degradation-details > summary {{
+      cursor: pointer;
+      color: var(--teal);
+      font-size: 12px;
+      font-weight: 800;
+    }}
+    .degradation-details .table-scroll {{
+      margin-top: 9px;
+    }}
+    .strategy-trades-details {{
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 10px 28px rgba(16, 32, 51, 0.06);
+      margin-top: 18px;
+    }}
+    .strategy-trades-details > summary {{
+      cursor: pointer;
+      list-style: none;
+      padding: 16px 18px;
+      color: var(--navy);
+      font-size: 17px;
+      font-weight: 800;
+    }}
+    .strategy-trades-details > summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .strategy-trades-details > summary::after {{
+      content: "+";
+      float: right;
+      color: var(--muted);
+    }}
+    .strategy-trades-details[open] > summary::after {{
+      content: "-";
+    }}
+    .strategy-trades-content {{
+      border-top: 1px solid var(--line);
+      padding: 18px;
+    }}
     .supporting-details {{
       background: transparent;
       border: 0;
@@ -7380,6 +9655,12 @@ def save_dashboard(
       .kpi-grid {{
         grid-template-columns: repeat(2, minmax(180px, 1fr));
       }}
+      .wfa-deployment-strip {{
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }}
+      .degradation-horizon-grid {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }}
     }}
     @media (max-width: 720px) {{
       .page-header, main {{
@@ -7387,6 +9668,27 @@ def save_dashboard(
         padding-right: 16px;
       }}
       .kpi-grid {{
+        grid-template-columns: 1fr;
+      }}
+      .wfa-simulation-chart-grid {{
+        grid-template-columns: 1fr;
+      }}
+      .wfa-deployment-heading {{
+        display: block;
+      }}
+      .wfa-deployment-heading .status-badge {{
+        margin-top: 10px;
+      }}
+      .wfa-deployment-strip {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }}
+      .degradation-strategy-heading {{
+        display: block;
+      }}
+      .degradation-strategy-heading .status-badge {{
+        margin-top: 9px;
+      }}
+      .degradation-horizon-grid {{
         grid-template-columns: 1fr;
       }}
     }}
@@ -7398,6 +9700,7 @@ def save_dashboard(
     <p>Compact account reconciliation, strategy performance, allocation, and correlation risk.</p>
   </header>
   <main>
+  {wfa_validation_panel}
   <div class="top-grid">
     <section>
       <h2>Account Summary</h2>
@@ -7411,12 +9714,13 @@ def save_dashboard(
     </section>
     <section>
       <h2>Capital Allocation</h2>
+      {capital_allocation_method_note}
       <div class="table-scroll">
         {capital_allocation_table}
       </div>
     </section>
-    {strategy_trade_browser}
   </div>
+  {degradation_panel}
   {chart_tags}
   <details class="supporting-details">
     <summary>Supporting Details</summary>
@@ -7456,11 +9760,12 @@ def save_dashboard(
       </section>
       <section>
         <h2>Drawdown Overlap</h2>
-        <div class="table-scroll">{dataframe_to_html_table(drawdown_overlap.sort_values("drawdown_overlap_ratio", ascending=False), max_rows=40, highlight_correlation=True, correlation_columns_only=True)}</div>
+        <div class="table-scroll">{dataframe_to_html_table(drawdown_overlap_display, max_rows=40, highlight_correlation=True, correlation_columns_only=True)}</div>
       </section>
       {detail_chart_tags}
     </div>
   </details>
+  {strategy_trade_browser}
   </main>
   {strategy_trade_browser_script()}
 </body>
@@ -7665,6 +9970,27 @@ def parse_args():
         help="Do not open the dashboard in a browser after the script completes.",
     )
     parser.add_argument(
+        "--strategy-library-dir",
+        help=(
+            "Optional persistent directory for per-strategy trades, equity "
+            "curves, daily PNL, and cross-run correlation files."
+        ),
+    )
+    parser.add_argument(
+        "--live-degradation-monitor",
+        action="store_true",
+        help=(
+            "Display horizon-matched WFA degradation benchmarks when "
+            "analyzing live account history."
+        ),
+    )
+    parser.add_argument(
+        "--live-monitor-simulations",
+        type=int,
+        default=DEFAULT_LIVE_MONITOR_SIMULATIONS,
+        help="Bootstrap paths per live degradation horizon. Default: 5000.",
+    )
+    parser.add_argument(
         "--serve-dashboard",
         action="store_true",
         help="Serve the dashboard locally so strategy-name edits can be saved.",
@@ -7780,6 +10106,134 @@ def parse_args():
         default=42,
         help="Random seed for risk-per-trade bootstrap sampling.",
     )
+    parser.add_argument(
+        "--risk-bootstrap-block-length",
+        type=float,
+        default=DEFAULT_WFA_BLOCK_LENGTH,
+        help=(
+            "Average consecutive-trade block length used by live strategy "
+            "position-sizing simulations. Default: 3."
+        ),
+    )
+    parser.add_argument(
+        "--risk-cagr-objective-quantile",
+        type=float,
+        default=DEFAULT_WFA_CAGR_QUANTILE,
+        help=(
+            "CAGR percentile maximized by live strategy sizing. "
+            "Default: 0.25 (CAR25)."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-validation",
+        action="store_true",
+        help=(
+            "Normalize and convert a raw AmiBroker WFA export when needed, then "
+            "calculate and display the opt-in Walk-Forward Pass Gates panel."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-simulations",
+        type=int,
+        default=DEFAULT_WFA_SIMULATIONS,
+        help="Stationary bootstrap paths for WFA benchmarking. Default: 5000.",
+    )
+    parser.add_argument(
+        "--wfa-bootstrap-block-length",
+        type=float,
+        default=DEFAULT_WFA_BLOCK_LENGTH,
+        help="Average consecutive-trade block length for WFA resampling.",
+    )
+    parser.add_argument(
+        "--wfa-drawdown-limit",
+        type=float,
+        default=DEFAULT_WFA_DRAWDOWN_LIMIT,
+        help="Maximum tolerable account drawdown for WFA Safe-F sizing.",
+    )
+    parser.add_argument(
+        "--wfa-max-drawdown-breach-probability",
+        type=float,
+        default=DEFAULT_WFA_MAX_DRAWDOWN_BREACH_PROBABILITY,
+        help="Maximum simulated probability of breaching the WFA drawdown limit.",
+    )
+    parser.add_argument(
+        "--wfa-max-risk-pct",
+        type=float,
+        default=DEFAULT_WFA_MAX_RISK_FRACTION * 100,
+        help="Upper search bound for WFA initial-stop risk as percent of equity.",
+    )
+    parser.add_argument(
+        "--wfa-cagr-objective-quantile",
+        type=float,
+        default=DEFAULT_WFA_CAGR_QUANTILE,
+        help="CAGR percentile maximized by WFA sizing. Default: 0.25 (CAR25).",
+    )
+    parser.add_argument(
+        "--wfa-round-trip-cost",
+        type=float,
+        default=0.0,
+        help=(
+            "Additional expected commission plus slippage dollars per completed "
+            "WFA trade. Used only with --wfa-validation."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-cost-stress-multiple",
+        type=float,
+        default=2.0,
+        help=(
+            "Multiplier applied to --wfa-round-trip-cost for WFA pass gates. "
+            "Default: 2.0."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-starting-equity",
+        type=float,
+        help=(
+            "Starting equity for a raw AmiBroker WFA trade export. If omitted, "
+            "the analyzer attempts to infer it from a companion WFA summary CSV."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-strategy-name",
+        help=(
+            "Strategy name assigned when converting a raw WFA trade export. "
+            "Defaults to a name derived from the report directory."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-min-total-trades",
+        type=int,
+        default=50,
+        help="Minimum total OOS trades for WFA sample coverage. Default: 50.",
+    )
+    parser.add_argument(
+        "--wfa-min-segments",
+        type=int,
+        default=5,
+        help="Minimum completed OOS segments for WFA sample coverage. Default: 5.",
+    )
+    parser.add_argument(
+        "--wfa-min-trades-per-segment",
+        type=int,
+        default=5,
+        help="Minimum trades in every completed OOS segment. Default: 5.",
+    )
+    parser.add_argument(
+        "--wfa-min-latest-segment-trades",
+        type=int,
+        default=5,
+        help="Minimum trades in the latest complete OOS segment. Default: 5.",
+    )
+    parser.add_argument(
+        "--wfa-pilot-risk-pct",
+        type=float,
+        default=None,
+        help=(
+            "Optional manual cap on optimized WFA initial-stop risk. By default "
+            "the drawdown-constrained optimizer determines the risk."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -7787,6 +10241,14 @@ def parse_args():
 def main():
     run_started_at = time.monotonic()
     args = parse_args()
+    if args.live_degradation_monitor and args.wfa_validation:
+        raise ValueError(
+            "--live-degradation-monitor is only available for live account "
+            "history; do not combine it with --wfa-validation."
+        )
+    strategy_library_dir = args.strategy_library_dir
+    if args.live_degradation_monitor and not strategy_library_dir:
+        strategy_library_dir = DEFAULT_STRATEGY_LIBRARY_DIR
 
     progress("Starting strategy performance analysis...")
     os.makedirs(
@@ -7807,12 +10269,60 @@ def main():
     )
 
     stage_started_at = time.monotonic()
-    progress(f"Loading cleaned trades from {args.input}...")
-    cleaned_trades = load_cleaned_trades(args.input)
+    analysis_input = args.input
+    progress(f"Loading cleaned trades from {analysis_input}...")
+    try:
+        cleaned_trades = load_cleaned_trades(analysis_input)
+    except ValueError:
+        if not args.wfa_validation:
+            raise
+
+        progress("Normalizing raw AmiBroker WFA trade export...")
+        prepared_path, inferred_equity, inferred_strategy = (
+            prepare_wfa_analysis_input(
+                analysis_input,
+                WFA_PREPARED_INPUT_FILE,
+                starting_equity=args.wfa_starting_equity,
+                strategy_name=args.wfa_strategy_name,
+                normalized_output_path=WFA_NORMALIZED_INPUT_FILE,
+            )
+        )
+        analysis_input = str(prepared_path)
+        progress(
+            "Normalized and prepared raw AmiBroker WFA trades automatically: "
+            f"strategy={inferred_strategy}, "
+            f"starting_equity=${inferred_equity:,.2f}"
+        )
+        cleaned_trades = load_cleaned_trades(analysis_input)
     cleaned_trades = filter_strategies(
         cleaned_trades,
         args.strategy,
     )
+    wfa_validation = None
+    if args.wfa_validation:
+        progress("Calculating opt-in walk-forward validation gates...")
+        wfa_validation = build_wfa_validation(
+            cleaned_trades,
+            simulations=args.wfa_simulations,
+            round_trip_cost=args.wfa_round_trip_cost,
+            cost_stress_multiple=args.wfa_cost_stress_multiple,
+            random_seed=args.risk_random_seed,
+            minimum_total_trades=args.wfa_min_total_trades,
+            minimum_segment_count=args.wfa_min_segments,
+            minimum_trades_per_segment=args.wfa_min_trades_per_segment,
+            minimum_latest_segment_trades=args.wfa_min_latest_segment_trades,
+            mean_block_length=args.wfa_bootstrap_block_length,
+            drawdown_limit=args.wfa_drawdown_limit,
+            max_drawdown_breach_probability=(
+                args.wfa_max_drawdown_breach_probability
+            ),
+            max_risk_fraction=max(args.wfa_max_risk_pct, 0.0) / 100.0,
+            cagr_objective_quantile=args.wfa_cagr_objective_quantile,
+        )
+        progress(
+            "Walk-forward validation verdict: "
+            f"{wfa_validation['verdict']}"
+        )
     original_execution_count = len(cleaned_trades)
     finish_progress(
         f"Loaded {original_execution_count} execution rows",
@@ -7823,6 +10333,7 @@ def main():
     if (
         futures_statement_file is None
         and not args.no_auto_futures_settlement
+        and not args.wfa_validation
     ):
         futures_statement_file = find_latest_account_statement(
             data_dir=None,
@@ -8069,7 +10580,7 @@ def main():
         cleaned_trades,
         trades,
         open_positions,
-        args.input,
+        analysis_input,
     )
     statement_cash_reconciliation = cash_ledger_daily_reconciliation(
         cleaned_trades,
@@ -8200,40 +10711,132 @@ def main():
         f"Saved {len(strategy_trade_files)} strategy trade files",
         stage_started_at,
     )
+    strategy_library = None
 
     stage_started_at = time.monotonic()
     progress(
         "Running risk-per-trade simulations "
         f"({args.risk_simulations} simulations per strategy)..."
     )
-    (
-        risk_summary,
-        risk_report_files,
-        risk_simulations,
-    ) = calculate_risk_per_trade_by_strategy(
-        trades,
-        output_dir=RISK_PER_TRADE_DIR,
-        simulations=args.risk_simulations,
-        safe_f_increment=args.risk_safe_f_increment,
-        safe_f_start=args.risk_safe_f_start,
-        bankroll=args.risk_bankroll,
-        drawdown_limit=args.risk_drawdown_limit,
-        pct_above_dd_limit=args.risk_pct_above_dd_limit,
-        last_n_trades=args.risk_last_n_trades,
-        random_seed=args.risk_random_seed,
-    )
+    if args.wfa_validation:
+        (
+            risk_summary,
+            risk_report_files,
+            risk_simulations,
+        ) = calculate_risk_per_trade_by_strategy(
+            trades,
+            output_dir=RISK_PER_TRADE_DIR,
+            simulations=args.risk_simulations,
+            safe_f_increment=args.risk_safe_f_increment,
+            safe_f_start=args.risk_safe_f_start,
+            bankroll=args.risk_bankroll,
+            drawdown_limit=args.risk_drawdown_limit,
+            pct_above_dd_limit=args.risk_pct_above_dd_limit,
+            last_n_trades=args.risk_last_n_trades,
+            random_seed=args.risk_random_seed,
+        )
+    else:
+        (
+            risk_summary,
+            risk_report_files,
+            risk_simulations,
+            _,
+            _,
+        ) = calculate_growth_optimal_risk_by_strategy(
+            trades,
+            output_dir=RISK_PER_TRADE_DIR,
+            simulations=args.risk_simulations,
+            safe_f_start=args.risk_safe_f_start,
+            bankroll=args.risk_bankroll,
+            drawdown_limit=args.risk_drawdown_limit,
+            pct_above_dd_limit=args.risk_pct_above_dd_limit,
+            last_n_trades=args.risk_last_n_trades,
+            random_seed=args.risk_random_seed,
+            mean_block_length=args.risk_bootstrap_block_length,
+            cagr_objective_quantile=args.risk_cagr_objective_quantile,
+        )
     risk_summary = calculate_strategy_position_sizing(
         risk_summary,
         trades,
+        wfa_pilot_risk_pct=(
+            args.wfa_pilot_risk_pct
+            if args.wfa_validation
+            else None
+        ),
+        wfa_risk_optimization=(
+            wfa_validation["simulation"]["optimization"]
+            if wfa_validation is not None
+            and wfa_validation.get("simulation") is not None
+            else None
+        ),
     )
     strategy_decision = build_strategy_decision_board(
         summary,
         risk_summary,
         pnl_correlation,
     )
+    strategy_decision = apply_wfa_validation_decision(
+        strategy_decision,
+        trades,
+        wfa_validation,
+    )
     capital_allocation = build_capital_allocation_table(
         strategy_decision,
     )
+    if wfa_validation is not None:
+        wfa_validation = attach_wfa_deployment_recommendation(
+            wfa_validation,
+            capital_allocation,
+        )
+    if strategy_library_dir:
+        library_started_at = time.monotonic()
+        progress("Updating persistent strategy correlation library...")
+        strategy_library = export_strategy_library(
+            strategy_trade_ledgers,
+            equity_curves,
+            strategy_library_dir,
+            source_input=args.input,
+            analysis_mode=("wfa" if args.wfa_validation else "live_account"),
+            capital_allocation=capital_allocation,
+        )
+        finish_progress(
+            (
+                "Updated strategy correlation library "
+                f"({strategy_library['strategy_count']} strategies)"
+            ),
+            library_started_at,
+        )
+    live_degradation = None
+    if args.live_degradation_monitor:
+        monitor_started_at = time.monotonic()
+        progress(
+            "Running live degradation monitor "
+            f"({args.live_monitor_simulations} simulations per horizon)..."
+        )
+        live_degradation = build_live_degradation_monitor(
+            trades,
+            strategy_library_dir,
+            capital_allocation=capital_allocation,
+            simulations=args.live_monitor_simulations,
+            mean_block_length=args.risk_bootstrap_block_length,
+            random_seed=args.risk_random_seed,
+            as_of_date=as_of_date,
+        )
+        live_degradation["horizons"].to_csv(
+            LIVE_DEGRADATION_SUMMARY_FILE,
+            index=False,
+        )
+        live_degradation["metric_bands"].to_csv(
+            LIVE_DEGRADATION_BANDS_FILE,
+            index=False,
+        )
+        finish_progress(
+            (
+                "Finished live degradation monitor "
+                f"({len(live_degradation['strategies'])} WFA baselines)"
+            ),
+            monitor_started_at,
+        )
     risk_summary.to_csv(
         f"{RISK_PER_TRADE_DIR}/risk_per_trade_summary.csv",
         index=False,
@@ -8246,6 +10849,28 @@ def main():
         CAPITAL_ALLOCATION_FILE,
         index=False,
     )
+    if wfa_validation is not None:
+        pd.DataFrame(wfa_validation["gates"]).to_csv(
+            WFA_VALIDATION_GATES_FILE,
+            index=False,
+        )
+        wfa_validation["segments"].to_csv(
+            WFA_SEGMENT_SUMMARY_FILE,
+            index=False,
+        )
+        if wfa_validation.get("simulation") is not None:
+            wfa_validation["simulation"]["results"].to_csv(
+                WFA_SIMULATION_RESULTS_FILE,
+                index=False,
+            )
+            wfa_validation["simulation"]["summary"].to_csv(
+                WFA_SIMULATION_IQR_FILE,
+                index=False,
+            )
+            wfa_validation["simulation"]["risk_search"].to_csv(
+                WFA_RISK_SEARCH_FILE,
+                index=False,
+            )
     finish_progress(
         (
             "Finished risk-per-trade simulations "
@@ -8261,6 +10886,7 @@ def main():
         risk_summary,
     )
     risk_boxplot_files = save_risk_simulation_boxplots(risk_simulations)
+    wfa_boxplot_files = save_wfa_simulation_boxplots(wfa_validation)
 
     chart_files = [
         save_account_equity_chart(account_curve),
@@ -8286,7 +10912,8 @@ def main():
     finish_progress(
         (
             f"Built {len(chart_files)} dashboard charts and "
-            f"{len(risk_boxplot_files)} risk charts"
+            f"{len(risk_boxplot_files)} risk charts and "
+            f"{len(wfa_boxplot_files)} WFA charts"
         ),
         stage_started_at,
     )
@@ -8311,6 +10938,8 @@ def main():
         ytd_reports,
         realized_trades=trades,
         server_enabled=args.serve_dashboard,
+        wfa_validation=wfa_validation,
+        live_degradation_monitor=live_degradation,
     )
     finish_progress("Wrote strategy dashboard HTML", stage_started_at)
 
@@ -8335,10 +10964,35 @@ def main():
     print(f"Saved strategy decision board to {STRATEGY_DECISION_FILE}")
     print(f"Saved capital allocation table to {CAPITAL_ALLOCATION_FILE}")
     print(f"Saved strategy trade files to {STRATEGY_TRADES_DIR}")
+    if strategy_library is not None:
+        print(
+            "Saved persistent strategy library to "
+            f"{strategy_library['library_dir']}"
+        )
+        print(
+            "Saved library PNL correlations to "
+            f"{strategy_library['pnl_correlation']}"
+        )
+    if live_degradation is not None:
+        print(
+            "Saved live degradation summary to "
+            f"{LIVE_DEGRADATION_SUMMARY_FILE}"
+        )
+        print(
+            "Saved live degradation metric bands to "
+            f"{LIVE_DEGRADATION_BANDS_FILE}"
+        )
     print(f"Saved risk-per-trade files to {RISK_PER_TRADE_DIR}")
     print(f"Saved strategy equity curves to {EQUITY_CURVES_FILE}")
     print(f"Saved strategy summary statistics to {SUMMARY_STATS_FILE}")
     print(f"Saved strategy dashboard to {DASHBOARD_FILE}")
+    if wfa_validation is not None:
+        print(f"Saved WFA validation gates to {WFA_VALIDATION_GATES_FILE}")
+        print(f"Saved WFA segment summary to {WFA_SEGMENT_SUMMARY_FILE}")
+        if wfa_validation.get("simulation") is not None:
+            print(f"Saved WFA simulations to {WFA_SIMULATION_RESULTS_FILE}")
+            print(f"Saved WFA IQR values to {WFA_SIMULATION_IQR_FILE}")
+            print(f"Saved WFA risk search to {WFA_RISK_SEARCH_FILE}")
     print(
         "Aggregated "
         f"{original_execution_count} execution rows into "
@@ -8361,7 +11015,7 @@ def main():
     if args.serve_dashboard:
         serve_strategy_dashboard(
             DASHBOARD_FILE,
-            args.input,
+            analysis_input,
             host=args.dashboard_host,
             port=args.dashboard_port,
             open_browser=not args.no_open_dashboard,

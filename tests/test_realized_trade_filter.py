@@ -7,6 +7,7 @@ from analyze_strategy_performance import (
     apply_expired_option_settlement_checks,
     build_cash_balance_curve,
     build_account_kpi_cards,
+    build_compact_capital_allocation_table,
     build_data_quality_warnings,
     build_futures_statement_settlements,
     build_open_position_audit,
@@ -14,6 +15,10 @@ from analyze_strategy_performance import (
     build_strategy_decision_board,
     build_strategy_top_summary,
     cash_balance_start_timestamp,
+    build_ytd_statement_reports,
+    build_trade_history_validation_summary,
+    build_trade_history_validation_issues,
+    cash_ledger_daily_reconciliation,
     calculate_strategy_position_sizing,
     calculate_buy_hold_benchmark_summary,
     calculate_cash_balance_summary,
@@ -24,6 +29,7 @@ from analyze_strategy_performance import (
     filter_realized_trades,
     benchmark_file_for_symbol,
     find_latest_account_statement,
+    save_recent_trade_pnl_chart,
     statement_file_names_from_trades,
     get_open_positions,
     parse_statement_position_summary,
@@ -89,6 +95,37 @@ def make_future_trade(
         "net_pnl": net_pnl,
         "margin_requirement": 100,
         "return_on_margin": net_pnl / 100,
+        "starting_equity": 1000,
+        "log_return_on_margin": 0.0,
+    }
+
+
+def make_stock_trade(
+    exec_time,
+    side,
+    pos_effect,
+    symbol,
+    qty,
+    net_pnl,
+    strategy_name="Discretionary",
+):
+    return {
+        "Strategy_Name": strategy_name,
+        "Exec Time": exec_time,
+        "timestamp": pd.to_datetime(exec_time, format="%m/%d/%y %H:%M:%S"),
+        "Spread": "STOCK",
+        "Side": side,
+        "Qty": -qty if side == "SELL" else qty,
+        "Pos Effect": pos_effect,
+        "Symbol": symbol,
+        "Exp": None,
+        "Strike": None,
+        "Type": "STOCK",
+        "trade_pnl": net_pnl,
+        "fees": 0,
+        "net_pnl": net_pnl,
+        "margin_requirement": abs(net_pnl),
+        "return_on_margin": 1.0 if net_pnl > 0 else -1.0,
         "starting_equity": 1000,
         "log_return_on_margin": 0.0,
     }
@@ -310,6 +347,186 @@ def test_strategy_top_summary_orders_strategies_alphabetically():
     )
 
     assert rendered.index("Alpha") < rendered.index("Zulu")
+
+
+def test_save_recent_trade_pnl_chart_plots_last_two_weeks(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "analyze_strategy_performance.CHART_DIR",
+        str(tmp_path),
+    )
+    realized_trades = pd.DataFrame([
+        {
+            "Strategy_Name": "Alpha",
+            "timestamp": pd.Timestamp("2026-06-01 10:00:00"),
+            "net_pnl": 100,
+        },
+        {
+            "Strategy_Name": "Alpha",
+            "timestamp": pd.Timestamp("2026-06-12 10:00:00"),
+            "net_pnl": -50,
+        },
+        {
+            "Strategy_Name": "Beta",
+            "timestamp": pd.Timestamp("2026-06-13 10:00:00"),
+            "net_pnl": 25,
+        },
+    ])
+
+    chart_file = save_recent_trade_pnl_chart(realized_trades)
+
+    assert chart_file == str(tmp_path / "recent_trade_pnl_by_strategy.png")
+    assert (tmp_path / "recent_trade_pnl_by_strategy.png").exists()
+
+
+def test_build_ytd_statement_reports_checks_statement_closed_net_formula(tmp_path):
+    statement_summary = {
+        "statement_file": "2026-06-13-AccountStatement.csv",
+        "statement_year": 2026,
+        "statement_gross_ytd_pnl": 23334.89,
+        "statement_open_position_pnl": 1868.54,
+        "statement_closed_gross_ytd_pnl": 21466.35,
+        "equity_commissions_fees_ytd": 1343.26,
+        "futures_commissions_fees_ytd": 3368.13,
+        "forex_commissions_ytd": 0.0,
+        "crypto_trading_fees_ytd": 13.63,
+        "total_commissions_fees_ytd": 4711.39,
+        "statement_total_ytd_commissions_and_fees": 4725.02,
+        "statement_closed_net_ytd_pnl": 16741.33,
+    }
+    statement_positions = pd.DataFrame([
+        {
+            "Symbol": "SPCX",
+            "statement_open_pnl": -356.48,
+            "statement_ytd_pnl": 497.01,
+            "statement_closed_gross_pnl": 853.49,
+        },
+        {
+            "Symbol": "XSP",
+            "statement_open_pnl": 344.50,
+            "statement_ytd_pnl": 574.50,
+            "statement_closed_gross_pnl": 230.00,
+        },
+    ])
+    cleaned_trades = pd.DataFrame([
+        {
+            "timestamp": pd.Timestamp("2026-06-12"),
+            "Symbol": "SPX",
+            "Spread": "SINGLE",
+            "Type": "CALL",
+            "Qty": 1,
+            "fees": 100.0,
+        },
+        {
+            "timestamp": pd.Timestamp("2026-06-12"),
+            "Symbol": "BTC/USD",
+            "Spread": "CRYPTO",
+            "Type": "CRYPTO",
+            "Qty": 0.1,
+            "fees": 0.0,
+        },
+    ])
+    realized_trades = pd.DataFrame([
+        {
+            "timestamp": pd.Timestamp("2026-06-12"),
+            "Strategy_Name": "Discretionary",
+            "Symbol": "SPCX",
+            "trade_pnl": 853.49,
+            "fees": 5.47,
+            "net_pnl": 848.02,
+        },
+        {
+            "timestamp": pd.Timestamp("2026-06-12"),
+            "Strategy_Name": "Options",
+            "Symbol": "XSP",
+            "trade_pnl": -1066.0,
+            "fees": 92.83,
+            "net_pnl": -1158.83,
+        },
+    ])
+    open_positions = pd.DataFrame([
+        {
+            "Symbol": "SPCX",
+            "margin_requirement": 66684.0,
+            "return_on_margin": -1.0,
+            "remaining_qty": 400,
+        },
+    ])
+
+    reports = build_ytd_statement_reports(
+        statement_summary,
+        statement_positions,
+        cleaned_trades,
+        realized_trades,
+        open_positions,
+        str(tmp_path / "master.csv"),
+        corrections_file=str(tmp_path / "missing_corrections.csv"),
+    )
+
+    summary = reports["summary"].iloc[0]
+    assert round(summary["script_realized_closed_fees"], 2) == 100.0
+    assert round(summary["script_realized_closed_net_pnl"], 2) == -312.51
+    assert round(summary["closed_net_delta_statement_minus_script"], 2) == (
+        round(16741.33 - ((853.49 - 1066.0) - 100.0), 2)
+    )
+    spcx_open = reports["open_pnl"][
+        reports["open_pnl"]["Symbol"] == "SPCX"
+    ].iloc[0]
+    assert spcx_open["likely_cause"].startswith(
+        "script_open_pnl_uses_opening_cash_flow"
+    )
+    crypto_fee = reports["fees"][
+        reports["fees"]["fee_bucket"] == "crypto"
+    ].iloc[0]
+    assert crypto_fee["fee_delta_statement_minus_script"] == 13.63
+    xsp_closed = reports["closed_pnl"][
+        reports["closed_pnl"]["statement_root_symbol"] == "XSP"
+    ].iloc[0]
+    assert xsp_closed["closed_gross_delta_statement_minus_script"] == 1296.0
+
+    cash_checked_trades = pd.DataFrame([
+        {
+            "Exec Time": "6/12/26 12:00:00",
+            "Symbol": "SPCX",
+            "Spread": "STOCK",
+            "Type": "STOCK",
+            "net_pnl": 848.02,
+        },
+    ])
+    cash_ledger = pd.DataFrame([
+        {
+            "date": "2026-06-12",
+            "timestamp": pd.Timestamp("2026-06-12 12:00:00"),
+            "account_bucket": "cash",
+            "type": "TRD",
+            "cash_flow": 848.02,
+            "amount": 848.02,
+            "misc_fees": 0.0,
+            "commissions_fees": 0.0,
+            "balance": 1000.0,
+        },
+    ])
+    cash_reconciliation = cash_ledger_daily_reconciliation(
+        cash_checked_trades,
+        cash_ledger,
+    )
+    validation_summary = build_trade_history_validation_summary(
+        reports,
+        cash_reconciliation,
+    )
+    validation_issues = build_trade_history_validation_issues(
+        reports,
+        cash_reconciliation,
+    )
+
+    cash_validation = validation_summary[
+        validation_summary["metric"] == "cash_ledger_daily_trade_cash_flow"
+    ].iloc[0]
+    assert cash_validation["validation_status"] == "PASS"
+    closed_validation = validation_summary[
+        validation_summary["metric"] == "closed_net_pnl"
+    ].iloc[0]
+    assert closed_validation["validation_status"] == "REVIEW"
+    assert "closed_gross_pnl" in validation_issues["issue_type"].tolist()
 
 
 def test_cash_balance_curve_resets_sweep_adjustment_at_start_timestamp():
@@ -555,6 +772,100 @@ def test_strategy_quality_and_decision_board_use_data_confidence():
 
     assert action_by_strategy["Needs Data Strategy"] == "Needs Data"
     assert action_by_strategy["Allocate Strategy"] == "Allocate"
+
+
+def test_growth_sizing_actions_explain_zero_size_and_ignore_advisory_settlement_gaps():
+    summary = pd.DataFrame([
+        {
+            "Strategy_Name": "Zulu Ready",
+            "strategy_status": "Healthy",
+            "data_confidence": "Low",
+            "data_confidence_reason": "4 missing settlement checks",
+            "total_pnl": 1000,
+            "total_return": 0.10,
+            "cagr": 0.20,
+            "max_drawdown": -0.08,
+            "profit_factor": 1.30,
+        },
+        {
+            "Strategy_Name": "Alpha Zero Edge",
+            "strategy_status": "Healthy",
+            "data_confidence": "Low",
+            "data_confidence_reason": "8 missing settlement checks",
+            "total_pnl": 500,
+            "total_return": 0.05,
+            "cagr": 0.10,
+            "max_drawdown": -0.05,
+            "profit_factor": 1.20,
+        },
+        {
+            "Strategy_Name": "Middle Too Large",
+            "strategy_status": "Healthy",
+            "data_confidence": "Medium",
+            "data_confidence_reason": "",
+            "total_pnl": 750,
+            "total_return": 0.07,
+            "cagr": 0.12,
+            "max_drawdown": -0.06,
+            "profit_factor": 1.25,
+        },
+    ])
+    risk = pd.DataFrame([
+        {
+            "Strategy_Name": "Zulu Ready",
+            "trade_count": 40,
+            "safe_f": 0.02,
+            "risk_per_trade_dollars": 2000,
+            "CAR25": 0.04,
+            "sizing_method": "drawdown_constrained_car25",
+            "drawdown_breach_probability": 0.04,
+            "sizing_basis": "margin_requirement",
+            "estimated_max_risk_per_contract_or_share": 500,
+            "contracts_or_shares_to_trade": 4,
+        },
+        {
+            "Strategy_Name": "Alpha Zero Edge",
+            "trade_count": 35,
+            "safe_f": 0.0,
+            "risk_per_trade_dollars": 0,
+            "CAR25": 0.0,
+            "sizing_method": "drawdown_constrained_car25",
+            "drawdown_breach_probability": 0.0,
+            "sizing_basis": "defined_max_loss",
+            "estimated_max_risk_per_contract_or_share": 1000,
+            "contracts_or_shares_to_trade": 0,
+        },
+        {
+            "Strategy_Name": "Middle Too Large",
+            "trade_count": 30,
+            "safe_f": 0.005,
+            "risk_per_trade_dollars": 500,
+            "CAR25": 0.01,
+            "sizing_method": "drawdown_constrained_car25",
+            "drawdown_breach_probability": 0.03,
+            "sizing_basis": "defined_max_loss",
+            "estimated_max_risk_per_contract_or_share": 1200,
+            "contracts_or_shares_to_trade": 0,
+        },
+    ])
+
+    decision = build_strategy_decision_board(
+        summary,
+        risk,
+        pd.DataFrame(),
+    )
+    actions = decision.set_index("Strategy_Name")["suggested_action"]
+    readiness = decision.set_index("Strategy_Name")["allocation_readiness"]
+
+    assert decision["Strategy_Name"].tolist() == [
+        "Alpha Zero Edge",
+        "Middle Too Large",
+        "Zulu Ready",
+    ]
+    assert actions["Alpha Zero Edge"] == "No Allocation"
+    assert actions["Middle Too Large"] == "Below Minimum Size"
+    assert actions["Zulu Ready"] == "Allocate"
+    assert readiness["Zulu Ready"] == "Ready With Warnings"
 
 
 def test_build_settlement_coverage_counts_missing_and_checked_rows():
@@ -955,6 +1266,21 @@ def test_calculate_strategy_position_sizing_uses_risk_and_unit_margin():
     assert test_strategy["estimated_margin_per_contract_or_share"] == 2750
     assert test_strategy["contracts_or_shares_to_trade"] == 3
     assert discretionary["contracts_or_shares_to_trade"] == "N/A"
+    assert sized.columns.tolist() == [
+        "Strategy_Name",
+        "risk_per_trade_dollars",
+        "sizing_basis",
+        "estimated_max_risk_per_contract_or_share",
+        "estimated_margin_per_contract_or_share",
+        "contracts_or_shares_to_trade",
+    ]
+
+    compact = build_compact_capital_allocation_table(sized)
+    assert compact.columns.tolist() == [
+        "Strategy_Name",
+        "contracts_or_shares_to_trade",
+        "risk_per_trade_dollars",
+    ]
 
 
 def test_filter_realized_trades_keeps_expired_long_options():
@@ -1013,6 +1339,52 @@ def test_get_open_positions_drops_expired_long_options():
     assert open_positions["Exp"].tolist() == [
         "23 JAN 26",
     ]
+
+
+def test_stock_closes_match_blank_strategy_open_lots():
+    df = pd.DataFrame([
+        make_stock_trade(
+            "6/4/26 10:17:04",
+            "SELL",
+            "TO OPEN",
+            "SPCE",
+            103,
+            513.335,
+            strategy_name="",
+        ),
+        make_stock_trade(
+            "6/4/26 10:17:05",
+            "SELL",
+            "TO OPEN",
+            "SPCE",
+            300,
+            1495.375,
+            strategy_name="",
+        ),
+        make_stock_trade(
+            "6/4/26 13:23:38",
+            "BUY",
+            "TO CLOSE",
+            "SPCE",
+            403,
+            -1961.455,
+            strategy_name="Discretionary",
+        ),
+    ])
+
+    realized = aggregate_realized_trades(
+        df,
+        as_of_date="2026-06-13",
+    )
+    open_positions = get_open_positions(
+        df,
+        as_of_date="2026-06-13",
+    )
+
+    assert len(realized) == 1
+    assert realized.loc[0, "Symbol"] == "SPCE"
+    assert realized.loc[0, "realized_status"] == "CLOSED"
+    assert open_positions.empty
 
 
 def test_filter_realized_trades_keeps_expired_short_options():

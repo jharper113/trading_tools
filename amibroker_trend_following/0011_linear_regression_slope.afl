@@ -1,0 +1,33 @@
+// Linear Regression Slope Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 10, 1, 100, 1), spsPercentOfEquity);
+
+slopeLen = Param("Slope Length", 100, 20, 300, 10);
+smoothLen = Param("Slope Smooth", 10, 1, 50, 1);
+priceLen = Param("Price EMA", 50, 10, 200, 5);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+atrStop = Param("ATR Stop", 4, 1, 10, 0.25);
+
+slope = LinRegSlope(Close, slopeLen);
+smoothSlope = EMA(slope, smoothLen);
+priceEMA = EMA(Close, priceLen);
+
+Buy = Cross(smoothSlope, 0) AND Close > priceEMA;
+Sell = Cross(0, smoothSlope) OR Close < priceEMA;
+Short = Cross(0, smoothSlope) AND Close < priceEMA;
+Cover = Cross(smoothSlope, 0) OR Close > priceEMA;
+
+ApplyStop(stopTypeTrailing, stopModePoint, atrStop * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(priceEMA, "Price EMA", colorBlue, styleLine);
+Plot(smoothSlope, "Smoothed Slope", colorGreen, styleOwnScale);

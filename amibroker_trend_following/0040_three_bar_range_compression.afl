@@ -1,0 +1,32 @@
+// Three-Bar Range Compression Breakout
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+compressBars = Param("Compression Bars", 3, 2, 5, 1);
+trendLen = Param("Trend EMA", 30, 10, 120, 5);
+maxHold = Param("Max Hold Bars", 3, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+barRange = High - Low;
+compressed = Sum(barRange < Ref(barRange, -1), compressBars) == compressBars;
+trendEMA = EMA(Close, trendLen);
+
+Buy = Ref(compressed, -1) AND Close > Ref(HHV(High, compressBars), -1) AND Close > trendEMA;
+Sell = Close < Ref(LLV(Low, 2), -1);
+Short = Ref(compressed, -1) AND Close < Ref(LLV(Low, compressBars), -1) AND Close < trendEMA;
+Cover = Close > Ref(HHV(High, 2), -1);
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.3 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

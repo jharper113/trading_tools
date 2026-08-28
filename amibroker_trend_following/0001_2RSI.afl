@@ -1,0 +1,38 @@
+// 2-Period RSI Mean Reversion
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 10, 1, 100, 1), spsPercentOfEquity);
+
+trendLen = Param("Trend MA", 200, 50, 300, 10);
+exitMALen = Param("Exit MA", 5, 2, 20, 1);
+entryRSI = Param("Entry RSI", 5, 1, 20, 1);
+exitRSI = Param("Exit RSI", 70, 50, 90, 1);
+maxHold = Param("Max Hold Bars", 10, 2, 20, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+atrStop = Param("ATR Stop", 2, 0.5, 5, 0.25);
+
+trendMA = MA(Close, trendLen);
+exitMA = MA(Close, exitMALen);
+rsi2 = RSI(2);
+
+Buy = Close > trendMA AND rsi2 < entryRSI;
+Sell = Close > exitMA OR rsi2 > exitRSI;
+Short = Close < trendMA AND rsi2 > 100 - entryRSI;
+Cover = Close < exitMA OR rsi2 < 100 - exitRSI;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, atrStop * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendMA, "Trend MA", colorBlue, styleLine);
+Plot(exitMA, "Exit MA", colorOrange, styleLine);
+PlotShapes(IIf(Buy, shapeUpArrow, shapeNone), colorGreen, 0, Low);
+PlotShapes(IIf(Short, shapeDownArrow, shapeNone), colorRed, 0, High);

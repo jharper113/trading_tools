@@ -1,0 +1,55 @@
+// SuperTrend ATR Reversal Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 10, 1, 100, 1), spsPercentOfEquity);
+
+atrLen = Param("ATR Length", 10, 3, 50, 1);
+mult = Param("ATR Multiple", 3, 1, 8, 0.25);
+
+mid = (High + Low) / 2;
+basicUpper = mid + mult * ATR(atrLen);
+basicLower = mid - mult * ATR(atrLen);
+
+finalUpper = basicUpper;
+finalLower = basicLower;
+trend = 1;
+superTrend = Null;
+
+for (i = 1; i < BarCount; i++)
+{
+    if (basicUpper[i] < finalUpper[i - 1] OR Close[i - 1] > finalUpper[i - 1])
+        finalUpper[i] = basicUpper[i];
+    else
+        finalUpper[i] = finalUpper[i - 1];
+
+    if (basicLower[i] > finalLower[i - 1] OR Close[i - 1] < finalLower[i - 1])
+        finalLower[i] = basicLower[i];
+    else
+        finalLower[i] = finalLower[i - 1];
+
+    if (trend[i - 1] == -1 AND Close[i] > finalUpper[i])
+        trend[i] = 1;
+    else
+    if (trend[i - 1] == 1 AND Close[i] < finalLower[i])
+        trend[i] = -1;
+    else
+        trend[i] = trend[i - 1];
+
+    superTrend[i] = IIf(trend[i] == 1, finalLower[i], finalUpper[i]);
+}
+
+Buy = Cross(trend, 0);
+Sell = Cross(0, trend);
+Short = Sell;
+Cover = Buy;
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(superTrend, "SuperTrend", IIf(trend == 1, colorGreen, colorRed), styleLine | styleThick);

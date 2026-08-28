@@ -1,0 +1,34 @@
+// Commodity vs SPY Short-Term Rotation
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+benchmark = ParamStr("Equity Benchmark", "SPY");
+rsLen = Param("RS Lookback", 10, 3, 40, 1);
+trendLen = Param("Trend EMA", 30, 10, 120, 5);
+maxHold = Param("Max Hold Bars", 5, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+benchClose = Foreign(benchmark, "C");
+rs = Close / benchClose;
+rsMom = ROC(rs, rsLen);
+trendEMA = EMA(Close, trendLen);
+
+Buy = Close > trendEMA AND Cross(rsMom, 0);
+Sell = Cross(0, rsMom) OR Close < trendEMA;
+Short = Close < trendEMA AND Cross(0, rsMom);
+Cover = Cross(rsMom, 0) OR Close > trendEMA;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.5 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(rsMom, "Commodity RS Momentum", colorBlue, styleOwnScale);

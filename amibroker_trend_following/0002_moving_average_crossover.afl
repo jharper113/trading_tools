@@ -1,0 +1,33 @@
+// Moving Average Crossover Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 10, 1, 100, 1), spsPercentOfEquity);
+
+fastLen = Param("Fast MA", 50, 5, 200, 5);
+slowLen = Param("Slow MA", 200, 20, 400, 10);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+atrStop = Param("ATR Stop", 4, 1, 10, 0.25);
+
+fastMA = MA(Close, fastLen);
+slowMA = MA(Close, slowLen);
+
+Buy = Cross(fastMA, slowMA);
+Sell = Cross(slowMA, fastMA);
+Short = Sell;
+Cover = Buy;
+
+ApplyStop(stopTypeTrailing, stopModePoint, atrStop * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(fastMA, "Fast MA", colorGreen, styleLine);
+Plot(slowMA, "Slow MA", colorRed, styleLine);
+PlotShapes(IIf(Buy, shapeUpArrow, shapeNone), colorGreen, 0, Low);
+PlotShapes(IIf(Short, shapeDownArrow, shapeNone), colorRed, 0, High);

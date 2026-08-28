@@ -1,11 +1,15 @@
 import argparse
 import base64
 import csv
+import gzip
 import getpass
 import json
 import os
+import shutil
+import subprocess
 import time
-from datetime import datetime, timezone
+import webbrowser
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -15,41 +19,6 @@ import numpy as np
 import pandas as pd
 
 
-DEFAULT_SYMBOLS = [
-    "/ES",
-    "/NQ",
-    "/RTY",
-    "/YM",
-    "/ZB",
-    "/ZN",
-    "/ZF",
-    "/ZT",
-    "/6E",
-    "/6J",
-    "/6B",
-    "/6A",
-    "/6C",
-    "/6S",
-    "/GC",
-    "/SI",
-    "/HG",
-    "/PL",
-    "/CL",
-    "/NG",
-    "/RB",
-    "/HO",
-    "/ZC",
-    "/ZS",
-    "/ZM",
-    "/ZL",
-    "/ZW",
-    "/LE",
-    "/HE",
-    "/KC",
-    "/SB",
-    "/CT",
-    "/CC",
-]
 DEFAULT_OUTPUT_DIR = Path("data/market_data")
 DEFAULT_PROVIDER = "csv"
 SUPPORTED_FREQUENCIES = {"daily", "5min", "60min"}
@@ -179,6 +148,51 @@ FUTURES_PRODUCTS = {
         "exchange": "NYMEX",
         "category": "energy",
     },
+    "/BTC": {
+        "name": "Bitcoin",
+        "exchange": "CME",
+        "category": "crypto",
+    },
+    "/ETH": {
+        "name": "Ether",
+        "exchange": "CME",
+        "category": "crypto",
+    },
+    "/MBT": {
+        "name": "Micro Bitcoin",
+        "exchange": "CME",
+        "category": "crypto",
+    },
+    "/MET": {
+        "name": "Micro Ether",
+        "exchange": "CME",
+        "category": "crypto",
+    },
+    "/SOL": {
+        "name": "Solana",
+        "exchange": "CME",
+        "category": "crypto",
+    },
+    "/MSL": {
+        "name": "Micro SOL",
+        "exchange": "CME",
+        "category": "crypto",
+    },
+    "/XRP": {
+        "name": "XRP",
+        "exchange": "CME",
+        "category": "crypto",
+    },
+    "/MXP": {
+        "name": "Micro XRP",
+        "exchange": "CME",
+        "category": "crypto",
+    },
+    "/MCA": {
+        "name": "Micro ADA",
+        "exchange": "CME",
+        "category": "crypto",
+    },
     "/ZC": {
         "name": "Corn",
         "exchange": "CBOT",
@@ -242,6 +256,10 @@ EQUITY_PRODUCTS = {
         "category": "equity_index",
     },
 }
+DEFAULT_SYMBOLS = [
+    *FUTURES_PRODUCTS.keys(),
+    *EQUITY_PRODUCTS.keys(),
+]
 
 
 CANONICAL_COLUMNS = [
@@ -305,6 +323,60 @@ def elapsed_text(seconds):
         return f"{minutes}m {seconds}s"
 
     return f"{seconds}s"
+
+
+def send_desktop_notification(
+    title,
+    message,
+    urgency="normal",
+    notifier_path=None,
+    runner=None,
+    environment=None,
+):
+    notifier_path = notifier_path or shutil.which("notify-send")
+
+    if not notifier_path:
+        return False
+
+    notification_environment = dict(
+        os.environ if environment is None else environment
+    )
+    runtime_dir = f"/run/user/{os.getuid()}"
+    notification_environment.setdefault("DISPLAY", ":0")
+    notification_environment.setdefault("XDG_RUNTIME_DIR", runtime_dir)
+    notification_environment.setdefault(
+        "DBUS_SESSION_BUS_ADDRESS",
+        f"unix:path={runtime_dir}/bus",
+    )
+    runner = runner or subprocess.run
+
+    try:
+        result = runner(
+            [
+                notifier_path,
+                f"--urgency={urgency}",
+                title,
+                message,
+            ],
+            env=notification_environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+    return result.returncode == 0
+
+
+def notify_best_effort(notifier, **notification):
+    try:
+        notifier(**notification)
+    except Exception:
+        return False
+
+    return True
 
 
 def eta_text(start_time, completed, total):
@@ -1204,6 +1276,7 @@ class SchwabProvider:
         client_id=None,
         client_secret=None,
         redirect_uri=SCHWAB_REDIRECT_URI,
+        force_reauth=False,
         max_history=False,
         base_url=SCHWAB_BASE_URL,
     ):
@@ -1211,23 +1284,54 @@ class SchwabProvider:
         self.max_history = max_history
         self.token_file = token_file_for(token_file)
         saved_tokens = load_schwab_token_file(self.token_file)
-        explicit_access_token = (
-            access_token
-            or os.getenv("SCHWAB_ACCESS_TOKEN")
-        )
+        explicit_access_token = None
+
+        if not force_reauth:
+            explicit_access_token = (
+                access_token
+                or os.getenv("SCHWAB_ACCESS_TOKEN")
+            )
+        saved_access_token = saved_tokens.get("access_token")
         self.access_token = explicit_access_token
-        refresh_token = (
-            refresh_token
-            or os.getenv("SCHWAB_REFRESH_TOKEN")
-            or saved_tokens.get("refresh_token")
-        )
+
+        if (
+            not self.access_token
+            and not force_reauth
+            and saved_access_token
+            and schwab_access_token_is_current(saved_tokens)
+        ):
+            self.access_token = saved_access_token
+
+        if force_reauth:
+            refresh_token = None
+        else:
+            refresh_token = (
+                refresh_token
+                or os.getenv("SCHWAB_REFRESH_TOKEN")
+                or saved_tokens.get("refresh_token")
+            )
 
         if not self.access_token and refresh_token:
-            client_id, client_secret = schwab_client_credentials(
-                client_id=client_id,
-                client_secret=client_secret,
-                prompt=False,
-            )
+            try:
+                client_id, client_secret = schwab_client_credentials(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    prompt=False,
+                )
+            except ValueError as error:
+                message = str(error)
+
+                if saved_access_token:
+                    message = (
+                        "Saved Schwab access token is expired and refresh "
+                        "requires --client-id/--client-secret or "
+                        "SCHWAB_CLIENT_ID/SCHWAB_CLIENT_SECRET. Run an "
+                        "interactive Schwab authorization again if the "
+                        "refresh token has also expired."
+                    )
+
+                raise ValueError(message) from error
+
             token_payload = exchange_schwab_refresh_token(
                 client_id=client_id,
                 client_secret=client_secret,
@@ -1235,9 +1339,6 @@ class SchwabProvider:
             )
             save_schwab_token_file(self.token_file, token_payload)
             self.access_token = token_payload["access_token"]
-
-        if not self.access_token:
-            self.access_token = saved_tokens.get("access_token")
 
         if not self.access_token:
             token_payload = prompt_for_schwab_token_payload(
@@ -1270,7 +1371,7 @@ class SchwabProvider:
             with urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except HTTPError as error:
-            body = error.read().decode("utf-8", errors="replace")
+            body = http_error_body_text(error)
             raise RuntimeError(
                 f"Schwab pricehistory request failed for {symbol} "
                 f"{frequency}: HTTP {error.code} {body}"
@@ -1393,6 +1494,42 @@ def load_schwab_token_file(token_file):
         return json.load(token_handle)
 
 
+def schwab_access_token_expires_at(token_payload):
+    retrieved_at = token_payload.get("retrieved_at")
+    expires_in = token_payload.get("expires_in")
+
+    if not retrieved_at or not expires_in:
+        return None
+
+    try:
+        retrieved = datetime.fromisoformat(
+            str(retrieved_at).replace("Z", "+00:00")
+        )
+        seconds = int(expires_in)
+    except (TypeError, ValueError):
+        return None
+
+    if retrieved.tzinfo is None:
+        retrieved = retrieved.replace(tzinfo=timezone.utc)
+
+    return retrieved + timedelta(seconds=seconds)
+
+
+def schwab_access_token_is_current(token_payload, leeway_seconds=60):
+    if not token_payload.get("access_token"):
+        return False
+
+    expires_at = schwab_access_token_expires_at(token_payload)
+
+    if expires_at is None:
+        return False
+
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=leeway_seconds)
+        < expires_at
+    )
+
+
 def save_schwab_token_file(token_file, token_payload):
     path = Path(token_file)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1436,6 +1573,25 @@ def schwab_client_credentials(client_id=None, client_secret=None, prompt=True):
     return client_id, client_secret
 
 
+def http_error_body_text(error):
+    body = error.read()
+    encoding = ""
+
+    if error.headers:
+        encoding = error.headers.get("Content-Encoding", "") or error.headers.get(
+            "content-encoding",
+            "",
+        )
+
+    if "gzip" in str(encoding).lower():
+        try:
+            body = gzip.decompress(body)
+        except OSError:
+            pass
+
+    return body.decode("utf-8", errors="replace")
+
+
 def request_schwab_token(
     client_id,
     client_secret,
@@ -1460,7 +1616,7 @@ def request_schwab_token(
         with urlopen(request, timeout=30) as response:
             token_payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
+        body = http_error_body_text(error)
         raise RuntimeError(
             f"Schwab token request failed: HTTP {error.code} {body}"
         ) from error
@@ -1517,6 +1673,7 @@ def prompt_for_schwab_token_payload(
     client_id=None,
     client_secret=None,
     redirect_uri=SCHWAB_REDIRECT_URI,
+    browser_opener=None,
 ):
     client_id, client_secret = schwab_client_credentials(
         client_id=client_id,
@@ -1530,6 +1687,13 @@ def prompt_for_schwab_token_payload(
     )
     print("\nOpen this Schwab authorization URL in your browser:")
     print(authorization_url)
+    opener = browser_opener or webbrowser.open
+
+    try:
+        opener(authorization_url)
+    except webbrowser.Error:
+        pass
+
     print(
         "\nAfter approving access, paste the full redirect URL "
         "or just the code value."
@@ -1658,6 +1822,7 @@ def create_provider(args):
             client_id=args.client_id,
             client_secret=args.client_secret,
             redirect_uri=args.redirect_uri,
+            force_reauth=args.force_reauth,
             max_history=args.all,
         )
 
@@ -1755,6 +1920,26 @@ def parse_args():
         help="Schwab OAuth redirect URI configured for your app.",
     )
     parser.add_argument(
+        "--auth-only",
+        action="store_true",
+        help="Prepare and save Schwab tokens without downloading market data.",
+    )
+    parser.add_argument(
+        "--force-reauth",
+        action="store_true",
+        help="Ignore saved Schwab tokens and start browser authorization.",
+    )
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Continue remaining symbol/frequency jobs after a provider error.",
+    )
+    parser.add_argument(
+        "--notify",
+        action="store_true",
+        help="Send a desktop notification when the command succeeds or fails.",
+    )
+    parser.add_argument(
         "--all",
         action="store_true",
         help=(
@@ -1795,25 +1980,54 @@ def parse_args():
         ),
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.provider == "csv" and not args.quality_only and not args.input_dir:
+        parser.error(
+            "--input-dir is required when --provider csv unless "
+            "--quality-only is used"
+        )
+
+    if args.provider != "schwab" and (args.auth_only or args.force_reauth):
+        parser.error("--auth-only and --force-reauth require --provider schwab")
+
+    if args.quality_only and (args.auth_only or args.force_reauth):
+        parser.error(
+            "--quality-only cannot be combined with --auth-only or "
+            "--force-reauth"
+        )
+
+    return args
 
 
-def main():
-    args = parse_args()
+def main(args=None):
+    args = args or parse_args()
     output_dir = Path(args.output_dir)
     symbols = [normalize_symbol(symbol) for symbol in args.symbols]
     frequencies = [
         normalize_frequency(frequency)
         for frequency in args.frequencies
     ]
+    provider = None
+
+    if not args.quality_only:
+        provider = create_provider(args)
+
+    if args.auth_only:
+        print(
+            "Schwab authorization is ready. Saved token file: "
+            f"{provider.token_file}"
+        )
+        return
 
     manifest_path = write_symbol_manifest(output_dir, symbols)
     print(f"Wrote symbol manifest: {manifest_path}")
 
     run_start = time.monotonic()
+    failed_jobs = []
+    total_jobs = 0
 
-    if not args.quality_only:
-        provider = create_provider(args)
+    if provider is not None:
         total_jobs = len(symbols) * len(frequencies)
         completed_jobs = 0
 
@@ -1830,12 +2044,26 @@ def main():
                     f"[{job_number}/{total_jobs}] Fetching {symbol} "
                     f"{frequency} from {args.provider}{fetch_note}..."
                 )
-                bars = provider.fetch_bars(
-                    symbol=symbol,
-                    frequency=frequency,
-                    start=args.start,
-                    end=args.end,
-                )
+                try:
+                    bars = provider.fetch_bars(
+                        symbol=symbol,
+                        frequency=frequency,
+                        start=args.start,
+                        end=args.end,
+                    )
+                except (RuntimeError, ValueError) as error:
+                    if not args.continue_on_error:
+                        raise
+
+                    completed_jobs += 1
+                    failed_jobs.append((symbol, frequency, str(error)))
+                    print(
+                        f"[{completed_jobs}/{total_jobs}] Failed {symbol} "
+                        f"{frequency}: {error}. Continuing; ETA "
+                        f"{eta_text(run_start, completed_jobs, total_jobs)}."
+                    )
+                    continue
+
                 fetch_elapsed = time.monotonic() - job_start
                 save_start = time.monotonic()
                 print(
@@ -1903,6 +2131,47 @@ def main():
         f"(quality {elapsed_text(time.monotonic() - quality_start)})."
     )
 
+    if failed_jobs:
+        raise RuntimeError(
+            f"{len(failed_jobs)} of {total_jobs} market data jobs failed; "
+            "see the failure lines above"
+        )
+
+
+def run_cli(args=None, run_main=None, notifier=None):
+    args = args or parse_args()
+    run_main = run_main or main
+    notifier = notifier or send_desktop_notification
+
+    try:
+        run_main(args)
+    except (RuntimeError, ValueError) as error:
+        if args.notify:
+            notify_best_effort(
+                notifier,
+                title="Market data update failed",
+                message=str(error),
+                urgency="critical",
+            )
+        raise SystemExit(f"error: {error}") from None
+    except Exception as error:
+        if args.notify:
+            notify_best_effort(
+                notifier,
+                title="Market data update failed",
+                message=str(error),
+                urgency="critical",
+            )
+        raise
+
+    if args.notify:
+        notify_best_effort(
+            notifier,
+            title="Market data update succeeded",
+            message="download_market_data.py completed successfully.",
+            urgency="normal",
+        )
+
 
 if __name__ == "__main__":
-    main()
+    run_cli()

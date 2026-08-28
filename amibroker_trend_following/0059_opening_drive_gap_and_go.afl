@@ -1,0 +1,42 @@
+// Opening Drive Gap-And-Go
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(0, 0, 0, 0);
+SetPositionSize(Param("Position % Equity", 4, 1, 100, 1), spsPercentOfEquity);
+
+startTime = Param("Session Start HHMMSS", 90000, 0, 235959, 100);
+confirmBars = Param("Confirm Bars", 2, 1, 4, 1);
+exitTime = Param("Exit Time HHMMSS", 153000, 0, 235959, 100);
+maxHold = Param("Max Hold Bars", 5, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+priorHigh = TimeFrameGetPrice("H", inDaily, -1);
+priorLow = TimeFrameGetPrice("L", inDaily, -1);
+tn = TimeNum();
+sessionStart = tn >= startTime AND Ref(tn, -1) < startTime;
+barsFromOpen = BarsSince(sessionStart);
+sessionOpen = ValueWhen(sessionStart, Open);
+
+gapUp = sessionOpen > priorHigh;
+gapDown = sessionOpen < priorLow;
+openingDriveUp = barsFromOpen < confirmBars AND Close > Open AND Close > priorHigh;
+openingDriveDown = barsFromOpen < confirmBars AND Close < Open AND Close < priorLow;
+
+Buy = gapUp AND openingDriveUp;
+Sell = tn >= exitTime OR Close < priorHigh;
+Short = gapDown AND openingDriveDown;
+Cover = tn >= exitTime OR Close > priorLow;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.1 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(priorHigh, "Prior High", colorGreen, styleLine);
+Plot(priorLow, "Prior Low", colorRed, styleLine);

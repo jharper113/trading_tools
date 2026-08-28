@@ -3,6 +3,36 @@ import pandas as pd
 import analyze_strategy_performance as asp
 
 
+def test_equity_chart_renderers_write_nonempty_images(tmp_path, monkeypatch):
+    monkeypatch.setattr(asp, "CHART_DIR", str(tmp_path))
+    timestamps = pd.to_datetime([
+        "2025-01-02",
+        "2025-02-03",
+        "2025-03-03",
+        "2025-04-01",
+    ])
+    equity_curves = pd.DataFrame({
+        "timestamp": timestamps,
+        "Strategy_Name": ["Test Strategy"] * 4,
+        "CMPNL": [500.0, -200.0, 900.0, 1400.0],
+        "strategy_equity": [100500.0, 99800.0, 100900.0, 101400.0],
+    })
+    account_curve = pd.DataFrame({
+        "timestamp": timestamps,
+        "starting_equity": [100000.0] * 4,
+        "ending_equity": [100500.0, 99800.0, 100900.0, 101400.0],
+        "account_drawdown": [0.0, -0.00697, 0.0, 0.0],
+    })
+
+    strategy_chart = asp.save_strategy_equity_chart(equity_curves)
+    account_chart = asp.save_account_equity_chart(account_curve)
+
+    assert (tmp_path / "strategy_equity_curves.png").stat().st_size > 1000
+    assert (tmp_path / "account_equity_curve.png").stat().st_size > 1000
+    assert strategy_chart.endswith("strategy_equity_curves.png")
+    assert account_chart.endswith("account_equity_curve.png")
+
+
 def test_statement_end_of_day_uses_statement_filename_date():
     as_of_date = asp.statement_end_of_day(
         {
@@ -70,7 +100,13 @@ def test_ytd_statement_report_applies_trade_history_bridge(tmp_path):
         pd.DataFrame([
             {
                 "Exec Time": "1/2/26 14:17:49",
+                "Spread": "SINGLE",
+                "Side": "SELL",
+                "Qty": -1,
                 "Symbol": "/MESH26 1/5 9 JAN 26 (Wk2)",
+                "Exp": "9 JAN 26",
+                "Strike": 6000,
+                "Type": "PUT",
                 "Pos Effect": "TO OPEN",
                 "trade_pnl": 127.0,
                 "fees": 8.0,
@@ -204,6 +240,10 @@ def test_strategy_dashboard_uses_compact_summary_layout(tmp_path, monkeypatch):
             [
                 {
                     "statement_closed_net_ytd_pnl": 419.89,
+                    "trade_history_closed_net_ytd_pnl": 2233.27,
+                    "trade_history_adjusted_closed_net_ytd_pnl": 419.89,
+                    "total_closed_pnl_adjustment": -1813.38,
+                    "closed_net_delta_statement_minus_trade_history": 0.0,
                     "script_realized_closed_net_pnl": 2233.27,
                     "closed_net_delta_statement_minus_script": -1813.38,
                 }
@@ -308,7 +348,7 @@ def test_strategy_dashboard_uses_compact_summary_layout(tmp_path, monkeypatch):
         pd.DataFrame(columns=["check"]),
         correlation,
         correlation,
-        pd.DataFrame(columns=["drawdown_overlap_ratio"]),
+        pd.DataFrame(),
         chart_files,
         [
             str(chart_dir / "risk_simulation_cagr_boxplot.png"),
@@ -324,11 +364,13 @@ def test_strategy_dashboard_uses_compact_summary_layout(tmp_path, monkeypatch):
     support_start = html.index("<summary>Supporting Details</summary>")
     strategy_summary_start = html.index("<h2>Strategy Summary</h2>")
     capital_start = html.index("<h2>Capital Allocation</h2>")
-    strategy_trades_start = html.index("<h2>Strategy Trades</h2>")
+    strategy_trades_start = html.index("<summary>Strategy Trades</summary>")
     capital_section = html[capital_start:support_start]
 
     assert "Net YTD PNL" in html
-    assert "Trade History Net PNL" in html
+    assert "Raw Trade History Net PNL" in html
+    assert "YTD Bridge Adjustment" in html
+    assert "Adjusted Trade History Net PNL" in html
     assert "Discrepancy" in html
     assert "Realized Trade PNL" in html
     assert "Annualized Real Return" in html
@@ -341,8 +383,9 @@ def test_strategy_dashboard_uses_compact_summary_layout(tmp_path, monkeypatch):
     assert "Size" in capital_section
     assert "Risk $" in capital_section
     assert "Action" not in capital_section
-    assert "<h2>Strategy Trades</h2>" in html
-    assert strategy_summary_start < capital_start < strategy_trades_start
+    assert '<details class="strategy-trades-details">' in html
+    assert '<details class="strategy-trades-details" open>' not in html
+    assert strategy_summary_start < capital_start < support_start < strategy_trades_start
     assert 'id="strategy-trade-select"' in html
     assert 'id="save-strategy-edits"' in html
     assert "/api/strategy-updates" in html
@@ -359,3 +402,4 @@ def test_strategy_dashboard_uses_compact_summary_layout(tmp_path, monkeypatch):
     assert html.index("Decision Board") > support_start
     assert html.index("<h2>Profit Factor</h2>") > support_start
     assert html.index("Risk Simulation Profit Factor Boxplot") > support_start
+    assert "Walk-Forward Pass Gates" not in html

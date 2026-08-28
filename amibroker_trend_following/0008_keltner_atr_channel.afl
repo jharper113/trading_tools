@@ -1,0 +1,37 @@
+// Keltner / ATR Channel Breakout Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 10, 1, 100, 1), spsPercentOfEquity);
+
+emaLen = Param("EMA Length", 50, 10, 200, 5);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+entryATR = Param("Entry ATR Multiple", 2, 0.5, 6, 0.25);
+exitATR = Param("Exit ATR Multiple", 0.5, 0, 3, 0.25);
+stopATR = Param("Stop ATR Multiple", 4, 1, 10, 0.25);
+
+basis = EMA(Close, emaLen);
+atrRange = ATR(atrLen);
+upperEntry = basis + entryATR * atrRange;
+lowerEntry = basis - entryATR * atrRange;
+upperExit = basis + exitATR * atrRange;
+lowerExit = basis - exitATR * atrRange;
+
+Buy = Cross(Close, upperEntry);
+Sell = Cross(lowerExit, Close);
+Short = Cross(lowerEntry, Close);
+Cover = Cross(Close, upperExit);
+
+ApplyStop(stopTypeTrailing, stopModePoint, stopATR * atrRange, True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(upperEntry, "Upper Entry", colorGreen, styleLine);
+Plot(basis, "EMA", colorBlue, styleLine);
+Plot(lowerEntry, "Lower Entry", colorRed, styleLine);

@@ -119,6 +119,24 @@ Outputs are written under `output/strategy_performance/` by default:
 `--no-open-dashboard`
 : Do not open the dashboard in a browser after the script completes.
 
+`--strategy-library-dir STRATEGY_LIBRARY_DIR`
+: Optional persistent directory for accumulating per-strategy `trades.csv`, `equity_curve.csv`, `daily_pnl.csv`, and metadata across separate analysis runs. The directory also contains a combined daily-PNL matrix, correlation matrix, and pairwise overlap-day counts. Existing strategies that are not part of the current run are preserved. Correlations require at least 20 overlapping dates.
+
+`--live-degradation-monitor`
+: Display an opt-in live-data panel that compares matching live strategies with immutable WFA baselines from the strategy library. It evaluates rolling 3-, 6-, and 12-month windows plus the last 10 trades. The three-month result is informational; allocation is never changed automatically. When `--strategy-library-dir` is omitted, the monitor uses `output/strategy_library`.
+
+`--live-monitor-simulations LIVE_MONITOR_SIMULATIONS`
+: Number of stationary-bootstrap paths generated for each live degradation horizon. Default: `5000`.
+
+`--serve-dashboard`
+: Serve the dashboard locally so strategy-name edits can be saved.
+
+`--dashboard-host DASHBOARD_HOST`
+: Host used by `--serve-dashboard`. Default: `127.0.0.1`.
+
+`--dashboard-port DASHBOARD_PORT`
+: Port used by `--serve-dashboard`. Default: `8765`.
+
 `--as-of-date AS_OF_DATE`
 : Timestamp used to decide whether unmatched option positions have expired. Default: current timestamp when the script runs.
 
@@ -163,6 +181,60 @@ Outputs are written under `output/strategy_performance/` by default:
 
 `--risk-random-seed RISK_RANDOM_SEED`
 : Random seed for risk-per-trade bootstrap sampling.
+
+`--risk-bootstrap-block-length RISK_BOOTSTRAP_BLOCK_LENGTH`
+: Average consecutive-trade block length used by live strategy position-sizing simulations. Default: `3`.
+
+`--risk-cagr-objective-quantile RISK_CAGR_OBJECTIVE_QUANTILE`
+: CAGR percentile maximized by live strategy sizing. Default: `0.25` (CAR25).
+
+`--wfa-validation`
+: Normalize and convert a raw AmiBroker WFA trade export when needed, then calculate and display the opt-in Walk-Forward Pass Gates panel.
+
+`--wfa-simulations WFA_SIMULATIONS`
+: Stationary bootstrap paths for WFA benchmarking. Default: `5000`.
+
+`--wfa-bootstrap-block-length WFA_BOOTSTRAP_BLOCK_LENGTH`
+: Average consecutive-trade block length used for WFA resampling.
+
+`--wfa-drawdown-limit WFA_DRAWDOWN_LIMIT`
+: Maximum tolerable account drawdown used for WFA position sizing. Default: `-0.20`.
+
+`--wfa-max-drawdown-breach-probability WFA_MAX_DRAWDOWN_BREACH_PROBABILITY`
+: Maximum simulated probability of breaching the WFA drawdown limit. Default: `0.05`.
+
+`--wfa-max-risk-pct WFA_MAX_RISK_PCT`
+: Upper search bound for WFA initial-stop risk as a percentage of equity.
+
+`--wfa-cagr-objective-quantile WFA_CAGR_OBJECTIVE_QUANTILE`
+: CAGR percentile maximized by WFA sizing. Default: `0.25` (CAR25).
+
+`--wfa-round-trip-cost WFA_ROUND_TRIP_COST`
+: Additional expected commission plus slippage dollars per completed WFA trade.
+
+`--wfa-cost-stress-multiple WFA_COST_STRESS_MULTIPLE`
+: Multiplier applied to `--wfa-round-trip-cost` for WFA pass gates. Default: `2.0`.
+
+`--wfa-starting-equity WFA_STARTING_EQUITY`
+: Starting equity for a raw AmiBroker WFA trade export. When omitted, the analyzer attempts to infer it from a companion WFA summary CSV.
+
+`--wfa-strategy-name WFA_STRATEGY_NAME`
+: Strategy name assigned to a raw WFA export. The trade export supplies the tested symbol, but it does not contain the AFL strategy name.
+
+`--wfa-min-total-trades WFA_MIN_TOTAL_TRADES`
+: Minimum total OOS trades for WFA sample coverage. Default: `50`.
+
+`--wfa-min-segments WFA_MIN_SEGMENTS`
+: Minimum completed OOS segments for WFA sample coverage. Default: `5`.
+
+`--wfa-min-trades-per-segment WFA_MIN_TRADES_PER_SEGMENT`
+: Minimum trades required in every completed OOS segment. Default: `5`.
+
+`--wfa-min-latest-segment-trades WFA_MIN_LATEST_SEGMENT_TRADES`
+: Minimum trades required in the latest complete OOS segment. Default: `5`.
+
+`--wfa-pilot-risk-pct WFA_PILOT_RISK_PCT`
+: Optional manual cap on optimized WFA initial-stop risk. By default, the drawdown-constrained optimizer determines the risk.
 
 ## Notes
 

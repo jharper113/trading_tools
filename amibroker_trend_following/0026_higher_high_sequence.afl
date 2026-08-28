@@ -1,0 +1,35 @@
+// Higher-High / Lower-Low Sequence Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+seqBars = Param("Sequence Bars", 4, 2, 10, 1);
+trendLen = Param("Trend EMA", 100, 20, 300, 10);
+exitLen = Param("Exit EMA", 30, 5, 100, 5);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+
+hh = High > Ref(High, -1);
+hl = Low > Ref(Low, -1);
+ll = Low < Ref(Low, -1);
+lh = High < Ref(High, -1);
+
+trendEMA = EMA(Close, trendLen);
+exitEMA = EMA(Close, exitLen);
+
+Buy = Sum(hh AND hl, seqBars) == seqBars AND Close > trendEMA;
+Sell = Close < exitEMA;
+Short = Sum(ll AND lh, seqBars) == seqBars AND Close < trendEMA;
+Cover = Close > exitEMA;
+
+ApplyStop(stopTypeTrailing, stopModePoint, 3 * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

@@ -1,0 +1,31 @@
+// CCI Zero-Line Burst
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+cciLen = Param("CCI Length", 10, 3, 40, 1);
+trendLen = Param("Trend EMA", 30, 10, 120, 5);
+maxHold = Param("Max Hold Bars", 3, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+c = CCI(cciLen);
+trendEMA = EMA(Close, trendLen);
+
+Buy = Close > trendEMA AND Cross(c, 0);
+Sell = Cross(0, c);
+Short = Close < trendEMA AND Cross(0, c);
+Cover = Cross(c, 0);
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.3 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(c, "CCI", colorBlue, styleOwnScale);

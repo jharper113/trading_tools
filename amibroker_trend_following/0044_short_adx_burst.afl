@@ -1,0 +1,33 @@
+// Short-Term ADX Burst
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+adxLen = Param("ADX Length", 7, 3, 20, 1);
+minADX = Param("Minimum ADX", 25, 10, 60, 1);
+channelLen = Param("Channel Length", 4, 2, 15, 1);
+maxHold = Param("Max Hold Bars", 3, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+upper = Ref(HHV(High, channelLen), -1);
+lower = Ref(LLV(Low, channelLen), -1);
+strong = ADX(adxLen) > minADX;
+
+Buy = strong AND PDI(adxLen) > MDI(adxLen) AND Close > upper;
+Sell = Close < Ref(Low, -1);
+Short = strong AND MDI(adxLen) > PDI(adxLen) AND Close < lower;
+Cover = Close > Ref(High, -1);
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.4 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(ADX(adxLen), "ADX", colorBlue, styleOwnScale);

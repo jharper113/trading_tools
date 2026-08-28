@@ -1,0 +1,33 @@
+// Short-Term Keltner Reversal
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+emaLen = Param("EMA Length", 20, 5, 80, 5);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+bandATR = Param("Band ATR", 1.5, 0.5, 4, 0.25);
+maxHold = Param("Max Hold Bars", 3, 1, 5, 1);
+
+basis = EMA(Close, emaLen);
+upper = basis + bandATR * ATR(atrLen);
+lower = basis - bandATR * ATR(atrLen);
+
+Buy = Ref(Close < lower, -1) AND Close > Ref(High, -1);
+Sell = Close > basis;
+Short = Ref(Close > upper, -1) AND Close < Ref(Low, -1);
+Cover = Close < basis;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.4 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(upper, "Upper Keltner", colorRed, styleLine);
+Plot(lower, "Lower Keltner", colorGreen, styleLine);
