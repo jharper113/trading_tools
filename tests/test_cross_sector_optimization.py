@@ -1,337 +1,199 @@
+"""Behavior checks for the profile-driven analyzer and its packaged entry points."""
+
+import importlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+
 import pandas as pd
-
-from analyze_cross_sector_optimization import (
-    DISTRIBUTION_METRICS,
-    SECTOR_COLUMN,
-    SYMBOL_COLUMN,
-    ThresholdConfig,
-    build_dashboard_payload,
-    build_summary_metrics,
-    format_currency,
-    load_optimization_directory,
-    parse_symbol_list,
-    sector_for_symbol,
-    select_heatmap_parameters,
-    symbol_from_path,
-    svg_boxplot,
-    svg_heatmap,
-    write_dashboard,
-)
+import pytest
 
 
-def write_sample_optimization(path, rows):
-    header = (
-        "No.,Net Profit,Net % Profit,Exposure %,CAR,RAR,"
-        "Max. Trade Drawdown,Max. Trade % Drawdown,"
-        "Max. Sys Drawdown,Max. Sys % Drawdown,Recovery Factor,"
-        "CAR/MDD,RAR/MDD,Profit Factor,Payoff Ratio,Standard Error,"
-        "RRR,Ulcer Index,Ulcer Perf. Index,Sharpe Ratio,"
-        "# Trades,Avg Profit/Loss,Avg % Profit/Loss,Avg Bars Held,"
-        "# of winners,% of Winners,W. Tot. Profit,W. Avg. Profit,"
-        "W. Avg % Profit,W. Avg. Bars Held,# of losers,% of Losers,"
-        "L. Tot. Loss,L. Avg. Loss,L. Avg % Loss,L. Avg. Bars Held,"
-        "trendIndex,lEntryThresh,stopParam: ATRmult|nLagLoHi"
-    )
-    lines = [header]
-
-    for row in rows:
-        values = [
-            row.get("No.", 1),
-            row["Net Profit"],
-            row.get("Net % Profit", 0),
-            row.get("Exposure %", 0),
-            row.get("CAR", 0),
-            row.get("RAR", 0),
-            row.get("Max. Trade Drawdown", -10),
-            row.get("Max. Trade % Drawdown", -1),
-            row.get("Max. Sys Drawdown", -20),
-            row.get("Max. Sys % Drawdown", -5),
-            row.get("Recovery Factor", 1),
-            row.get("CAR/MDD", 1),
-            row.get("RAR/MDD", 1),
-            row["Profit Factor"],
-            row.get("Payoff Ratio", 1),
-            row.get("Standard Error", 0),
-            row.get("RRR", 1),
-            row.get("Ulcer Index", 1),
-            row.get("Ulcer Perf. Index", 1),
-            row.get("Sharpe Ratio", 1),
-            row["# Trades"],
-            row.get("Avg Profit/Loss", 1),
-            row.get("Avg % Profit/Loss", 1),
-            row.get("Avg Bars Held", 1),
-            row.get("# of winners", 1),
-            row.get("% of Winners", 50),
-            row.get("W. Tot. Profit", 10),
-            row.get("W. Avg. Profit", 10),
-            row.get("W. Avg % Profit", 10),
-            row.get("W. Avg. Bars Held", 1),
-            row.get("# of losers", 1),
-            row.get("% of Losers", 50),
-            row.get("L. Tot. Loss", -10),
-            row.get("L. Avg. Loss", -10),
-            row.get("L. Avg % Loss", -10),
-            row.get("L. Avg. Bars Held", 1),
-            row["trendIndex"],
-            row["lEntryThresh"],
-            row["stopParam: ATRmult|nLagLoHi"],
-        ]
-        lines.append(",".join(str(value) for value in values))
-
-    path.write_text("\n".join(lines), encoding="utf-8")
+ROOT = Path(__file__).resolve().parents[1]
+PROFILES = ROOT / "Analyzer_Profiles"
+DAILY = PROFILES / "Daily_Analyzer_Profile.json"
+INTRADAY = PROFILES / "Intraday_15m_Analyzer_Profile.json"
 
 
-def write_sample_directory(tmp_path):
-    write_sample_optimization(
-        tmp_path / "Daily_ES.csv",
-        [
-            {
-                "Net Profit": 100,
-                "Profit Factor": 1.2,
-                "# Trades": 120,
-                "CAR": 5,
-                "Max. Sys % Drawdown": -6,
-                "trendIndex": 0,
-                "lEntryThresh": 2,
-                "stopParam: ATRmult|nLagLoHi": 1,
-            },
-            {
-                "Net Profit": 50,
-                "Profit Factor": 1.4,
-                "# Trades": 80,
-                "CAR": 4,
-                "Max. Sys % Drawdown": -4,
-                "trendIndex": 1,
-                "lEntryThresh": 10,
-                "stopParam: ATRmult|nLagLoHi": 2,
-            },
-        ],
-    )
-    write_sample_optimization(
-        tmp_path / "Daily_CL.csv",
-        [
-            {
-                "Net Profit": -100,
-                "Profit Factor": 0.8,
-                "# Trades": 140,
-                "CAR": -2,
-                "Max. Sys % Drawdown": -12,
-                "trendIndex": 0,
-                "lEntryThresh": 2,
-                "stopParam: ATRmult|nLagLoHi": 1,
-            },
-            {
-                "Net Profit": -50,
-                "Profit Factor": 0.9,
-                "# Trades": 90,
-                "CAR": -1,
-                "Max. Sys % Drawdown": -8,
-                "trendIndex": 1,
-                "lEntryThresh": 30,
-                "stopParam: ATRmult|nLagLoHi": 3,
-            },
-        ],
-    )
+@pytest.fixture(params=["analyze_cross_sector_optimization", "Python_Tools.analyze_cross_sector_optimization"])
+def analyzer(request):
+    return importlib.import_module(request.param)
 
 
-def test_load_optimization_directory_adds_symbols_and_sectors(tmp_path):
-    write_sample_directory(tmp_path)
-
-    dataset = load_optimization_directory(tmp_path)
-
-    assert len(dataset.frame) == 4
-    assert dataset.parameter_columns == [
-        "trendIndex",
-        "lEntryThresh",
-        "stopParam: ATRmult|nLagLoHi",
-    ]
-    assert dataset.frame[SYMBOL_COLUMN].tolist() == ["/CL", "/CL", "/ES", "/ES"]
-    assert dataset.frame[SECTOR_COLUMN].tolist() == [
-        "Energy",
-        "Energy",
-        "Equity Indexes",
-        "Equity Indexes",
-    ]
+def write_results(directory, symbol, profits=(100, 200), factors=(1.2, 1.4), trades=(60, 100)):
+    path = directory / f"Daily_{symbol}.csv"
+    pd.DataFrame({"Net Profit": profits, "Profit Factor": factors, "# Trades": trades}).to_csv(path, index=False)
+    return path
 
 
-def test_sector_for_symbol_classifies_extended_instruments():
-    assert sector_for_symbol("/MSL") == "Crypto"
-    assert sector_for_symbol("/MXP") == "Currencies"
-    assert sector_for_symbol("/SOL") == "Crypto"
-    assert sector_for_symbol("/SPY") == "Equity Indexes"
-    assert sector_for_symbol("SPY") == "Equity Indexes"
-    assert sector_for_symbol("/XRP") == "Crypto"
-    assert symbol_from_path("optimization_SPY.csv") == "SPY"
-    assert parse_symbol_list("/SPY, ES") == ["SPY", "/ES"]
+def test_load_directory_normalizes_numbers_and_attaches_source(analyzer, tmp_path):
+    path = tmp_path / "Strategy_Daily_6E.csv"
+    pd.DataFrame({
+        " Net Profit ": ["1,200", "-250"],
+        "Profit Factor": ["1.25", "0.8"],
+        "# Trades": ["120", "60"],
+        "CAR": ["12.5%", "-2%"],
+        "Opt Lookback": [10, 20],
+    }).to_csv(path, index=False)
+    rows, files, parameters = analyzer.load_directory(tmp_path)
+    assert files == [path]
+    assert parameters == ["Opt Lookback"]
+    assert [row["Net Profit"] for row in rows] == [1200, -250]
+    assert [row["CAR"] for row in rows] == [12.5, -2]
+    assert [row["# Trades"] for row in rows] == [120, 60]
+    assert all(row["Symbol"] == "6E" and row["Sector"] == "Currencies" for row in rows)
+    assert all(row["Source File"] == path.name for row in rows)
 
 
-def test_summary_metrics_apply_cross_sector_thresholds(tmp_path):
-    write_sample_directory(tmp_path)
-    dataset = load_optimization_directory(tmp_path)
-    thresholds = ThresholdConfig(
-        profitable_groups_threshold=65.0,
-        profit_factor_threshold=1.10,
-        trade_count_threshold=100,
-    )
-
-    metrics = {
-        metric["key"]: metric
-        for metric in build_summary_metrics(
-            dataset.frame,
-            thresholds,
-            SECTOR_COLUMN,
-            "Sectors",
-        )
-    }
-
-    assert metrics["profitable_groups_pct"]["value"] == 50.0
-    assert metrics["profitable_groups_pct"]["status"] == "bad"
-    assert metrics["median_profit_factor"]["value"] == 1.05
-    assert metrics["median_profit_factor"]["status"] == "bad"
-    assert metrics["paramsets_over_trade_threshold_pct"]["value"] == 50.0
-    assert metrics["paramsets_over_trade_threshold_pct"]["status"] == "neutral"
+def test_empty_directory_is_rejected(analyzer, tmp_path):
+    with pytest.raises(FileNotFoundError, match="No optimization CSV"):
+        analyzer.load_directory(tmp_path)
 
 
-def test_select_heatmap_parameters_uses_highest_numeric_variance():
-    frame = pd.DataFrame(
-        {
-            "lowVariance": [0, 1, 0, 1],
-            "highVariance": [2, 10, 20, 30],
-            "mediumVariance": [1, 2, 3, 4],
-        }
-    )
-
-    assert select_heatmap_parameters(
-        frame,
-        ["lowVariance", "highVariance", "mediumVariance"],
-    ) == ["highVariance", "mediumVariance"]
+@pytest.mark.parametrize("missing", ["Net Profit", "Profit Factor", "# Trades"])
+def test_missing_required_column_is_rejected(analyzer, tmp_path, missing):
+    path = write_results(tmp_path, "6E")
+    pd.read_csv(path).drop(columns=[missing]).to_csv(path, index=False)
+    with pytest.raises(ValueError) as error:
+        analyzer.load_directory(tmp_path)
+    assert path.name in str(error.value)
+    assert missing in str(error.value)
 
 
-def test_boxplots_use_metric_specific_reference_lines():
-    frame = pd.DataFrame(
-        {
-            SYMBOL_COLUMN: ["/ES", "/ES"],
-            "Net Profit": [100, 200],
-            "Profit Factor": [1.2, 1.3],
-            "CAR": [15, 20],
-            "CAR/MDD": [0.5, 0.8],
-            "Max. Sys % Drawdown": [-12, -8],
-            "# Trades": [120, 180],
-        }
-    )
-    expected_values = {
-        "profitability": "0.00",
-        "profit_factor": "1.10",
-        "cagr": "10.00",
-        "max_drawdown": "-20.00",
-        "trade_count": "100.00",
-        "car_mdd": "0.00",
-    }
-
-    for metric in DISTRIBUTION_METRICS:
-        svg = svg_boxplot(frame, metric, ["/ES"])
-        expected = expected_values.get(metric.key)
-
-        assert f'data-reference-value="{expected}"' in svg
-        assert 'class="reference-line"' in svg
-
-    profitability_svg = svg_boxplot(frame, DISTRIBUTION_METRICS[0], ["/ES"])
-    assert "median $150, min $100, max $200" in profitability_svg
-
-    metrics = {metric.key: metric for metric in DISTRIBUTION_METRICS}
-    assert "larger sample" in metrics["trade_count"].description
-    assert "out-of-sample" in metrics["car_mdd"].description
+def test_failed_family_and_broad_scopes_do_not_veto_passing_core(analyzer, tmp_path):
+    write_results(tmp_path, "6E")
+    write_results(tmp_path, "6B", (-100, -200), (0.5, 0.7))
+    write_results(tmp_path, "CL", (-100, -200), (0.5, 0.7))
+    result = analyzer.analyze(tmp_path, DAILY, [" /6e "])
+    assert result["core_symbols"] == ["6E"]
+    assert result["core"]["verdict"] == "PASS"
+    assert result["core"]["selected_rows"] == 2
+    assert result["family"]["selected_rows"] == 4
+    assert result["broad"]["selected_rows"] == 6
+    assert result["family"]["verdict"] == "FAIL"
+    assert result["broad"]["verdict"] == "FAIL"
+    assert result["decision"] == "ADVANCE TO WFA"
 
 
-def test_heatmap_legend_and_tooltips_show_currency_pnl():
-    frame = pd.DataFrame(
-        {
-            SYMBOL_COLUMN: ["/ES", "/ES"],
-            "paramX": [1, 2],
-            "paramY": [10, 10],
-            "Net Profit": [-200, 100],
-        }
-    )
-    config = {
-        "x_param": "paramX",
-        "y_param": "paramY",
-        "x_values": [1, 2],
-        "y_values": [10],
-        "max_abs": 200,
-    }
-
-    svg = svg_heatmap(frame, "/ES", config)
-
-    assert format_currency(-200) == "-$200"
-    assert "Median PNL -$200" in svg
-    assert "Loss -$200" in svg
-    assert ">$0</text>" in svg
-    assert "Profit $200" in svg
+@pytest.mark.parametrize("profits,factors,trades,failed_gate", [
+    ((100, -100), (1.2, 1.4), (60, 100), "profitable_paramsets"),
+    ((100, 200), (0.8, 1.0), (60, 100), "median_profit_factor"),
+    ((100, 200), (1.2, 1.4), (20, 40), "median_trades"),
+])
+def test_each_core_gate_can_reject_strategy(analyzer, tmp_path, profits, factors, trades, failed_gate):
+    write_results(tmp_path, "6E", profits, factors, trades)
+    write_results(tmp_path, "CL", (100, 200, 300, 400), (2, 2, 2, 2), (200, 200, 200, 200))
+    result = analyzer.analyze(tmp_path, DAILY, ["6E"])
+    assert result["broad"]["verdict"] == "PASS"
+    assert result["core"]["verdict"] == "FAIL"
+    assert result["core"]["gates"][failed_gate] is False
+    assert sum(result["core"]["gates"].values()) == 2
+    assert result["decision"] == "REJECT OR REVISE"
 
 
-def test_dashboard_payload_uses_basket_for_cross_validation(tmp_path):
-    write_sample_directory(tmp_path)
-    dataset = load_optimization_directory(tmp_path)
-
-    payload = build_dashboard_payload(
-        dataset,
-        tmp_path,
-        ThresholdConfig(),
-        basket_symbols=["/ES"],
-    )
-
-    assert payload["cross_validation"]["symbols"] == ["/ES"]
-    assert len(payload["cross_validation"]["frame"]) == 2
-    assert payload["heatmap_config"]["x_param"] == "lEntryThresh"
-    assert payload["heatmap_config"]["y_param"] == "stopParam: ATRmult|nLagLoHi"
+def test_profile_controls_trade_threshold_and_includes_boundary(analyzer, tmp_path):
+    write_results(tmp_path, "6E", trades=(60, 60), factors=(1.1, 1.1))
+    daily = analyzer.analyze(tmp_path, DAILY, ["6E"])
+    intraday = analyzer.analyze(tmp_path, INTRADAY, ["6E"])
+    assert daily["core"]["verdict"] == "PASS"
+    assert intraday["core"]["verdict"] == "FAIL"
+    assert intraday["core"]["gates"]["median_trades"] is False
+    assert daily["periodicity"]["seconds"] == 86400
+    assert intraday["periodicity"]["seconds"] == 900
 
 
-def test_decision_board_identifies_cross_sector_pass(tmp_path):
-    write_sample_directory(tmp_path)
-    dataset = load_optimization_directory(tmp_path)
-
-    payload = build_dashboard_payload(
-        dataset,
-        tmp_path,
-        ThresholdConfig(trade_coverage_threshold=40),
-        basket_symbols=["/ES"],
-    )
-
-    decision = payload["decision_board"]
-
-    assert decision["verdict"] == "Cross-Sector Pass"
-    assert decision["classification"] == "Broadly Robust"
-    assert decision["cross_passed"] is True
-    assert decision["single_sector_passed"] is True
-    assert decision["passing_sector_count"] == 1
+def test_zero_trade_rows_are_excluded_from_metrics(analyzer, tmp_path):
+    write_results(tmp_path, "6E", (100, 200, -9999), (1.2, 1.4, 0), (60, 100, 0))
+    result = analyzer.analyze(tmp_path, DAILY, ["6E"])
+    core = result["core"]
+    assert core["selected_rows"] == 3
+    assert core["eligible_rows"] == 2
+    assert core["zero_trade_rows"] == 1
+    assert core["profitable_paramsets_pct"] == 100
+    assert core["median_profit_factor"] == 1.3
+    assert core["median_trades"] == 80
+    assert core["verdict"] == "PASS"
+    assert result["symbols"] == [{
+        "Symbol": "6E", "Sector": "Currencies", "Paramsets": 3,
+        "Eligible Paramsets": 2, "Profitable %": 100.0,
+        "Median PF": 1.3, "Median Trades": 80.0, "Status": "ECONOMIC",
+    }]
 
 
-def test_write_dashboard_creates_collapsed_validation_sections(tmp_path):
-    write_sample_directory(tmp_path)
-    output_path = tmp_path / "dashboard.html"
+@pytest.mark.parametrize("core_symbol,selected_rows", [("6E", 2), ("ES", 0)])
+def test_no_eligible_core_data_does_not_advance(analyzer, tmp_path, core_symbol, selected_rows):
+    write_results(tmp_path, "6E", (0, 0), (0, 0), (0, 0))
+    result = analyzer.analyze(tmp_path, DAILY, [core_symbol])
+    assert result["core"]["verdict"] == "NO DATA"
+    assert result["core"]["selected_rows"] == selected_rows
+    assert result["core"]["eligible_rows"] == 0
+    assert result["core"]["zero_trade_rows"] == selected_rows
+    assert result["decision"] == "REJECT OR REVISE"
+    assert result["symbols"][0]["Status"] == "DATA EXCLUDED"
 
-    dashboard_path, payload = write_dashboard(
-        tmp_path,
-        output_path,
-        ThresholdConfig(),
-        basket_symbols=["/ES", "/CL"],
-    )
-    html = dashboard_path.read_text(encoding="utf-8")
 
-    assert dashboard_path == output_path
-    assert payload["row_count"] == 4
-    assert "Decision Board" in html
-    assert "Overall Verdict" in html
-    assert "Cross-Sector Gates" in html
-    assert "Sector Pass Table" in html
-    assert "<details class=\"validation-section\">" in html
-    assert "<details class=\"validation-section\" open>" not in html
-    assert "Cross-Sector Validation" in html
-    assert "Single-Sector Validation" in html
-    assert "Summary Statistics" in html
-    assert "Profitability (Net Profit)" in html
-    assert "Trade Count" in html
-    assert "The dashed line marks 100 trades." in html
-    assert "PNL Heatmaps" in html
-    assert "Equity Indexes" in html
-    assert "Energy" in html
+def test_spot_fx_is_excluded_from_broad_universe(analyzer, tmp_path):
+    write_results(tmp_path, "6E")
+    write_results(tmp_path, "EURUSD", (-100, -200), (0.1, 0.2))
+    result = analyzer.analyze(tmp_path, DAILY, ["6E"])
+    assert result["broad_symbols"] == ["6E"]
+    assert result["broad"]["selected_rows"] == 2
+    assert result["broad"]["verdict"] == "PASS"
+    assert {row["Symbol"] for row in result["symbols"]} == {"6E", "EURUSD"}
+
+
+def test_html_reports_verdicts_and_escapes_profile_name(analyzer, tmp_path):
+    write_results(tmp_path, "6E")
+    profile = json.loads(DAILY.read_text())
+    profile["profile_name"] = "<script>alert(1)</script>"
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(profile))
+    html = analyzer.render_html(analyzer.analyze(tmp_path, profile_path, ["6E"]))
+    assert "Decision: ADVANCE TO WFA" in html
+    assert "Core market" in html
+    assert "Same-family transfer" in html
+    assert "Broad-universe diagnostic" in html
+    assert "<td>6E</td>" in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<script>alert(1)</script>" not in html
+
+
+@pytest.mark.parametrize("script", ["analyze_cross_sector_optimization.py", "Python_Tools/analyze_cross_sector_optimization.py"])
+@pytest.mark.parametrize("custom_json", [False, True])
+def test_cli_writes_html_and_json_from_outside_repository(tmp_path, script, custom_json):
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    write_results(inputs, "6E")
+    output = tmp_path / "reports" / "review.html"
+    audit = output.with_suffix(".json") if not custom_json else tmp_path / "audit.json"
+    command = [sys.executable, str(ROOT / script), str(inputs), "--settings", str(DAILY),
+               "--core", "/6E", "--output", str(output)]
+    if custom_json:
+        command += ["--json", str(audit)]
+    process = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True, check=True)
+    assert json.loads(process.stdout)["decision"] == "ADVANCE TO WFA"
+    assert "Decision: ADVANCE TO WFA" in output.read_text()
+    result = json.loads(audit.read_text())
+    assert result["core_symbols"] == ["6E"]
+    assert result["input_file_count"] == 1
+    assert result["core"]["median_trades"] == 80
+
+
+@pytest.mark.parametrize("script,args,report_name,decision", [
+    ("run_fx_6e_analysis.py", [], "FX_6E_GAP_FADE_Optimization_Review", "ADVANCE TO WFA"),
+    ("run_strategy_analysis.py", ["daily"], "6E_daily_review", "ADVANCE TO WFA"),
+    ("run_strategy_analysis.py", ["intraday"], "6E_intraday_review", "REJECT OR REVISE"),
+])
+def test_packaged_launchers_find_profiles(tmp_path, script, args, report_name, decision):
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    write_results(inputs, "6E")
+    command = [sys.executable, str(ROOT / "Python_Tools" / script), *args, str(inputs)]
+    if args:
+        command.append("/6E")
+    subprocess.run(command, cwd=tmp_path, capture_output=True, text=True, check=True)
+    assert f"Decision: {decision}" in (tmp_path / f"{report_name}.html").read_text()
+    result = json.loads((tmp_path / f"{report_name}.json").read_text())
+    assert result["decision"] == decision
+    assert result["core_symbols"] == ["6E"]
