@@ -1,0 +1,13 @@
+{
+  "strategies": {
+    "0001_FX_6E_GAP_FADE": {
+      "core_symbols": ["6E"]
+    },
+    "FX_6E_GAP_FADE": {
+      "core_symbols": ["6E"]
+    },
+    "ES_INTRADAY_PCTB": {
+      "core_symbols": ["ES"]
+    }
+  }
+}
