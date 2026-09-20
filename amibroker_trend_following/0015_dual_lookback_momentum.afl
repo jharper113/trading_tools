@@ -1,0 +1,30 @@
+// Dual / Multi-Lookback Momentum Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+shortLookback = Param("Short Momentum", 63, 21, 126, 7);
+midLookback = Param("Mid Momentum", 126, 63, 252, 14);
+longLookback = Param("Long Momentum", 252, 126, 360, 21);
+smoothLen = Param("Composite Smooth", 10, 1, 50, 1);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+
+composite = EMA(ROC(Close, shortLookback) + ROC(Close, midLookback) + ROC(Close, longLookback), smoothLen);
+
+Buy = Cross(composite, 0);
+Sell = Cross(0, composite);
+Short = Sell;
+Cover = Buy;
+
+ApplyStop(stopTypeTrailing, stopModePoint, 4 * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(composite, "Composite Momentum", colorBlue, styleOwnScale);

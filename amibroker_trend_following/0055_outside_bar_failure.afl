@@ -1,0 +1,34 @@
+// Outside Bar Failure
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+trendLen = Param("Trend EMA", 40, 10, 150, 5);
+maxHold = Param("Max Hold Bars", 3, 1, 5, 1);
+
+outsideBar = High > Ref(High, -1) AND Low < Ref(Low, -1);
+trendEMA = EMA(Close, trendLen);
+
+bullFailure = Ref(outsideBar, -1) AND Ref(Close, -1) < Ref(Open, -1) AND Close > Ref(High, -1);
+bearFailure = Ref(outsideBar, -1) AND Ref(Close, -1) > Ref(Open, -1) AND Close < Ref(Low, -1);
+
+Buy = bullFailure AND Close > trendEMA;
+Sell = Close < Ref(Low, -1);
+Short = bearFailure AND Close < trendEMA;
+Cover = Close > Ref(High, -1);
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.25 * ATR(atrLen), True);
+ApplyStop(stopTypeProfit, stopModePoint, 2 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

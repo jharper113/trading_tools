@@ -1,0 +1,32 @@
+// Short-Hold SuperTrend Swing
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+atrLen = Param("ATR Length", 7, 3, 30, 1);
+mult = Param("ATR Multiple", 2, 0.5, 5, 0.25);
+maxHold = Param("Max Hold Bars", 4, 1, 5, 1);
+
+mid = (High + Low) / 2;
+upper = mid + mult * ATR(atrLen);
+lower = mid - mult * ATR(atrLen);
+
+Buy = Cross(Close, upper);
+Sell = Close < lower;
+Short = Cross(lower, Close);
+Cover = Close > upper;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.5 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(upper, "Upper ATR", colorGreen, styleLine);
+Plot(lower, "Lower ATR", colorRed, styleLine);

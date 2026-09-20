@@ -1,0 +1,36 @@
+// Bollinger + RSI Mean Reversion
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+bbLen = Param("Band Length", 20, 5, 80, 5);
+bbWidth = Param("Band Width", 2, 1, 4, 0.25);
+rsiLen = Param("RSI Length", 3, 2, 14, 1);
+maxHold = Param("Max Hold Bars", 4, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+mid = MA(Close, bbLen);
+upper = BBandTop(Close, bbLen, bbWidth);
+lower = BBandBot(Close, bbLen, bbWidth);
+r = RSI(rsiLen);
+
+Buy = Close < lower AND r < 20;
+Sell = Close > mid OR r > 60;
+Short = Close > upper AND r > 80;
+Cover = Close < mid OR r < 40;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.4 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(upper, "Upper Band", colorRed, styleLine);
+Plot(mid, "Middle Band", colorBlue, styleLine);
+Plot(lower, "Lower Band", colorGreen, styleLine);

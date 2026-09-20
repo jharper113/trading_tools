@@ -12,7 +12,10 @@ wheels/
 
 # Local brokerage exports and generated reports
 data/
+logs/
 output/
+output_v2/
+output_v2_rebuild/
 
 # Office/editor temp files
 .~lock.*#

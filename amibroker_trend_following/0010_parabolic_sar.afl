@@ -1,0 +1,28 @@
+// Parabolic SAR Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 10, 1, 100, 1), spsPercentOfEquity);
+
+accel = Param("Acceleration", 0.02, 0.005, 0.1, 0.005);
+maxAccel = Param("Max Acceleration", 0.2, 0.02, 0.5, 0.01);
+trendLen = Param("Trend EMA", 100, 20, 300, 10);
+
+sarLine = SAR(accel, maxAccel);
+trendEMA = EMA(Close, trendLen);
+
+Buy = Cross(Close, sarLine) AND Close > trendEMA;
+Sell = Cross(sarLine, Close);
+Short = Cross(sarLine, Close) AND Close < trendEMA;
+Cover = Cross(Close, sarLine);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(sarLine, "SAR", colorYellow, styleDots);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

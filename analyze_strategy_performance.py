@@ -2,12 +2,18 @@ import argparse
 import csv
 import fnmatch
 import html
+import json
 import math
+import mimetypes
 import os
 import re
+import threading
 import time
 import webbrowser
 from collections import deque
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 os.environ.setdefault(
     "MPLCONFIGDIR",
@@ -15,10 +21,13 @@ os.environ.setdefault(
 )
 
 import matplotlib
+import matplotlib.dates as mdates
+import numpy as np
 import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 from calculate_risk_per_trade import (
     DEFAULT_BANKROLL,
@@ -27,9 +36,40 @@ from calculate_risk_per_trade import (
     DEFAULT_SAFE_F_INCREMENT,
     DEFAULT_SAFE_F_START,
     DEFAULT_SIMULATIONS,
+    calculate_growth_optimal_risk_by_strategy,
     calculate_risk_per_trade_by_strategy,
 )
-from extract_trade_history import parse_cash_ledger
+from extract_trade_history import (
+    extracted_trade_cash_by_day,
+    parse_cash_ledger,
+    parse_statement_ytd_summary,
+    statement_trade_cash_by_day,
+    trade_account_bucket,
+)
+from extract_trade_history_v2 import (
+    build_ytd_bridge_adjustments,
+    ytd_reconciliation_rows,
+)
+from normalize_amibroker_wfa_trade_export import (
+    normalize_file as normalize_wfa_file,
+)
+from live_degradation_monitor import (
+    DEFAULT_LIVE_MONITOR_SIMULATIONS,
+    build_live_degradation_monitor,
+)
+from prepare_amibroker_wfa_for_strategy_analysis import (
+    REQUIRED_COLUMNS as WFA_TRADE_REQUIRED_COLUMNS,
+    prepare_file as prepare_wfa_file,
+)
+from wfa_performance_simulation import (
+    DEFAULT_WFA_BLOCK_LENGTH,
+    DEFAULT_WFA_CAGR_QUANTILE,
+    DEFAULT_WFA_DRAWDOWN_LIMIT,
+    DEFAULT_WFA_MAX_DRAWDOWN_BREACH_PROBABILITY,
+    DEFAULT_WFA_MAX_RISK_FRACTION,
+    DEFAULT_WFA_SIMULATIONS,
+    build_wfa_simulation,
+)
 from src.enrich import (
     FUTURES_CONTRACT_PATTERN,
     get_contract_multiplier,
@@ -56,19 +96,52 @@ REALIZED_TRADES_FILE = f"{OUTPUT_DIR}/realized_trades.csv"
 EXPIRED_OPTION_SETTLEMENT_FILE = f"{OUTPUT_DIR}/expired_option_settlement_check.csv"
 OPEN_POSITIONS_FILE = f"{OUTPUT_DIR}/open_positions.csv"
 OPEN_POSITION_AUDIT_FILE = f"{OUTPUT_DIR}/open_position_audit.csv"
+OPEN_POSITIONS_REVIEW_FILE = f"{OUTPUT_DIR}/open_positions_review.csv"
+OPEN_POSITIONS_DIAGNOSIS_FILE = f"{OUTPUT_DIR}/open_positions_diagnosis.csv"
 DATA_QUALITY_FILE = f"{OUTPUT_DIR}/data_quality_warnings.csv"
 SETTLEMENT_COVERAGE_FILE = f"{OUTPUT_DIR}/settlement_coverage.csv"
+YTD_STATEMENT_SUMMARY_FILE = f"{OUTPUT_DIR}/ytd_statement_summary.csv"
+YTD_POSITION_RECONCILIATION_FILE = (
+    f"{OUTPUT_DIR}/ytd_position_pnl_reconciliation.csv"
+)
+YTD_FEE_RECONCILIATION_FILE = f"{OUTPUT_DIR}/ytd_fee_reconciliation.csv"
+YTD_CLOSED_PNL_RECONCILIATION_FILE = (
+    f"{OUTPUT_DIR}/ytd_closed_pnl_reconciliation.csv"
+)
+YTD_TRADE_REVIEW_FILE = f"{OUTPUT_DIR}/ytd_trade_adjustment_review.csv"
+YTD_STRATEGY_IMPACT_FILE = f"{OUTPUT_DIR}/ytd_strategy_adjustment_impact.csv"
+TRADE_HISTORY_VALIDATION_SUMMARY_FILE = (
+    f"{OUTPUT_DIR}/trade_history_validation_summary.csv"
+)
+TRADE_HISTORY_VALIDATION_ISSUES_FILE = (
+    f"{OUTPUT_DIR}/trade_history_validation_issues.csv"
+)
 STRATEGY_DECISION_FILE = f"{OUTPUT_DIR}/strategy_decision_board.csv"
 CAPITAL_ALLOCATION_FILE = f"{OUTPUT_DIR}/capital_allocation.csv"
 PNL_CORRELATION_FILE = f"{OUTPUT_DIR}/strategy_pnl_correlation.csv"
 DRAWDOWN_CORRELATION_FILE = f"{OUTPUT_DIR}/strategy_drawdown_correlation.csv"
 DRAWDOWN_OVERLAP_FILE = f"{OUTPUT_DIR}/strategy_drawdown_overlap.csv"
+WFA_VALIDATION_GATES_FILE = f"{OUTPUT_DIR}/wfa_validation_gates.csv"
+WFA_SEGMENT_SUMMARY_FILE = f"{OUTPUT_DIR}/wfa_segment_summary.csv"
+WFA_SIMULATION_RESULTS_FILE = f"{OUTPUT_DIR}/wfa_simulation_results.csv"
+WFA_SIMULATION_IQR_FILE = f"{OUTPUT_DIR}/wfa_simulation_iqr.csv"
+WFA_RISK_SEARCH_FILE = f"{OUTPUT_DIR}/wfa_risk_search.csv"
+WFA_PREPARED_INPUT_FILE = f"{OUTPUT_DIR}/wfa_prepared_analyzer_input.csv"
+WFA_NORMALIZED_INPUT_FILE = f"{OUTPUT_DIR}/wfa_normalized_trade_export.csv"
+LIVE_DEGRADATION_SUMMARY_FILE = (
+    f"{OUTPUT_DIR}/live_degradation_monitor.csv"
+)
+LIVE_DEGRADATION_BANDS_FILE = (
+    f"{OUTPUT_DIR}/live_degradation_metric_bands.csv"
+)
 DASHBOARD_FILE = f"{OUTPUT_DIR}/strategy_dashboard.html"
+DEFAULT_STRATEGY_LIBRARY_DIR = "./output/strategy_library"
 OPTION_TYPES = {
     "CALL",
     "PUT",
 }
 HIGH_CORRELATION_THRESHOLD = 0.7
+STRATEGY_LIBRARY_MIN_CORRELATION_DAYS = 20
 ACCOUNT_STATEMENT_PATTERNS = (
     "*AccountStatement*.csv",
     "*Statement*.csv",
@@ -142,6 +215,9 @@ def finish_progress(message, start_time):
 
 
 def clean_strategy_name(value):
+    if value is None or pd.isna(value):
+        return ""
+
     return re.sub(
         r"\s+",
         " ",
@@ -400,6 +476,99 @@ def load_cleaned_trades(path):
     return df
 
 
+def infer_wfa_starting_equity(input_path):
+    input_path = Path(input_path)
+    inferred_values = []
+
+    for candidate in sorted(input_path.parent.glob("*.csv")):
+        if candidate.resolve() == input_path.resolve():
+            continue
+
+        try:
+            report = pd.read_csv(candidate)
+        except (OSError, pd.errors.ParserError, UnicodeError):
+            continue
+
+        required = {"Mode", "Net Profit", "Net % Profit"}
+        if not required.issubset(report.columns):
+            continue
+
+        in_sample = report[
+            report["Mode"].astype(str).str.upper() == "IS"
+        ].copy()
+        net_profit = pd.to_numeric(in_sample["Net Profit"], errors="coerce")
+        net_profit_pct = pd.to_numeric(
+            in_sample["Net % Profit"], errors="coerce"
+        )
+        valid = net_profit.notna() & net_profit_pct.notna() & net_profit_pct.ne(0)
+        inferred_values.extend(
+            (net_profit[valid] / (net_profit_pct[valid] / 100)).tolist()
+        )
+
+    if not inferred_values:
+        return None
+
+    median_equity = float(pd.Series(inferred_values).median())
+    rounding_unit = 1000 if median_equity >= 10000 else 1
+    return round(median_equity / rounding_unit) * rounding_unit
+
+
+def default_wfa_strategy_name(input_path):
+    parent_name = Path(input_path).parent.name
+    base = re.sub(r"_reports$", "", parent_name, flags=re.IGNORECASE).strip()
+    return f"{base or Path(input_path).stem}_OOS"
+
+
+def prepare_wfa_analysis_input(
+    input_path,
+    output_path,
+    starting_equity=None,
+    strategy_name=None,
+    normalized_output_path=None,
+):
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+    normalized_output_path = Path(
+        normalized_output_path
+        or output_path.with_name("wfa_normalized_trade_export.csv")
+    )
+    normalize_wfa_file(input_path, normalized_output_path)
+
+    header = pd.read_csv(
+        normalized_output_path,
+        nrows=0,
+        encoding="utf-8-sig",
+    )
+    missing = set(WFA_TRADE_REQUIRED_COLUMNS) - set(header.columns)
+    if missing:
+        raise ValueError(
+            "--wfa-validation received an input that is neither cleaned trade "
+            "history nor a recognized AmiBroker WFA trade export. Missing WFA "
+            "column(s): "
+            + ", ".join(sorted(missing))
+        )
+
+    resolved_equity = (
+        float(starting_equity)
+        if starting_equity is not None
+        else infer_wfa_starting_equity(input_path)
+    )
+    if resolved_equity is None:
+        raise ValueError(
+            "Could not infer WFA starting equity from a companion summary CSV. "
+            "Pass --wfa-starting-equity explicitly."
+        )
+
+    resolved_strategy = strategy_name or default_wfa_strategy_name(input_path)
+    prepare_wfa_file(
+        normalized_output_path,
+        output_path,
+        resolved_strategy,
+        resolved_equity,
+    )
+    return Path(output_path), resolved_equity, resolved_strategy
+
+
 def is_option_trade(row):
     return str(row.get("Type", "")).upper() in OPTION_TYPES
 
@@ -514,13 +683,17 @@ def normalized_spread(row):
     return spread
 
 
-def position_key(row):
+def position_key(row, include_strategy=True):
     spread = normalized_spread(row)
+    strategy_key = (
+        (key_value(row.get("Strategy_Name")),)
+        if include_strategy
+        else ()
+    )
 
     if is_option_trade(row):
         if spread == "STRADDLE":
-            return (
-                key_value(row.get("Strategy_Name")),
+            return strategy_key + (
                 key_value(row.get("Symbol")),
                 key_value(row.get("Exp")),
                 key_value(row.get("Strike")),
@@ -528,16 +701,14 @@ def position_key(row):
             )
 
         if spread == "VERTICAL":
-            return (
-                key_value(row.get("Strategy_Name")),
+            return strategy_key + (
                 key_value(row.get("Symbol")),
                 key_value(row.get("Exp")),
                 key_value(row.get("Type")),
                 spread,
             )
 
-        return (
-            key_value(row.get("Strategy_Name")),
+        return strategy_key + (
             key_value(row.get("Symbol")),
             key_value(row.get("Exp")),
             key_value(row.get("Strike")),
@@ -545,11 +716,44 @@ def position_key(row):
             spread,
         )
 
-    return (
-        key_value(row.get("Strategy_Name")),
+    return strategy_key + (
         key_value(row.get("Symbol")),
         spread,
     )
+
+
+def find_open_lots(open_lots, row, side, require_opposite_side=False):
+    key = position_key(row)
+    lots = open_lots.get(key)
+
+    if lots:
+        return lots
+
+    fallback_key = position_key(row, include_strategy=False)
+    matches = []
+
+    for candidate_lots in open_lots.values():
+        if not candidate_lots:
+            continue
+
+        if require_opposite_side and candidate_lots[0]["side"] == side:
+            continue
+
+        candidate_row = candidate_lots[0].get("row")
+
+        if candidate_row is None:
+            continue
+
+        if position_key(
+            candidate_row,
+            include_strategy=False,
+        ) == fallback_key:
+            matches.append(candidate_lots)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
 
 
 def latest_option_expirations(df):
@@ -676,7 +880,12 @@ def filter_realized_trades(df, as_of_date=None):
         key = position_key(row)
 
         if pos_effect == "TO OPEN":
-            lots = open_lots.get(key)
+            lots = find_open_lots(
+                open_lots,
+                row,
+                side,
+                require_opposite_side=True,
+            )
 
             if lots and lots[0]["side"] != side:
                 open_matches, matched_qty, remaining_qty = match_open_lots(
@@ -711,13 +920,19 @@ def filter_realized_trades(df, as_of_date=None):
                 "remaining_qty": qty,
                 "side": side,
                 "index": index,
+                "row": row,
             })
             continue
 
         if pos_effect != "TO CLOSE":
             continue
 
-        lots = open_lots.get(key)
+        lots = find_open_lots(
+            open_lots,
+            row,
+            side,
+            require_opposite_side=True,
+        )
 
         if not lots:
             realized_indices.add(index)
@@ -797,6 +1012,39 @@ def primary_package_row(rows):
     return rows[0]
 
 
+def source_row_ids_from_value(value):
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        values = value
+    elif isinstance(value, tuple):
+        values = list(value)
+    elif isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned.startswith("[") and cleaned.endswith("]"):
+            cleaned = cleaned[1:-1]
+        values = re.split(r"[;,]\s*", cleaned)
+    else:
+        values = [value]
+
+    row_ids = []
+    for item in values:
+        if item is None or item == "":
+            continue
+
+        try:
+            row_ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+
+    return row_ids
+
+
+def source_row_ids_from_row(row):
+    return source_row_ids_from_value(row.get("source_row_ids"))
+
+
 def package_instrument_key(row):
     return (
         key_value(row.get("Symbol")),
@@ -873,6 +1121,10 @@ def aggregate_execution_packages(df):
                 key_value(row.get("Type")) or key_value(row.get("Symbol"))
                 for row in rows
             ),
+            "source_row_ids": [
+                int(index)
+                for index in group.index
+            ],
         }
 
         margin_requirement = package["margin_requirement"]
@@ -986,8 +1238,16 @@ def build_realized_trade_record(
         str(row["Exec Time"])
         for row in open_rows
     )
+    source_row_ids = []
+    for row in open_rows:
+        source_row_ids.extend(source_row_ids_from_row(row))
 
-    return {
+    if close_row is not None:
+        source_row_ids.extend(source_row_ids_from_row(close_row))
+
+    source_row_ids = sorted(set(source_row_ids))
+
+    record = {
         "Exec Time": exec_time,
         "timestamp": timestamp,
         "Strategy_Name": source_row.get("Strategy_Name"),
@@ -1004,6 +1264,7 @@ def build_realized_trade_record(
         "realized_status": status,
         "execution_leg_count": source_row.get("execution_leg_count", 1),
         "execution_symbols": source_row.get("execution_symbols"),
+        "source_row_ids": source_row_ids,
         "open_net_pnl": open_net_pnl,
         "close_net_pnl": close_net_pnl,
         "trade_pnl": trade_pnl,
@@ -1014,6 +1275,12 @@ def build_realized_trade_record(
         "log_return_on_margin": log_return_on_margin,
         "starting_equity": source_row.get("starting_equity"),
     }
+
+    for column in source_row.index:
+        if str(column).startswith("WFA_"):
+            record[column] = source_row.get(column)
+
+    return record
 
 
 def aggregate_realized_trades(df, as_of_date=None):
@@ -1047,7 +1314,12 @@ def aggregate_realized_trades(df, as_of_date=None):
         key = position_key(row)
 
         if pos_effect == "TO OPEN":
-            lots = open_lots.get(key)
+            lots = find_open_lots(
+                open_lots,
+                row,
+                side,
+                require_opposite_side=True,
+            )
 
             if lots and lots[0]["side"] != side:
                 open_matches, matched_qty, remaining_qty = match_open_lots(
@@ -1084,7 +1356,12 @@ def aggregate_realized_trades(df, as_of_date=None):
         if pos_effect != "TO CLOSE":
             continue
 
-        lots = open_lots.get(key)
+        lots = find_open_lots(
+            open_lots,
+            row,
+            side,
+            require_opposite_side=True,
+        )
 
         open_matches, matched_qty, _ = match_open_lots(
             lots,
@@ -1177,7 +1454,12 @@ def get_open_positions(df, as_of_date=None):
         key = position_key(row)
 
         if pos_effect == "TO OPEN":
-            lots = open_lots.get(key)
+            lots = find_open_lots(
+                open_lots,
+                row,
+                side,
+                require_opposite_side=True,
+            )
 
             if lots and lots[0]["side"] != side:
                 _, _, remaining_qty = match_open_lots(
@@ -1205,7 +1487,12 @@ def get_open_positions(df, as_of_date=None):
         if pos_effect != "TO CLOSE":
             continue
 
-        lots = open_lots.get(key)
+        lots = find_open_lots(
+            open_lots,
+            row,
+            side,
+            require_opposite_side=True,
+        )
         match_open_lots(
             lots,
             side,
@@ -1420,6 +1707,1054 @@ def parse_statement_position_summary(statement_file):
             })
 
     return pd.DataFrame(rows)
+
+
+def latest_statement_ytd(statement_file):
+    if not statement_file:
+        return {}, pd.DataFrame()
+
+    with open(statement_file, errors="replace") as file:
+        return parse_statement_ytd_summary(
+            file.readlines(),
+            statement_file,
+        )
+
+
+def statement_end_of_day(statement_ytd_summary):
+    statement_file = statement_ytd_summary.get("statement_file")
+
+    if not statement_file:
+        return None
+
+    match = re.search(
+        r"(\d{4}-\d{2}-\d{2})",
+        os.path.basename(str(statement_file)),
+    )
+
+    if not match:
+        return None
+
+    statement_date = pd.Timestamp(match.group(1))
+    return statement_date + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+
+
+def numeric_column(df, column):
+    if df is None or df.empty or column not in df.columns:
+        return pd.Series(dtype=float)
+
+    return pd.to_numeric(
+        df[column],
+        errors="coerce",
+    ).fillna(0.0)
+
+
+def zero_small_money(value, tolerance=0.005):
+    number = parse_number(value)
+
+    if number is None:
+        return value
+
+    return 0.0 if abs(number) <= tolerance else value
+
+
+def ytd_filter(df, timestamp_column, year):
+    if df is None or df.empty or year is None or timestamp_column not in df.columns:
+        return df.iloc[0:0].copy() if df is not None else pd.DataFrame()
+
+    if timestamp_column == "Exec Time":
+        timestamps = pd.to_datetime(
+            df[timestamp_column],
+            format="%m/%d/%y %H:%M:%S",
+            errors="coerce",
+        )
+    else:
+        timestamps = pd.to_datetime(
+            df[timestamp_column],
+            errors="coerce",
+        )
+
+    return df.loc[
+        timestamps.dt.year == int(year)
+    ].copy()
+
+
+def fee_bucket_for_statement(bucket):
+    bucket = str(bucket).strip().lower()
+
+    if bucket == "cash":
+        return "equity"
+
+    return bucket
+
+
+def script_fee_reconciliation(cleaned_trades, statement_summary):
+    if not statement_summary:
+        return pd.DataFrame()
+
+    year = statement_summary.get("statement_year")
+    working = ytd_filter(
+        cleaned_trades,
+        "timestamp",
+        year,
+    )
+
+    if working.empty:
+        script_by_bucket = pd.Series(dtype=float)
+    else:
+        working = working.copy()
+        working["fee_bucket"] = working.apply(
+            lambda row: fee_bucket_for_statement(trade_account_bucket(row)),
+            axis=1,
+        )
+        working["fees"] = numeric_column(working, "fees")
+        script_by_bucket = working.groupby("fee_bucket")["fees"].sum()
+
+    rows = [
+        {
+            "fee_bucket": "equity",
+            "statement_fees": statement_summary.get(
+                "equity_commissions_fees_ytd",
+                0.0,
+            ),
+            "script_fees": script_by_bucket.get("equity", 0.0),
+            "likely_cause": (
+                "Static/index-option fee model or approved fee corrections "
+                "do not exactly match broker YTD equity fees."
+            ),
+        },
+        {
+            "fee_bucket": "futures",
+            "statement_fees": statement_summary.get(
+                "futures_commissions_fees_ytd",
+                0.0,
+            ),
+            "script_fees": script_by_bucket.get("futures", 0.0),
+            "likely_cause": (
+                "Static futures/futures-option fee model differs from "
+                "broker-reported YTD futures fees."
+            ),
+        },
+        {
+            "fee_bucket": "crypto",
+            "statement_fees": statement_summary.get(
+                "crypto_trading_fees_ytd",
+                0.0,
+            ),
+            "script_fees": script_by_bucket.get("crypto", 0.0),
+            "likely_cause": (
+                "Crypto trading fees are reported in the account summary, "
+                "but lookup_fees currently stores zero for crypto rows."
+            ),
+        },
+        {
+            "fee_bucket": "forex",
+            "statement_fees": statement_summary.get(
+                "forex_commissions_ytd",
+                0.0,
+            ),
+            "script_fees": script_by_bucket.get("forex", 0.0),
+            "likely_cause": "Forex fees are compared directly to forex rows.",
+        },
+    ]
+    result = pd.DataFrame(rows)
+    result["fee_delta_statement_minus_script"] = (
+        result["statement_fees"] - result["script_fees"]
+    )
+
+    return result
+
+
+def script_open_pnl_by_symbol(open_positions):
+    if open_positions is None or open_positions.empty:
+        return pd.DataFrame(columns=[
+            "Symbol",
+            "script_open_pnl",
+            "script_open_position_rows",
+            "script_open_remaining_qty",
+        ])
+
+    working = open_positions.copy()
+    working["margin_requirement"] = numeric_column(
+        working,
+        "margin_requirement",
+    )
+    working["return_on_margin"] = numeric_column(
+        working,
+        "return_on_margin",
+    )
+    working["remaining_qty"] = numeric_column(
+        working,
+        "remaining_qty",
+    )
+    working["script_open_pnl"] = (
+        working["margin_requirement"]
+        * working["return_on_margin"]
+    )
+
+    return (
+        working.groupby("Symbol", dropna=False)
+        .agg(
+            script_open_pnl=("script_open_pnl", "sum"),
+            script_open_position_rows=("Symbol", "size"),
+            script_open_remaining_qty=("remaining_qty", "sum"),
+        )
+        .reset_index()
+    )
+
+
+def open_pnl_reconciliation(statement_positions, open_positions):
+    if statement_positions is None or statement_positions.empty:
+        return pd.DataFrame()
+
+    statement = statement_positions[
+        [
+            "Symbol",
+            "statement_open_pnl",
+            "statement_ytd_pnl",
+            "statement_closed_gross_pnl",
+        ]
+    ].copy()
+    script_open = script_open_pnl_by_symbol(open_positions)
+    result = pd.merge(
+        statement,
+        script_open,
+        on="Symbol",
+        how="outer",
+    ).fillna(0.0)
+    result["open_pnl_delta_statement_minus_script"] = (
+        result["statement_open_pnl"] - result["script_open_pnl"]
+    )
+    result["likely_cause"] = result.apply(
+        lambda row: open_pnl_difference_cause(row),
+        axis=1,
+    )
+
+    return result.sort_values(
+        "open_pnl_delta_statement_minus_script",
+        key=lambda series: series.abs(),
+        ascending=False,
+    )
+
+
+def open_pnl_difference_cause(row, tolerance=1.0):
+    statement_open = row.get("statement_open_pnl", 0.0)
+    script_open = row.get("script_open_pnl", 0.0)
+
+    if abs(statement_open - script_open) <= tolerance:
+        return "matches_statement_open_pnl"
+
+    if script_open and not statement_open:
+        return "script_has_open_position_not_in_statement_pnl_table"
+
+    if statement_open and not script_open:
+        return "statement_has_mark_to_market_open_pnl_not_valued_by_script"
+
+    return (
+        "script_open_pnl_uses_opening_cash_flow_or_margin_return_not "
+        "statement mark-to-market open PnL"
+    )
+
+
+def closed_pnl_reconciliation(statement_positions, realized_trades):
+    if statement_positions is None or statement_positions.empty:
+        return pd.DataFrame()
+
+    statement = statement_positions.copy()
+    statement["statement_root_symbol"] = statement["Symbol"].apply(
+        normalize_root_symbol,
+    )
+
+    script = realized_trades.copy() if realized_trades is not None else pd.DataFrame()
+
+    if script.empty:
+        script_by_root = pd.DataFrame(columns=[
+            "statement_root_symbol",
+            "script_realized_gross_pnl",
+            "script_realized_fees",
+            "script_realized_net_pnl",
+            "script_realized_trade_count",
+        ])
+    else:
+        script["statement_root_symbol"] = script["Symbol"].apply(
+            normalize_root_symbol,
+        )
+        script["trade_pnl"] = numeric_column(script, "trade_pnl")
+        script["fees"] = numeric_column(script, "fees")
+        script["net_pnl"] = numeric_column(script, "net_pnl")
+        script_by_root = (
+            script.groupby("statement_root_symbol", dropna=False)
+            .agg(
+                script_realized_gross_pnl=("trade_pnl", "sum"),
+                script_realized_fees=("fees", "sum"),
+                script_realized_net_pnl=("net_pnl", "sum"),
+                script_realized_trade_count=("Symbol", "size"),
+            )
+            .reset_index()
+        )
+
+    statement_by_root = (
+        statement.groupby("statement_root_symbol", dropna=False)
+        .agg(
+            statement_symbols=("Symbol", lambda values: "; ".join(sorted(set(values)))),
+            statement_open_pnl=("statement_open_pnl", "sum"),
+            statement_ytd_pnl=("statement_ytd_pnl", "sum"),
+            statement_closed_gross_pnl=("statement_closed_gross_pnl", "sum"),
+        )
+        .reset_index()
+    )
+    result = pd.merge(
+        statement_by_root,
+        script_by_root,
+        on="statement_root_symbol",
+        how="outer",
+    ).fillna(0.0)
+    result["closed_gross_delta_statement_minus_script"] = (
+        result["statement_closed_gross_pnl"]
+        - result["script_realized_gross_pnl"]
+    )
+    result["likely_cause"] = result.apply(
+        lambda row: closed_pnl_difference_cause(row),
+        axis=1,
+    )
+
+    return result.sort_values(
+        "closed_gross_delta_statement_minus_script",
+        key=lambda series: series.abs(),
+        ascending=False,
+    )
+
+
+def closed_pnl_difference_cause(row, tolerance=1.0):
+    delta = row.get("closed_gross_delta_statement_minus_script", 0.0)
+    symbol = str(row.get("statement_root_symbol", ""))
+
+    if abs(delta) <= tolerance:
+        return "matches_statement_closed_gross_pnl"
+
+    if symbol.startswith("/MCL") or symbol.startswith("/MGC"):
+        return (
+            "futures cash-ledger corrections used settlement cash flows; "
+            "review futures mark-to-market ADJ handling for this root."
+        )
+
+    if symbol in {"SPX", "XSP"}:
+        return (
+            "expired index option settlement or grouped option-package "
+            "matching differs from statement P/L YTD."
+        )
+
+    if symbol.startswith("/"):
+        return (
+            "futures/futures-option contract grouping differs from statement "
+            "root-level P/L YTD."
+        )
+
+    return "review symbol-level open/close matching and missing executions"
+
+
+def load_cash_trade_correction_review(input_file, corrections_file=None):
+    if corrections_file is None:
+        corrections_file = os.path.join(
+            os.path.dirname(os.path.dirname(REALIZED_TRADES_FILE)),
+            "cash_trade_corrections.csv",
+        )
+
+    if not os.path.isfile(corrections_file):
+        return pd.DataFrame()
+
+    corrections = pd.read_csv(corrections_file)
+
+    if corrections.empty:
+        return pd.DataFrame()
+
+    try:
+        master = pd.read_csv(input_file)
+    except FileNotFoundError:
+        master = pd.DataFrame()
+
+    join_columns = [
+        "statement_file",
+        "statement_trade_row",
+    ]
+
+    if not master.empty and set(join_columns).issubset(master.columns):
+        master_rows = master[
+            join_columns
+            + [
+                column
+                for column in [
+                    "Exec Time",
+                    "Strategy_Name",
+                    "Symbol",
+                    "Spread",
+                    "Side",
+                    "Qty",
+                    "Pos Effect",
+                    "Price",
+                ]
+                if column in master.columns
+            ]
+        ]
+        corrections = pd.merge(
+            corrections,
+            master_rows,
+            on=join_columns,
+            how="left",
+        )
+
+    for column in [
+        "original_trade_pnl",
+        "corrected_trade_pnl",
+        "original_net_pnl",
+        "corrected_net_pnl",
+        "original_fees",
+        "corrected_fees",
+    ]:
+        corrections[column] = numeric_column(corrections, column)
+
+    futures_mask = corrections.apply(
+        lambda row: str(row.get("Spread", "")).upper() == "FUTURE"
+        or str(row.get("Type", "")).upper() == "FUTURE",
+        axis=1,
+    )
+    corrections.loc[
+        futures_mask,
+        "corrected_trade_pnl",
+    ] = corrections.loc[
+        futures_mask,
+        "original_trade_pnl",
+    ]
+    corrections.loc[
+        futures_mask,
+        "corrected_net_pnl",
+    ] = (
+        corrections.loc[futures_mask, "corrected_trade_pnl"]
+        - corrections.loc[futures_mask, "corrected_fees"]
+    )
+    corrections["trade_pnl_correction_delta"] = (
+        corrections["corrected_trade_pnl"]
+        - corrections["original_trade_pnl"]
+    )
+    corrections["net_pnl_correction_delta"] = (
+        corrections["corrected_net_pnl"]
+        - corrections["original_net_pnl"]
+    )
+    corrections["review_recommendation"] = corrections.apply(
+        lambda row: trade_review_recommendation(row),
+        axis=1,
+    )
+
+    return corrections[
+        corrections["trade_pnl_correction_delta"].abs() > 1.0
+    ].sort_values(
+        "trade_pnl_correction_delta",
+        key=lambda series: series.abs(),
+        ascending=False,
+    )
+
+
+def trade_review_recommendation(row):
+    symbol = str(row.get("Symbol", ""))
+    bucket = trade_account_bucket(row)
+
+    if bucket == "futures":
+        return (
+            "Review before applying: futures trade cash-flow corrections can "
+            "represent daily settlement, not open-to-close PnL."
+        )
+
+    if symbol in {"SPX", "XSP"}:
+        return (
+            "Review expired option settlement and package matching against "
+            "statement P/L YTD."
+        )
+
+    return "Review cash-ledger correction against the source statement row."
+
+
+def strategy_ytd_adjustment_impact(realized_trades, trade_review):
+    if realized_trades is None or realized_trades.empty:
+        return pd.DataFrame()
+
+    current = realized_trades.copy()
+    current["net_pnl"] = numeric_column(current, "net_pnl")
+    current_summary = (
+        current.groupby("Strategy_Name", dropna=False)
+        .agg(
+            current_realized_net_pnl=("net_pnl", "sum"),
+            realized_trade_count=("Strategy_Name", "size"),
+        )
+        .reset_index()
+    )
+
+    if (
+        trade_review is None
+        or trade_review.empty
+        or "Strategy_Name" not in trade_review.columns
+    ):
+        current_summary["review_adjustment_if_reverted_to_formula_pnl"] = 0.0
+    else:
+        review = trade_review.copy()
+        review["net_pnl_review_adjustment"] = (
+            review["original_net_pnl"] - review["corrected_net_pnl"]
+        )
+        suspect = review[
+            review["review_recommendation"]
+            .astype(str)
+            .str.contains("futures trade cash-flow", na=False)
+        ]
+        if suspect.empty:
+            current_summary["review_adjustment_if_reverted_to_formula_pnl"] = 0.0
+        else:
+            adjustment = (
+                suspect.groupby("Strategy_Name", dropna=False)
+                .agg(
+                    review_adjustment_if_reverted_to_formula_pnl=(
+                        "net_pnl_review_adjustment",
+                        "sum",
+                    ),
+                    review_rows=("Strategy_Name", "size"),
+                )
+                .reset_index()
+            )
+            current_summary = pd.merge(
+                current_summary,
+                adjustment,
+                on="Strategy_Name",
+                how="left",
+            )
+            current_summary["review_adjustment_if_reverted_to_formula_pnl"] = (
+                current_summary["review_adjustment_if_reverted_to_formula_pnl"]
+                .fillna(0.0)
+            )
+
+    current_summary["projected_net_pnl_after_review_adjustment"] = (
+        current_summary["current_realized_net_pnl"]
+        + current_summary["review_adjustment_if_reverted_to_formula_pnl"]
+    )
+
+    return current_summary
+
+
+def build_ytd_statement_reports(
+    statement_summary,
+    statement_positions,
+    cleaned_trades,
+    realized_trades,
+    open_positions,
+    input_file,
+    corrections_file=None,
+):
+    if not statement_summary:
+        return {
+            "summary": pd.DataFrame(),
+            "open_pnl": pd.DataFrame(),
+            "fees": pd.DataFrame(),
+            "closed_pnl": pd.DataFrame(),
+            "trade_review": pd.DataFrame(),
+            "strategy_impact": pd.DataFrame(),
+        }
+
+    summary = pd.DataFrame([statement_summary]).copy()
+    year = statement_summary.get("statement_year")
+    realized_ytd = ytd_filter(
+        realized_trades,
+        "timestamp",
+        year,
+    )
+    cleaned_timestamp_column = (
+        "Exec Time"
+        if cleaned_trades is not None and "Exec Time" in cleaned_trades.columns
+        else "timestamp"
+    )
+    cleaned_ytd = ytd_filter(
+        cleaned_trades,
+        cleaned_timestamp_column,
+        year,
+    )
+    realized_closed_gross = numeric_column(
+        realized_ytd,
+        "trade_pnl",
+    ).sum()
+    script_closed_fees = numeric_column(
+        cleaned_ytd,
+        "fees",
+    ).sum()
+    realized_closed_net = realized_closed_gross - script_closed_fees
+    has_trade_history_pnl = {
+        "trade_pnl",
+        "net_pnl",
+    }.issubset(cleaned_ytd.columns)
+    trade_history_closed_gross = (
+        numeric_column(cleaned_ytd, "trade_pnl").sum()
+        if has_trade_history_pnl
+        else realized_closed_gross
+    )
+    trade_history_closed_net = (
+        numeric_column(cleaned_ytd, "net_pnl").sum()
+        if has_trade_history_pnl
+        else realized_closed_net
+    )
+    ytd_bridge_adjustments = (
+        build_ytd_bridge_adjustments(
+            statement_summary,
+            statement_positions,
+            cleaned_trades,
+        )
+        if has_trade_history_pnl
+        else pd.DataFrame()
+    )
+    ytd_reconciliation = (
+        ytd_reconciliation_rows(
+            statement_summary,
+            cleaned_trades,
+            ytd_bridge_adjustments,
+        )
+        if has_trade_history_pnl
+        else pd.DataFrame()
+    )
+    closed_net_reconciliation = pd.DataFrame()
+    closed_gross_reconciliation = pd.DataFrame()
+
+    if ytd_reconciliation is not None and not ytd_reconciliation.empty:
+        closed_net_reconciliation = ytd_reconciliation[
+            ytd_reconciliation["metric"].eq("closed_net_ytd_pnl")
+        ]
+        closed_gross_reconciliation = ytd_reconciliation[
+            ytd_reconciliation["metric"].eq("closed_gross_ytd_pnl")
+        ]
+
+    adjusted_closed_net = trade_history_closed_net
+    adjusted_closed_gross = trade_history_closed_gross
+    statement_closed_net = parse_number(
+        statement_summary.get("statement_closed_net_ytd_pnl")
+    )
+    statement_closed_gross = parse_number(
+        statement_summary.get("statement_closed_gross_ytd_pnl")
+    )
+    closed_net_delta = (
+        statement_closed_net - adjusted_closed_net
+        if statement_closed_net is not None
+        else None
+    )
+    closed_gross_delta = (
+        statement_closed_gross - adjusted_closed_gross
+        if statement_closed_gross is not None
+        else None
+    )
+    open_trade_exclusion = 0.0
+    ytd_bridge_adjustment = 0.0
+    total_closed_pnl_adjustment = 0.0
+
+    if not closed_net_reconciliation.empty:
+        row = closed_net_reconciliation.iloc[0]
+        trade_history_closed_net = row.get(
+            "trade_history_value",
+            trade_history_closed_net,
+        )
+        adjusted_closed_net = row.get(
+            "adjusted_trade_history_value",
+            adjusted_closed_net,
+        )
+        closed_net_delta = row.get(
+            "difference_after_bridge",
+            closed_net_delta,
+        )
+        open_trade_exclusion = row.get("open_trade_exclusion", 0.0)
+        ytd_bridge_adjustment = row.get("ytd_bridge_adjustment", 0.0)
+        total_closed_pnl_adjustment = row.get("bridge_adjustment", 0.0)
+
+    if not closed_gross_reconciliation.empty:
+        row = closed_gross_reconciliation.iloc[0]
+        trade_history_closed_gross = row.get(
+            "trade_history_value",
+            trade_history_closed_gross,
+        )
+        adjusted_closed_gross = row.get(
+            "adjusted_trade_history_value",
+            adjusted_closed_gross,
+        )
+        closed_gross_delta = row.get(
+            "difference_after_bridge",
+            closed_gross_delta,
+        )
+
+    closed_net_delta = zero_small_money(closed_net_delta)
+    closed_gross_delta = zero_small_money(closed_gross_delta)
+    adjusted_closed_net = zero_small_money(adjusted_closed_net)
+    adjusted_closed_gross = zero_small_money(adjusted_closed_gross)
+    summary["realized_trade_closed_gross_pnl"] = realized_closed_gross
+    summary["realized_trade_closed_net_pnl"] = realized_closed_net
+    summary["trade_history_closed_gross_ytd_pnl"] = trade_history_closed_gross
+    summary["trade_history_closed_net_ytd_pnl"] = trade_history_closed_net
+    summary["trade_history_adjusted_closed_gross_ytd_pnl"] = adjusted_closed_gross
+    summary["trade_history_adjusted_closed_net_ytd_pnl"] = adjusted_closed_net
+    summary["open_trade_exclusion"] = open_trade_exclusion
+    summary["ytd_bridge_adjustment"] = ytd_bridge_adjustment
+    summary["total_closed_pnl_adjustment"] = total_closed_pnl_adjustment
+    summary["closed_net_delta_statement_minus_trade_history"] = closed_net_delta
+    summary["closed_gross_delta_statement_minus_trade_history"] = (
+        closed_gross_delta
+    )
+    summary["script_realized_closed_gross_pnl"] = adjusted_closed_gross
+    summary["script_realized_closed_fees"] = script_closed_fees
+    summary["script_realized_closed_net_pnl"] = adjusted_closed_net
+    summary["closed_net_delta_statement_minus_script"] = closed_net_delta
+    open_reconciliation = open_pnl_reconciliation(
+        statement_positions,
+        open_positions,
+    )
+    fee_reconciliation = script_fee_reconciliation(
+        cleaned_trades,
+        statement_summary,
+    )
+    closed_reconciliation = closed_pnl_reconciliation(
+        statement_positions,
+        realized_ytd,
+    )
+    trade_review = load_cash_trade_correction_review(
+        input_file,
+        corrections_file=corrections_file,
+    )
+    strategy_impact = strategy_ytd_adjustment_impact(
+        realized_ytd,
+        trade_review,
+    )
+
+    return {
+        "summary": summary,
+        "open_pnl": open_reconciliation,
+        "fees": fee_reconciliation,
+        "closed_pnl": closed_reconciliation,
+        "trade_review": trade_review,
+        "strategy_impact": strategy_impact,
+    }
+
+
+def cash_ledger_daily_reconciliation(cleaned_trades, cash_ledger, tolerance=1.0):
+    if cash_ledger is None or cash_ledger.empty:
+        return pd.DataFrame()
+
+    working_ledger = cash_ledger.copy()
+    ledger_timestamps = pd.to_datetime(
+        working_ledger["timestamp"],
+        errors="coerce",
+    )
+    working_ledger = working_ledger.loc[
+        ledger_timestamps.notna()
+    ].copy()
+
+    if working_ledger.empty:
+        return pd.DataFrame()
+
+    start_date = ledger_timestamps.min().normalize()
+    end_date = ledger_timestamps.max().normalize()
+    trade_timestamps = pd.to_datetime(
+        cleaned_trades["Exec Time"],
+        format="%m/%d/%y %H:%M:%S",
+        errors="coerce",
+    )
+    filtered_trades = cleaned_trades.loc[
+        (trade_timestamps >= start_date)
+        & (trade_timestamps < end_date + pd.Timedelta(days=1))
+    ].copy()
+    statement = statement_trade_cash_by_day(working_ledger)
+    extracted = extracted_trade_cash_by_day(filtered_trades)
+    available_buckets = set(working_ledger["account_bucket"])
+    extracted = extracted[
+        extracted["account_bucket"].isin(available_buckets)
+    ].copy()
+    reconciliation = pd.merge(
+        statement,
+        extracted,
+        on=[
+            "date",
+            "account_bucket",
+        ],
+        how="outer",
+    )
+
+    numeric_columns = [
+        "statement_trade_rows",
+        "statement_trade_cash_flow",
+        "extracted_trade_count",
+        "extracted_net_pnl",
+    ]
+
+    for column in numeric_columns:
+        if column not in reconciliation.columns:
+            reconciliation[column] = 0.0
+
+        reconciliation[column] = pd.to_numeric(
+            reconciliation[column],
+            errors="coerce",
+        ).fillna(0.0)
+
+    reconciliation["cash_flow_delta"] = (
+        reconciliation["extracted_net_pnl"]
+        - reconciliation["statement_trade_cash_flow"]
+    )
+    reconciliation["validation_status"] = reconciliation[
+        "cash_flow_delta"
+    ].apply(
+        lambda value: "PASS" if abs(value) <= tolerance else "REVIEW"
+    )
+
+    return reconciliation.sort_values(
+        [
+            "validation_status",
+            "cash_flow_delta",
+            "date",
+            "account_bucket",
+        ],
+        ascending=[False, False, True, True],
+    )
+
+
+def validation_status(delta, tolerance=1.0):
+    if delta is None or pd.isna(delta):
+        return "MISSING"
+
+    return "PASS" if abs(delta) <= tolerance else "REVIEW"
+
+
+def build_trade_history_validation_summary(
+    ytd_reports,
+    cash_reconciliation,
+    tolerance=1.0,
+):
+    rows = []
+    ytd_summary = ytd_reports.get("summary", pd.DataFrame())
+
+    if ytd_summary is not None and not ytd_summary.empty:
+        summary = ytd_summary.iloc[0]
+        closed_net_delta = parse_number(
+            summary.get("closed_net_delta_statement_minus_script")
+        )
+        closed_gross_delta = (
+            parse_number(summary.get("statement_closed_gross_ytd_pnl"))
+            - parse_number(summary.get("script_realized_closed_gross_pnl"))
+        )
+        fee_delta = (
+            parse_number(
+                summary.get("statement_total_ytd_commissions_and_fees")
+            )
+            - parse_number(summary.get("script_realized_closed_fees"))
+        )
+        rows.extend([
+            {
+                "metric": "closed_net_pnl",
+                "trade_history_value": summary.get(
+                    "script_realized_closed_net_pnl"
+                ),
+                "cash_ledger_statement_value": "",
+                "ytd_statement_value": summary.get(
+                    "statement_closed_net_ytd_pnl"
+                ),
+                "delta_statement_minus_trade_history": closed_net_delta,
+                "validation_status": validation_status(
+                    closed_net_delta,
+                    tolerance,
+                ),
+                "validation_note": (
+                    "Closed net PnL should match YTD gross PnL minus open "
+                    "PnL minus all statement YTD fees."
+                ),
+            },
+            {
+                "metric": "closed_gross_pnl",
+                "trade_history_value": summary.get(
+                    "script_realized_closed_gross_pnl"
+                ),
+                "cash_ledger_statement_value": "",
+                "ytd_statement_value": summary.get(
+                    "statement_closed_gross_ytd_pnl"
+                ),
+                "delta_statement_minus_trade_history": closed_gross_delta,
+                "validation_status": validation_status(
+                    closed_gross_delta,
+                    tolerance,
+                ),
+                "validation_note": (
+                    "Gross closed PnL is compared before commissions and "
+                    "fees."
+                ),
+            },
+            {
+                "metric": "fees",
+                "trade_history_value": summary.get(
+                    "script_realized_closed_fees"
+                ),
+                "cash_ledger_statement_value": "",
+                "ytd_statement_value": summary.get(
+                    "statement_total_ytd_commissions_and_fees"
+                ),
+                "delta_statement_minus_trade_history": fee_delta,
+                "validation_status": validation_status(
+                    fee_delta,
+                    tolerance,
+                ),
+                "validation_note": (
+                    "Fees are validated against statement YTD equity, "
+                    "futures, forex, and crypto fee totals."
+                ),
+            },
+        ])
+
+    open_pnl = ytd_reports.get("open_pnl", pd.DataFrame())
+    if open_pnl is not None and not open_pnl.empty:
+        statement_open = numeric_column(open_pnl, "statement_open_pnl").sum()
+        script_open = numeric_column(open_pnl, "script_open_pnl").sum()
+        open_delta = statement_open - script_open
+        rows.append({
+            "metric": "open_pnl",
+            "trade_history_value": script_open,
+            "cash_ledger_statement_value": "",
+            "ytd_statement_value": statement_open,
+            "delta_statement_minus_trade_history": open_delta,
+            "validation_status": validation_status(
+                open_delta,
+                tolerance,
+            ),
+            "validation_note": (
+                "Open PnL is mark-to-market in the statement. Trade history "
+                "can only match after open positions are valued from "
+                "statement or market marks."
+            ),
+        })
+
+    if cash_reconciliation is not None and not cash_reconciliation.empty:
+        cash_delta = numeric_column(cash_reconciliation, "cash_flow_delta").sum()
+        unreconciled = int(
+            cash_reconciliation["validation_status"].eq("REVIEW").sum()
+        )
+        rows.append({
+            "metric": "cash_ledger_daily_trade_cash_flow",
+            "trade_history_value": numeric_column(
+                cash_reconciliation,
+                "extracted_net_pnl",
+            ).sum(),
+            "cash_ledger_statement_value": numeric_column(
+                cash_reconciliation,
+                "statement_trade_cash_flow",
+            ).sum(),
+            "ytd_statement_value": "",
+            "delta_statement_minus_trade_history": -cash_delta,
+            "validation_status": "PASS" if unreconciled == 0 else "REVIEW",
+            "validation_note": (
+                "Cash-ledger validation is daily/event cash-flow validation, "
+                "not closed-PnL validation when open positions exist. "
+                f"{unreconciled} daily/account groups need review."
+            ),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def build_trade_history_validation_issues(
+    ytd_reports,
+    cash_reconciliation,
+    tolerance=1.0,
+):
+    rows = []
+
+    issue_specs = [
+        (
+            "open_pnl",
+            ytd_reports.get("open_pnl", pd.DataFrame()),
+            "Symbol",
+            "open_pnl_delta_statement_minus_script",
+        ),
+        (
+            "fees",
+            ytd_reports.get("fees", pd.DataFrame()),
+            "fee_bucket",
+            "fee_delta_statement_minus_script",
+        ),
+        (
+            "closed_gross_pnl",
+            ytd_reports.get("closed_pnl", pd.DataFrame()),
+            "statement_root_symbol",
+            "closed_gross_delta_statement_minus_script",
+        ),
+    ]
+
+    for issue_type, frame, key_column, delta_column in issue_specs:
+        if frame is None or frame.empty or delta_column not in frame.columns:
+            continue
+
+        review_rows = frame[
+            numeric_column(frame, delta_column).abs() > tolerance
+        ].copy()
+        review_rows = review_rows.sort_values(
+            delta_column,
+            key=lambda series: series.abs(),
+            ascending=False,
+        )
+
+        for _, row in review_rows.iterrows():
+            rows.append({
+                "issue_type": issue_type,
+                "review_key": row.get(key_column, ""),
+                "delta": row.get(delta_column),
+                "likely_cause": row.get("likely_cause", ""),
+                "recommended_action": validation_recommended_action(
+                    issue_type,
+                    row,
+                ),
+            })
+
+    if cash_reconciliation is not None and not cash_reconciliation.empty:
+        review_rows = cash_reconciliation[
+            cash_reconciliation["validation_status"] == "REVIEW"
+        ].copy()
+        review_rows = review_rows.sort_values(
+            "cash_flow_delta",
+            key=lambda series: series.abs(),
+            ascending=False,
+        )
+
+        for _, row in review_rows.iterrows():
+            rows.append({
+                "issue_type": "cash_ledger_daily_trade_cash_flow",
+                "review_key": (
+                    f"{row.get('date', '')}|"
+                    f"{row.get('account_bucket', '')}"
+                ),
+                "delta": row.get("cash_flow_delta"),
+                "likely_cause": (
+                    "Extracted trade cash flow does not match the statement "
+                    "cash ledger for this day/account bucket."
+                ),
+                "recommended_action": (
+                    "Review extracted rows and statement TRD/ADJ rows for "
+                    "this date before approving corrections."
+                ),
+            })
+
+    return pd.DataFrame(rows)
+
+
+def validation_recommended_action(issue_type, row):
+    if issue_type == "open_pnl":
+        return (
+            "Use statement P/L Open or market data to value open lots; do "
+            "not treat opening cash flow as open PnL."
+        )
+
+    if issue_type == "fees":
+        return (
+            "Prefer statement YTD fee totals for validation and review "
+            "bucket-level fee model assumptions."
+        )
+
+    if issue_type == "closed_gross_pnl":
+        return (
+            "Review the root/symbol trade rows and any cash-ledger PnL "
+            "corrections before changing trade history."
+        )
+
+    return "Review the validation row."
 
 
 def settled_futures_symbols(position_summary, tolerance=0.01):
@@ -2150,10 +3485,17 @@ def build_data_quality_warnings(
         realized_trades.get("return_on_margin"),
         errors="coerce",
     )
+    wfa_risk = pd.to_numeric(
+        realized_trades.get(
+            "WFA_Risk_Per_Contract",
+            pd.Series(index=realized_trades.index, dtype=float),
+        ),
+        errors="coerce",
+    )
     add_warning(
         "return_on_margin_loss_exceeds_100_percent",
         "medium",
-        (return_on_margin <= -1).sum(),
+        ((return_on_margin <= -1) & ~wfa_risk.gt(0)).sum(),
         "These trades are included in Safe-F using simple margin returns.",
     )
     add_warning(
@@ -2556,6 +3898,234 @@ def save_strategy_trade_ledgers(strategy_trade_ledgers):
         output_files.append(output_file)
 
     return output_files
+
+
+def rebuild_strategy_library_correlations(library_dir):
+    library_path = Path(library_dir).expanduser()
+    series_by_strategy = {}
+    manifest_rows = []
+
+    for metadata_file in sorted(library_path.glob("*/metadata.json")):
+        try:
+            metadata = json.loads(metadata_file.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        metadata["strategy_directory"] = metadata_file.parent.name
+        tested_symbols = metadata.get("tested_symbols", [])
+        metadata["tested_symbols"] = ", ".join(tested_symbols)
+        manifest_rows.append(metadata)
+
+    for daily_file in sorted(library_path.glob("*/daily_pnl.csv")):
+        try:
+            daily = pd.read_csv(daily_file)
+        except (OSError, pd.errors.ParserError, UnicodeError):
+            continue
+
+        required = {"date", "Strategy_Name", "daily_pnl"}
+        if daily.empty or not required.issubset(daily.columns):
+            continue
+
+        strategy_name = clean_strategy_name(daily["Strategy_Name"].iloc[0])
+        dates = pd.to_datetime(daily["date"], errors="coerce").dt.normalize()
+        pnl = pd.to_numeric(daily["daily_pnl"], errors="coerce")
+        valid = dates.notna() & pnl.notna()
+        if not strategy_name or not valid.any():
+            continue
+
+        series = pnl[valid].groupby(dates[valid]).sum().sort_index()
+        series_by_strategy[strategy_name] = series
+
+    manifest = pd.DataFrame(manifest_rows)
+    if not manifest.empty and "strategy_name" in manifest.columns:
+        manifest = manifest.sort_values("strategy_name")
+    manifest_file = library_path / "strategy_manifest.csv"
+    manifest.to_csv(manifest_file, index=False)
+
+    combined = pd.DataFrame()
+    correlation = pd.DataFrame()
+    overlap_days = pd.DataFrame()
+    if series_by_strategy:
+        all_dates = pd.DatetimeIndex(sorted({
+            date
+            for series in series_by_strategy.values()
+            for date in series.index
+        }))
+        combined = pd.DataFrame(index=all_dates)
+
+        for strategy_name in sorted(series_by_strategy):
+            series = series_by_strategy[strategy_name]
+            coverage_dates = all_dates[
+                (all_dates >= series.index.min())
+                & (all_dates <= series.index.max())
+            ]
+            combined.loc[coverage_dates, strategy_name] = series.reindex(
+                coverage_dates,
+                fill_value=0.0,
+            )
+
+        combined.index.name = "date"
+        correlation = combined.corr(
+            min_periods=STRATEGY_LIBRARY_MIN_CORRELATION_DAYS
+        )
+        availability = combined.notna().astype(int)
+        overlap_days = availability.T.dot(availability)
+        overlap_days.index.name = "Strategy_Name"
+
+    combined_file = library_path / "combined_daily_pnl.csv"
+    correlation_file = library_path / "pnl_correlation.csv"
+    overlap_file = library_path / "correlation_overlap_days.csv"
+    combined.to_csv(combined_file)
+    correlation.to_csv(correlation_file)
+    overlap_days.to_csv(overlap_file)
+
+    return {
+        "manifest": str(manifest_file),
+        "combined_daily_pnl": str(combined_file),
+        "pnl_correlation": str(correlation_file),
+        "correlation_overlap_days": str(overlap_file),
+        "strategy_count": len(series_by_strategy),
+    }
+
+
+def export_strategy_library(
+    strategy_trade_ledgers,
+    equity_curves,
+    library_dir,
+    source_input=None,
+    analysis_mode="strategy_analysis",
+    capital_allocation=None,
+):
+    library_path = Path(library_dir).expanduser()
+    library_path.mkdir(parents=True, exist_ok=True)
+    exported_strategies = []
+
+    for strategy_name, trades in strategy_trade_ledgers.groupby(
+        "Strategy_Name",
+        sort=True,
+    ):
+        strategy_name = clean_strategy_name(strategy_name)
+        if not strategy_name:
+            continue
+
+        strategy_dir = library_path / safe_filename(strategy_name)
+        strategy_dir.mkdir(parents=True, exist_ok=True)
+        strategy_curve = equity_curves[
+            equity_curves["Strategy_Name"].astype(str) == strategy_name
+        ].copy()
+        strategy_curve["timestamp"] = pd.to_datetime(
+            strategy_curve["timestamp"],
+            errors="coerce",
+        )
+        strategy_curve = strategy_curve.sort_values("timestamp")
+
+        daily_events = strategy_curve.dropna(subset=["timestamp"]).copy()
+        daily_events["strategy_pnl"] = pd.to_numeric(
+            daily_events["strategy_pnl"],
+            errors="coerce",
+        )
+        daily_events = daily_events.dropna(subset=["strategy_pnl"])
+        daily_events["date"] = daily_events["timestamp"].dt.normalize()
+        daily_pnl = (
+            daily_events.groupby("date", as_index=False)["strategy_pnl"]
+            .sum()
+            .rename(columns={"strategy_pnl": "daily_pnl"})
+        )
+        daily_pnl.insert(1, "Strategy_Name", strategy_name)
+
+        trades.sort_values("timestamp").to_csv(
+            strategy_dir / "trades.csv",
+            index=False,
+        )
+        strategy_curve.to_csv(
+            strategy_dir / "equity_curve.csv",
+            index=False,
+        )
+        daily_pnl.to_csv(
+            strategy_dir / "daily_pnl.csv",
+            index=False,
+        )
+
+        trade_timestamps = pd.to_datetime(
+            trades.get("timestamp"),
+            errors="coerce",
+        ).dropna()
+        tested_symbols = sorted({
+            str(symbol).strip()
+            for symbol in trades.get("Symbol", pd.Series(dtype=object)).dropna()
+            if str(symbol).strip()
+        })
+        metadata = {
+            "schema_version": 1,
+            "strategy_name": strategy_name,
+            "analysis_mode": analysis_mode,
+            "source_input": str(source_input or ""),
+            "tested_symbols": tested_symbols,
+            "trade_count": int(len(trades)),
+            "pnl_event_count": int(len(strategy_curve)),
+            "first_trade_date": (
+                trade_timestamps.min().date().isoformat()
+                if not trade_timestamps.empty
+                else None
+            ),
+            "last_trade_date": (
+                trade_timestamps.max().date().isoformat()
+                if not trade_timestamps.empty
+                else None
+            ),
+            "exported_at_utc": pd.Timestamp.now(tz="UTC").isoformat(),
+        }
+        if capital_allocation is not None and not capital_allocation.empty:
+            allocation_rows = capital_allocation[
+                capital_allocation["Strategy_Name"].astype(str)
+                == strategy_name
+            ]
+            if not allocation_rows.empty:
+                allocation = allocation_rows.iloc[0]
+                for column in (
+                    "recommended_instrument",
+                    "contracts_or_shares_to_trade",
+                    "risk_budget_dollars",
+                    "allocated_risk_per_trade_dollars",
+                    "wfa_risk_per_contract_dollars",
+                    "wfa_optimal_risk_fraction",
+                ):
+                    value = allocation.get(column)
+                    if pd.notna(value):
+                        if isinstance(value, np.generic):
+                            value = value.item()
+                        metadata[column] = value
+        (strategy_dir / "metadata.json").write_text(
+            json.dumps(metadata, indent=2) + "\n"
+        )
+        if analysis_mode == "wfa":
+            baseline_dir = (
+                library_path
+                / "_wfa_baselines"
+                / safe_filename(strategy_name)
+            )
+            baseline_dir.mkdir(parents=True, exist_ok=True)
+            trades.sort_values("timestamp").to_csv(
+                baseline_dir / "trades.csv",
+                index=False,
+            )
+            strategy_curve.to_csv(
+                baseline_dir / "equity_curve.csv",
+                index=False,
+            )
+            daily_pnl.to_csv(
+                baseline_dir / "daily_pnl.csv",
+                index=False,
+            )
+            (baseline_dir / "metadata.json").write_text(
+                json.dumps(metadata, indent=2) + "\n"
+            )
+        exported_strategies.append(strategy_name)
+
+    result = rebuild_strategy_library_correlations(library_path)
+    result["library_dir"] = str(library_path)
+    result["exported_strategies"] = exported_strategies
+    return result
 
 
 def build_account_equity_curve(df):
@@ -3391,6 +4961,13 @@ def calculate_strategy_summary(realized_trades, equity_curves):
             group["return_on_margin"],
             errors="coerce",
         )
+        is_wfa_stop_risk = (
+            "WFA_Risk_Per_Contract" in group.columns
+            and pd.to_numeric(
+                group["WFA_Risk_Per_Contract"],
+                errors="coerce",
+            ).gt(0).any()
+        )
         wins = net_pnl[net_pnl > 0]
         losses = net_pnl[net_pnl < 0]
         curve_group = equity_curves[
@@ -3568,7 +5145,7 @@ def calculate_strategy_summary(realized_trades, equity_curves):
                 (margin_requirement.isna() | (margin_requirement <= 0)).sum()
             ),
             "extreme_margin_loss_count": int(
-                (return_on_margin <= -1).sum()
+                0 if is_wfa_stop_risk else (return_on_margin <= -1).sum()
             ),
             "average_return_on_margin": group["return_on_margin"].mean(),
             "cumulative_log_return_on_margin": (
@@ -3641,15 +5218,27 @@ def calculate_correlation_outputs(equity_curves):
 
 
 def save_strategy_equity_chart(equity_curves):
-    fig, ax = plt.subplots(
-        figsize=(12, 7)
-    )
+    fig, ax = plt.subplots(figsize=(13, 7.4))
+    fig.patch.set_facecolor("#f8fafc")
+    ax.set_facecolor("#ffffff")
     starting_equities = []
+    colors = [
+        "#0f766e",
+        "#2563eb",
+        "#d97706",
+        "#db2777",
+        "#7c3aed",
+        "#dc2626",
+        "#65a30d",
+        "#0891b2",
+    ]
 
-    for strategy_name, group in equity_curves.groupby("Strategy_Name", sort=True):
+    for color_index, (strategy_name, group) in enumerate(
+        equity_curves.groupby("Strategy_Name", sort=True)
+    ):
         group = group[
             group["timestamp"].notna()
-        ]
+        ].sort_values("timestamp")
 
         if group.empty:
             continue
@@ -3660,20 +5249,44 @@ def save_strategy_equity_chart(equity_curves):
         )
         starting_equities.append(starting_equity)
 
+        color = colors[color_index % len(colors)]
+        label = (
+            f"{strategy_name}  "
+            f"({float(group['CMPNL'].iloc[-1]):+,.0f})"
+        )
         ax.plot(
             group["timestamp"],
             group["strategy_equity"],
-            linewidth=1.6,
-            label=strategy_name,
+            color=color,
+            linewidth=7,
+            alpha=0.09,
+            solid_capstyle="round",
+        )
+        ax.plot(
+            group["timestamp"],
+            group["strategy_equity"],
+            color=color,
+            linewidth=2.2,
+            label=label,
+            solid_capstyle="round",
+        )
+        ax.scatter(
+            group["timestamp"].iloc[-1],
+            group["strategy_equity"].iloc[-1],
+            color=color,
+            edgecolor="#ffffff",
+            linewidth=1.2,
+            s=42,
+            zorder=4,
         )
 
     if starting_equities:
         baseline = min(starting_equities)
         ax.axhline(
             baseline,
-            color="#444444",
-            linewidth=0.9,
-            linestyle="--",
+            color="#475569",
+            linewidth=1.1,
+            linestyle=(0, (5, 4)),
             label="Starting equity",
         )
         y_min = min(
@@ -3690,25 +5303,72 @@ def save_strategy_equity_chart(equity_curves):
             y_min - padding,
             y_max + padding,
         )
+        ax.axhspan(
+            baseline,
+            y_max + padding,
+            color="#16a34a",
+            alpha=0.025,
+            zorder=0,
+        )
+        ax.axhspan(
+            y_min - padding,
+            baseline,
+            color="#dc2626",
+            alpha=0.025,
+            zorder=0,
+        )
 
-    ax.set_title("Strategy Equity Curves")
-    ax.set_xlabel("Date")
+    ax.set_title(
+        "Strategy Equity Curves",
+        loc="left",
+        fontsize=18,
+        fontweight="bold",
+        color="#17202a",
+        pad=16,
+    )
+    ax.text(
+        0,
+        1.01,
+        "Realized-trade equity; legend shows cumulative PNL",
+        transform=ax.transAxes,
+        color="#64748b",
+        fontsize=10,
+        va="bottom",
+    )
     ax.set_ylabel("Equity ($)")
+    ax.yaxis.set_major_formatter(FuncFormatter(
+        lambda value, _: f"${value:,.0f}"
+    ))
     ax.grid(
         True,
         axis="y",
-        alpha=0.25,
+        color="#cbd5e1",
+        alpha=0.48,
+        linewidth=0.8,
     )
+    ax.grid(True, axis="x", color="#e2e8f0", alpha=0.25, linewidth=0.6)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#cbd5e1")
+    ax.spines["bottom"].set_color("#cbd5e1")
     ax.legend(
-        fontsize=8,
+        fontsize=8.5,
         ncol=2,
+        loc="upper left",
+        frameon=True,
+        facecolor="#ffffff",
+        edgecolor="#e2e8f0",
+        framealpha=0.94,
     )
-    fig.autofmt_xdate()
+    locator = mdates.AutoDateLocator(minticks=5, maxticks=9)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
     fig.tight_layout()
     output_file = f"{CHART_DIR}/strategy_equity_curves.png"
     fig.savefig(
         output_file,
-        dpi=150,
+        dpi=170,
+        facecolor=fig.get_facecolor(),
     )
     plt.close(fig)
 
@@ -3718,48 +5378,299 @@ def save_strategy_equity_chart(equity_curves):
 def save_account_equity_chart(account_curve):
     plot_df = account_curve[
         account_curve["timestamp"].notna()
-    ]
+    ].sort_values("timestamp").copy()
+    plot_df["ending_equity"] = pd.to_numeric(
+        plot_df["ending_equity"],
+        errors="coerce",
+    )
+    plot_df["account_drawdown"] = pd.to_numeric(
+        plot_df["account_drawdown"],
+        errors="coerce",
+    )
+    plot_df = plot_df.dropna(subset=["ending_equity", "account_drawdown"])
 
-    fig, ax = plt.subplots(
-        figsize=(12, 6)
+    fig = plt.figure(figsize=(13, 7.6), facecolor="#f8fafc")
+    grid = fig.add_gridspec(4, 1, hspace=0.08)
+    ax = fig.add_subplot(grid[:3, 0])
+    ax_drawdown = fig.add_subplot(grid[3, 0], sharex=ax)
+    ax.set_facecolor("#ffffff")
+    ax_drawdown.set_facecolor("#ffffff")
+    timestamps = plot_df["timestamp"]
+    equity = plot_df["ending_equity"]
+    drawdown = plot_df["account_drawdown"]
+    starting_values = pd.to_numeric(
+        plot_df.get("starting_equity", pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna()
+    baseline = (
+        float(starting_values.iloc[0])
+        if not starting_values.empty
+        else float(equity.iloc[0])
+    )
+    high_water = equity.cummax()
+
+    ax.fill_between(
+        timestamps,
+        baseline,
+        equity,
+        where=equity >= baseline,
+        color="#14b8a6",
+        alpha=0.11,
+        interpolate=True,
+    )
+    ax.fill_between(
+        timestamps,
+        baseline,
+        equity,
+        where=equity < baseline,
+        color="#ef4444",
+        alpha=0.08,
+        interpolate=True,
     )
     ax.plot(
-        plot_df["timestamp"],
-        plot_df["ending_equity"],
-        color="#1565c0",
-        linewidth=2,
-        label="Account equity",
+        timestamps,
+        equity,
+        color="#99f6e4",
+        linewidth=8,
+        alpha=0.20,
+        solid_capstyle="round",
     )
-    ax.set_title("Account Equity Curve")
-    ax.set_xlabel("Date")
+    ax.plot(
+        timestamps,
+        equity,
+        color="#0f766e",
+        linewidth=2.6,
+        label="Account equity",
+        solid_capstyle="round",
+    )
+    ax.plot(
+        timestamps,
+        high_water,
+        color="#64748b",
+        linewidth=1.1,
+        linestyle=(0, (4, 4)),
+        alpha=0.8,
+        label="High-water mark",
+    )
+    ax.scatter(
+        timestamps.iloc[-1],
+        equity.iloc[-1],
+        color="#0f766e",
+        edgecolor="#ffffff",
+        linewidth=1.5,
+        s=58,
+        zorder=5,
+    )
+    ax.annotate(
+        f"${equity.iloc[-1]:,.0f}",
+        xy=(timestamps.iloc[-1], equity.iloc[-1]),
+        xytext=(-8, 14),
+        textcoords="offset points",
+        ha="right",
+        color="#0f766e",
+        fontsize=10,
+        fontweight="bold",
+    )
+    ax.set_title(
+        "Account Equity Curve",
+        loc="left",
+        fontsize=18,
+        fontweight="bold",
+        color="#17202a",
+        pad=16,
+    )
+    ax.text(
+        0,
+        1.01,
+        "Realized equity with high-water mark and drawdown regime",
+        transform=ax.transAxes,
+        color="#64748b",
+        fontsize=10,
+        va="bottom",
+    )
     ax.set_ylabel("Equity ($)")
+    ax.yaxis.set_major_formatter(FuncFormatter(
+        lambda value, _: f"${value:,.0f}"
+    ))
     ax.grid(
         True,
         axis="y",
-        alpha=0.25,
+        color="#cbd5e1",
+        alpha=0.48,
+        linewidth=0.8,
+    )
+    ax.grid(True, axis="x", color="#e2e8f0", alpha=0.2, linewidth=0.6)
+    ax.legend(
+        loc="upper left",
+        frameon=True,
+        facecolor="#ffffff",
+        edgecolor="#e2e8f0",
+        framealpha=0.94,
     )
 
-    ax2 = ax.twinx()
-    ax2.fill_between(
-        plot_df["timestamp"],
-        plot_df["account_drawdown"],
+    ax_drawdown.fill_between(
+        timestamps,
+        drawdown,
         0,
-        color="#c62828",
-        alpha=0.18,
+        color="#ef4444",
+        alpha=0.22,
+    )
+    ax_drawdown.plot(
+        timestamps,
+        drawdown,
+        color="#b42336",
+        linewidth=1.4,
         label="Drawdown",
     )
-    ax2.set_ylabel("Drawdown")
-
-    handles, labels = ax.get_legend_handles_labels()
-    handles2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(
-        handles + handles2,
-        labels + labels2,
+    ax_drawdown.axhline(
+        -0.20,
+        color="#d97706",
+        linewidth=1.0,
+        linestyle=(0, (5, 4)),
+        label="-20% reference",
+    )
+    if not drawdown.empty:
+        minimum_position = int(np.nanargmin(drawdown.to_numpy()))
+        ax_drawdown.scatter(
+            timestamps.iloc[minimum_position],
+            drawdown.iloc[minimum_position],
+            color="#b42336",
+            edgecolor="#ffffff",
+            linewidth=1.0,
+            s=36,
+            zorder=4,
+        )
+        ax_drawdown.annotate(
+            f"Max DD {drawdown.iloc[minimum_position]:.1%}",
+            xy=(
+                timestamps.iloc[minimum_position],
+                drawdown.iloc[minimum_position],
+            ),
+            xytext=(7, -14),
+            textcoords="offset points",
+            color="#991b1b",
+            fontsize=9,
+        )
+    ax_drawdown.set_ylabel("DD")
+    ax_drawdown.yaxis.set_major_formatter(FuncFormatter(
+        lambda value, _: f"{value:.0%}"
+    ))
+    ax_drawdown.grid(True, axis="y", color="#cbd5e1", alpha=0.42)
+    ax_drawdown.legend(
+        loc="lower left",
+        ncol=2,
+        frameon=False,
+        fontsize=8.5,
     )
 
-    fig.autofmt_xdate()
-    fig.tight_layout()
+    for chart_axis in [ax, ax_drawdown]:
+        chart_axis.spines["top"].set_visible(False)
+        chart_axis.spines["right"].set_visible(False)
+        chart_axis.spines["left"].set_color("#cbd5e1")
+        chart_axis.spines["bottom"].set_color("#cbd5e1")
+
+    locator = mdates.AutoDateLocator(minticks=5, maxticks=9)
+    ax_drawdown.xaxis.set_major_locator(locator)
+    ax_drawdown.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    plt.setp(ax.get_xticklabels(), visible=False)
+
+    fig.subplots_adjust(left=0.09, right=0.98, top=0.90, bottom=0.10)
     output_file = f"{CHART_DIR}/account_equity_curve.png"
+    fig.savefig(
+        output_file,
+        dpi=170,
+        facecolor=fig.get_facecolor(),
+    )
+    plt.close(fig)
+
+    return output_file
+
+
+def save_recent_trade_pnl_chart(realized_trades, lookback_days=14):
+    if realized_trades is None or realized_trades.empty:
+        return None
+
+    plot_df = realized_trades.copy()
+    plot_df["timestamp"] = pd.to_datetime(
+        plot_df["timestamp"],
+        errors="coerce",
+    )
+    plot_df["net_pnl"] = pd.to_numeric(
+        plot_df["net_pnl"],
+        errors="coerce",
+    )
+    plot_df = plot_df.dropna(
+        subset=[
+            "timestamp",
+            "net_pnl",
+            "Strategy_Name",
+        ]
+    )
+
+    if plot_df.empty:
+        return None
+
+    end_time = plot_df["timestamp"].max()
+    start_time = end_time - pd.Timedelta(days=lookback_days)
+    plot_df = plot_df[
+        plot_df["timestamp"] >= start_time
+    ].copy()
+
+    if plot_df.empty:
+        return None
+
+    strategies = sorted(plot_df["Strategy_Name"].astype(str).unique())
+    fig, axes = plt.subplots(
+        len(strategies),
+        1,
+        figsize=(12, max(4, 2.8 * len(strategies))),
+        sharex=True,
+        squeeze=False,
+    )
+
+    for axis, strategy_name in zip(axes.flatten(), strategies):
+        group = plot_df[
+            plot_df["Strategy_Name"].astype(str) == strategy_name
+        ].sort_values("timestamp")
+        colors = group["net_pnl"].apply(
+            lambda value: "#167647" if value >= 0 else "#b42336"
+        )
+        axis.scatter(
+            group["timestamp"],
+            group["net_pnl"],
+            c=colors,
+            s=44,
+            alpha=0.85,
+            edgecolors="#17202a",
+            linewidths=0.35,
+        )
+        axis.axhline(
+            0,
+            color="#475569",
+            linewidth=0.8,
+        )
+        axis.set_ylabel("PnL ($)")
+        axis.set_title(
+            strategy_name,
+            loc="left",
+            fontsize=10,
+            fontweight="bold",
+        )
+        axis.grid(
+            True,
+            axis="y",
+            alpha=0.25,
+        )
+
+    axes.flatten()[-1].set_xlabel("Trade date")
+    fig.suptitle(
+        f"Trade PnL By Strategy - Last {lookback_days} Days",
+        fontsize=14,
+        fontweight="bold",
+    )
+    fig.autofmt_xdate()
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    output_file = f"{CHART_DIR}/recent_trade_pnl_by_strategy.png"
     fig.savefig(
         output_file,
         dpi=150,
@@ -3991,7 +5902,12 @@ def build_strategy_dashboard_highlights(summary, risk_summary):
     )
 
 
-def calculate_strategy_position_sizing(risk_summary, realized_trades):
+def calculate_strategy_position_sizing(
+    risk_summary,
+    realized_trades,
+    wfa_pilot_risk_pct=None,
+    wfa_risk_optimization=None,
+):
     if risk_summary.empty:
         return risk_summary
 
@@ -4000,6 +5916,21 @@ def calculate_strategy_position_sizing(risk_summary, realized_trades):
     sized["estimated_max_risk_per_contract_or_share"] = None
     sized["estimated_margin_per_contract_or_share"] = None
     sized["contracts_or_shares_to_trade"] = None
+    wfa_sizing_enabled = (
+        wfa_pilot_risk_pct is not None
+        or wfa_risk_optimization is not None
+    )
+    if wfa_sizing_enabled:
+        sized["recommended_instrument"] = None
+        sized["risk_budget_dollars"] = None
+        sized["allocated_risk_per_trade_dollars"] = None
+        sized["pilot_risk_cap_pct"] = None
+        sized["safe_f_risk_ceiling_dollars"] = None
+        sized["wfa_risk_per_contract_dollars"] = None
+        sized["wfa_optimal_risk_fraction"] = None
+        sized["wfa_drawdown_breach_probability"] = None
+        sized["wfa_drawdown_limit"] = None
+        sized["wfa_car25"] = None
 
     for index, row in sized.iterrows():
         strategy_name = row.get("Strategy_Name")
@@ -4028,6 +5959,98 @@ def calculate_strategy_position_sizing(risk_summary, realized_trades):
                 index,
                 "sizing_basis",
             ] = "N/A"
+            continue
+
+        wfa_risk = pd.to_numeric(
+            group.get(
+                "WFA_Risk_Per_Contract",
+                pd.Series(index=group.index, dtype=float),
+            ),
+            errors="coerce",
+        )
+        valid_wfa_risk = wfa_risk[wfa_risk > 0]
+        if wfa_sizing_enabled and not valid_wfa_risk.empty:
+            latest_index = valid_wfa_risk.index[-1]
+            standard_risk = float(valid_wfa_risk.loc[latest_index])
+            symbol = str(group.loc[latest_index].get("Symbol", "")).strip()
+            micro_contracts = {
+                "/ES": ("/MES", 0.10),
+            }
+            instrument, risk_multiplier = micro_contracts.get(
+                symbol,
+                (symbol or "FUTURE", 1.0),
+            )
+            contract_risk = standard_risk * risk_multiplier
+            safe_f_budget = parse_number(row.get("risk_per_trade_dollars")) or 0.0
+            bankroll = parse_number(row.get("bankroll")) or 0.0
+            optimized_fraction = None
+            pilot_cap_fraction = None
+            if wfa_risk_optimization is not None:
+                optimized_fraction = max(
+                    parse_number(
+                        wfa_risk_optimization.get("risk_fraction")
+                    ) or 0.0,
+                    0.0,
+                )
+                optimized_budget = bankroll * optimized_fraction
+                risk_budget = optimized_budget
+                safe_f_budget = optimized_budget
+                sized.at[index, "safe_f"] = optimized_fraction
+                sized.at[index, "risk_per_trade_dollars"] = optimized_budget
+                sized.at[index, "CAR25"] = wfa_risk_optimization.get(
+                    "cagr_objective"
+                )
+            else:
+                risk_budget = safe_f_budget
+
+            if wfa_pilot_risk_pct is not None:
+                pilot_cap_fraction = (
+                    max(float(wfa_pilot_risk_pct), 0.0) / 100.0
+                )
+                risk_budget = min(
+                    risk_budget,
+                    bankroll * pilot_cap_fraction,
+                )
+            quantity = (
+                int(risk_budget // contract_risk)
+                if contract_risk > 0
+                else 0
+            )
+            allocated_risk = quantity * contract_risk
+
+            sized.at[index, "sizing_basis"] = (
+                "wfa_bandy_safe_f_initial_stop_risk"
+                if wfa_risk_optimization is not None
+                else "wfa_initial_stop_risk"
+            )
+            sized.at[index, "recommended_instrument"] = instrument
+            sized.at[
+                index,
+                "estimated_max_risk_per_contract_or_share",
+            ] = contract_risk
+            sized.at[index, "contracts_or_shares_to_trade"] = quantity
+            sized.at[index, "risk_budget_dollars"] = risk_budget
+            sized.at[
+                index,
+                "allocated_risk_per_trade_dollars",
+            ] = allocated_risk
+            sized.at[index, "pilot_risk_cap_pct"] = pilot_cap_fraction
+            sized.at[index, "safe_f_risk_ceiling_dollars"] = safe_f_budget
+            sized.at[index, "wfa_risk_per_contract_dollars"] = contract_risk
+            sized.at[index, "wfa_optimal_risk_fraction"] = optimized_fraction
+            if wfa_risk_optimization is not None:
+                sized.at[
+                    index,
+                    "wfa_drawdown_breach_probability",
+                ] = wfa_risk_optimization.get(
+                    "drawdown_breach_probability"
+                )
+                sized.at[index, "wfa_drawdown_limit"] = (
+                    wfa_risk_optimization.get("drawdown_limit")
+                )
+                sized.at[index, "wfa_car25"] = (
+                    wfa_risk_optimization.get("cagr_objective")
+                )
             continue
 
         qty = pd.to_numeric(
@@ -4094,6 +6117,13 @@ def calculate_strategy_position_sizing(risk_summary, realized_trades):
             index,
             "contracts_or_shares_to_trade",
         ] = quantity
+        if wfa_sizing_enabled:
+            sized.at[index, "recommended_instrument"] = "As traded"
+            sized.at[index, "risk_budget_dollars"] = risk_dollars
+            sized.at[
+                index,
+                "allocated_risk_per_trade_dollars",
+            ] = quantity * estimated_max_risk
 
     return sized
 
@@ -4179,29 +6209,201 @@ def save_risk_simulation_boxplots(risk_simulations):
     return chart_files
 
 
+def save_wfa_simulation_boxplots(validation):
+    simulation = (validation or {}).get("simulation")
+    if not simulation:
+        return []
+
+    results = simulation.get("results", pd.DataFrame())
+    observed = simulation.get("observed", {})
+    if results.empty:
+        return []
+
+    chart_files = []
+    metrics = [
+        ("cagr", "WFA Simulated CAGR", "percent"),
+        ("profit_factor", "WFA Simulated Profit Factor", "ratio"),
+        ("max_drawdown", "WFA Simulated Maximum Drawdown", "percent"),
+        ("expectancy_r", "WFA Simulated Expectancy", "R / trade"),
+        ("total_r", "WFA Simulated Total Return", "R"),
+    ]
+
+    for metric, title, unit in metrics:
+        if metric not in results.columns:
+            continue
+        values = pd.to_numeric(results[metric], errors="coerce").replace(
+            [np.inf, -np.inf],
+            np.nan,
+        ).dropna()
+        if values.empty:
+            continue
+
+        fig, ax = plt.subplots(figsize=(10, 2.8))
+        ax.boxplot(
+            [values.to_numpy()],
+            vert=False,
+            whis=(5, 95),
+            showfliers=False,
+            patch_artist=True,
+            widths=0.45,
+            boxprops={"facecolor": "#bfdbfe", "color": "#1d4ed8"},
+            medianprops={"color": "#0f172a", "linewidth": 2.0},
+            whiskerprops={"color": "#1d4ed8"},
+            capprops={"color": "#1d4ed8"},
+        )
+        observed_value = parse_number(observed.get(metric))
+        if observed_value is not None and math.isfinite(observed_value):
+            ax.scatter(
+                [observed_value],
+                [1],
+                marker="D",
+                s=54,
+                color="#b42336",
+                zorder=4,
+                label="Observed WFA",
+            )
+            ax.legend(loc="upper right", frameon=False, fontsize=9)
+        if unit == "percent":
+            ax.xaxis.set_major_formatter(FuncFormatter(
+                lambda value, _: f"{value * 100:.1f}%"
+            ))
+        ax.set_yticks([])
+        ax.set_xlabel(unit)
+        ax.set_title(title)
+        ax.grid(True, axis="x", alpha=0.2)
+        ax.text(
+            0.0,
+            -0.28,
+            "Box: Q25-Q75 | whiskers: P05-P95 | diamond: observed WFA",
+            transform=ax.transAxes,
+            color="#475569",
+            fontsize=9,
+        )
+        fig.tight_layout()
+
+        output_file = f"{CHART_DIR}/wfa_simulation_{metric}_boxplot.png"
+        fig.savefig(output_file, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        chart_files.append(output_file)
+
+    simulation["boxplot_files"] = chart_files
+    return chart_files
+
+
 def risk_summary_for_merge(risk_summary):
     if risk_summary is None or risk_summary.empty:
         return pd.DataFrame(columns=["Strategy_Name"])
+
+    working = risk_summary.copy()
+    if "trade_count" in working.columns:
+        working["risk_model_trade_count"] = working["trade_count"]
 
     columns = [
         column
         for column in [
             "Strategy_Name",
+            "simulations",
             "safe_f",
             "risk_per_trade_dollars",
             "CAR25",
             "profit_factor_Q25",
+            "sizing_method",
+            "return_basis",
+            "drawdown_limit",
+            "drawdown_breach_probability",
+            "pct_above_drawdown_limit",
+            "risk_ceiling_fraction",
+            "cagr_objective_quantile",
+            "mean_block_length",
+            "elapsed_years",
+            "risk_model_trade_count",
             "sizing_basis",
             "estimated_max_risk_per_contract_or_share",
             "estimated_margin_per_contract_or_share",
             "contracts_or_shares_to_trade",
+            "recommended_instrument",
+            "risk_budget_dollars",
+            "allocated_risk_per_trade_dollars",
+            "pilot_risk_cap_pct",
+            "safe_f_risk_ceiling_dollars",
+            "wfa_risk_per_contract_dollars",
+            "wfa_optimal_risk_fraction",
+            "wfa_drawdown_breach_probability",
+            "wfa_drawdown_limit",
+            "wfa_car25",
         ]
-        if column in risk_summary.columns
+        if column in working.columns
     ]
-    return risk_summary[columns].copy()
+    return working[columns].copy()
+
+
+def uses_growth_optimal_sizing(row):
+    return str(row.get("sizing_method", "")) == "drawdown_constrained_car25"
+
+
+def allocation_readiness_for_strategy(row):
+    if not uses_growth_optimal_sizing(row):
+        return (
+            "Blocked"
+            if str(row.get("data_confidence", "")).lower() == "low"
+            else "Ready"
+        )
+
+    if str(row.get("Strategy_Name", "")).strip().lower() == "discretionary":
+        return "Not Sized"
+
+    risk_trade_count = parse_number(row.get("risk_model_trade_count")) or 0
+    unit_risk = parse_number(
+        row.get("estimated_max_risk_per_contract_or_share")
+    )
+    if risk_trade_count < 20 or unit_risk is None or unit_risk <= 0:
+        return "Blocked"
+
+    if str(row.get("data_confidence", "")).lower() == "low":
+        return "Ready With Warnings"
+
+    return "Ready"
 
 
 def action_for_strategy(row):
+    if uses_growth_optimal_sizing(row):
+        readiness = allocation_readiness_for_strategy(row)
+        if readiness == "Not Sized":
+            return "Not Sized"
+        if readiness == "Blocked":
+            return "Needs Data"
+
+        safe_f = parse_number(row.get("safe_f")) or 0.0
+        car25 = parse_number(row.get("CAR25")) or 0.0
+        if safe_f <= 0 or car25 <= 0:
+            return "No Allocation"
+
+        quantity = parse_number(row.get("contracts_or_shares_to_trade"))
+        if quantity is None:
+            return "Needs Data"
+        if quantity < 1:
+            return "Below Minimum Size"
+
+        status = str(row.get("strategy_status", "")).lower()
+        if status == "pause":
+            return "Pause"
+        if status == "watch":
+            return "Watch"
+
+        profit_factor = parse_number(row.get("profit_factor"))
+        total_return = parse_number(row.get("total_return"))
+        max_drawdown = parse_number(row.get("max_drawdown"))
+        if (
+            profit_factor is not None
+            and profit_factor >= 1.10
+            and total_return is not None
+            and total_return > 0
+            and max_drawdown is not None
+            and max_drawdown > -0.20
+        ):
+            return "Allocate"
+        return "Watch"
+
     if str(row.get("data_confidence", "")).lower() == "low":
         return "Needs Data"
 
@@ -4230,6 +6432,43 @@ def action_for_strategy(row):
 
 
 def action_reason_for_strategy(row):
+    if uses_growth_optimal_sizing(row):
+        action = action_for_strategy(row)
+        data_warning = str(row.get("data_confidence_reason", "")).strip()
+        if action == "Not Sized":
+            return "Discretionary activity is excluded from mechanical sizing."
+        if action == "Needs Data":
+            risk_trades = int(
+                parse_number(row.get("risk_model_trade_count")) or 0
+            )
+            return (
+                f"Sizing requires at least 20 valid margin-return trades and "
+                f"a positive per-unit risk estimate; found {risk_trades} trades."
+            )
+        if action == "No Allocation":
+            return (
+                "The CAR25 optimizer selected 0% risk because no positive "
+                "allocation improved conservative simulated growth."
+            )
+        if action == "Below Minimum Size":
+            budget = parse_number(row.get("risk_per_trade_dollars")) or 0.0
+            unit_risk = parse_number(
+                row.get("estimated_max_risk_per_contract_or_share")
+            ) or 0.0
+            return (
+                f"The ${budget:,.2f} risk budget is below one unit at "
+                f"${unit_risk:,.2f}; use a smaller instrument or allocate zero."
+            )
+
+        reason = (
+            f"CAR25 {float(row.get('CAR25')):.2%}; "
+            f"drawdown breach probability "
+            f"{float(row.get('drawdown_breach_probability')):.2%}."
+        )
+        if data_warning:
+            reason += f" Data warning: {data_warning}."
+        return reason
+
     if str(row.get("data_confidence", "")).lower() == "low":
         return row.get("data_confidence_reason", "Data needs review")
 
@@ -4272,6 +6511,10 @@ def build_strategy_decision_board(
             pnl_correlation,
         )
     )
+    decision["allocation_readiness"] = decision.apply(
+        allocation_readiness_for_strategy,
+        axis=1,
+    )
     decision["suggested_action"] = decision.apply(
         action_for_strategy,
         axis=1,
@@ -4281,22 +6524,13 @@ def build_strategy_decision_board(
         axis=1,
     )
 
-    action_order = {
-        "Allocate": 0,
-        "Watch": 1,
-        "Needs Data": 2,
-        "Pause": 3,
-    }
-    decision["_action_order"] = decision["suggested_action"].map(
-        action_order
-    ).fillna(99)
-
     columns = [
         "Strategy_Name",
         "suggested_action",
         "strategy_status",
         "data_confidence",
         "data_confidence_reason",
+        "allocation_readiness",
         "total_pnl",
         "total_return",
         "cagr",
@@ -4304,6 +6538,31 @@ def build_strategy_decision_board(
         "profit_factor",
         "safe_f",
         "risk_per_trade_dollars",
+        "simulations",
+        "CAR25",
+        "sizing_method",
+        "return_basis",
+        "drawdown_limit",
+        "drawdown_breach_probability",
+        "pct_above_drawdown_limit",
+        "risk_ceiling_fraction",
+        "cagr_objective_quantile",
+        "mean_block_length",
+        "elapsed_years",
+        "risk_model_trade_count",
+        "sizing_basis",
+        "estimated_max_risk_per_contract_or_share",
+        "estimated_margin_per_contract_or_share",
+        "recommended_instrument",
+        "risk_budget_dollars",
+        "allocated_risk_per_trade_dollars",
+        "pilot_risk_cap_pct",
+        "safe_f_risk_ceiling_dollars",
+        "wfa_risk_per_contract_dollars",
+        "wfa_optimal_risk_fraction",
+        "wfa_drawdown_breach_probability",
+        "wfa_drawdown_limit",
+        "wfa_car25",
         "contracts_or_shares_to_trade",
         "settlement_coverage_ratio",
         "settlement_missing_count",
@@ -4314,18 +6573,44 @@ def build_strategy_decision_board(
         "decision_reason",
     ]
 
-    return decision.sort_values(
-        [
-            "_action_order",
-            "total_pnl",
-        ],
-        ascending=[
-            True,
-            False,
-        ],
-    )[[column for column in columns if column in decision.columns]].reset_index(
-        drop=True,
+    decision["_strategy_sort"] = decision["Strategy_Name"].astype(str).str.lower()
+    return decision.sort_values("_strategy_sort")[
+        [column for column in columns if column in decision.columns]
+    ].reset_index(drop=True)
+
+
+def apply_wfa_validation_decision(
+    strategy_decision,
+    realized_trades,
+    validation,
+):
+    if (
+        validation is None
+        or strategy_decision is None
+        or strategy_decision.empty
+        or "WFA_01_Segment" not in realized_trades.columns
+    ):
+        return strategy_decision
+
+    wfa_strategy_names = set(
+        realized_trades.loc[
+            realized_trades["WFA_01_Segment"].notna(),
+            "Strategy_Name",
+        ].astype(str)
     )
+    result = strategy_decision.copy()
+    mask = result["Strategy_Name"].astype(str).isin(wfa_strategy_names)
+    verdict = validation.get("verdict", "FAIL")
+    action = {
+        "PASS": "Allocate",
+        "PILOT": "Pilot",
+        "FAIL": "Pause",
+    }.get(verdict, "Watch")
+    result.loc[mask, "suggested_action"] = action
+    result.loc[mask, "decision_reason"] = (
+        f"Walk-forward verdict {verdict}; size from initial stop risk."
+    )
+    return result
 
 
 def build_capital_allocation_table(strategy_decision):
@@ -4336,11 +6621,41 @@ def build_capital_allocation_table(strategy_decision):
 
     def allocation_note(row):
         action = str(row.get("suggested_action", ""))
+        if (
+            pd.notna(row.get("pilot_risk_cap_pct"))
+            and action in {"Allocate", "Pilot"}
+        ):
+            contracts = row.get("contracts_or_shares_to_trade")
+            instrument = row.get("recommended_instrument")
+            allocated_risk = parse_number(
+                row.get("allocated_risk_per_trade_dollars")
+            ) or 0.0
+            risk_budget = parse_number(row.get("risk_budget_dollars")) or 0.0
+            return (
+                f"Pilot size: {contracts} {instrument} contract(s), "
+                f"${allocated_risk:,.2f} initial stop risk within a "
+                f"${risk_budget:,.2f} budget; recalculate from each signal's stop."
+            )
+        if pd.notna(row.get("pilot_risk_cap_pct")):
+            return "WFA gates do not permit deployment; retain sizing for research only."
         if action == "Allocate":
             contracts = row.get("contracts_or_shares_to_trade")
             return f"Candidate size: {contracts} contracts/shares at Safe-F risk."
+        if action == "No Allocation":
+            return "CAR25 is not positive at nonzero risk; allocate zero."
+        if action == "Below Minimum Size":
+            risk_budget = parse_number(row.get("risk_per_trade_dollars")) or 0.0
+            unit_risk = parse_number(
+                row.get("estimated_max_risk_per_contract_or_share")
+            ) or 0.0
+            return (
+                f"Allocate zero: ${risk_budget:,.2f} risk budget is below "
+                f"one unit at ${unit_risk:,.2f}."
+            )
+        if action == "Not Sized":
+            return "Discretionary activity is not mechanically sized."
         if action == "Needs Data":
-            return "Resolve data-confidence blockers before allocating more capital."
+            return "Valid return or per-unit risk data is insufficient for sizing."
         if action == "Pause":
             return "Do not add capital until status improves."
         return "Keep small or unchanged until metrics/data improve."
@@ -4353,8 +6668,34 @@ def build_capital_allocation_table(strategy_decision):
         "Strategy_Name",
         "suggested_action",
         "data_confidence",
+        "allocation_readiness",
         "safe_f",
         "risk_per_trade_dollars",
+        "simulations",
+        "CAR25",
+        "sizing_method",
+        "return_basis",
+        "drawdown_limit",
+        "drawdown_breach_probability",
+        "pct_above_drawdown_limit",
+        "risk_ceiling_fraction",
+        "cagr_objective_quantile",
+        "mean_block_length",
+        "elapsed_years",
+        "risk_model_trade_count",
+        "sizing_basis",
+        "estimated_max_risk_per_contract_or_share",
+        "estimated_margin_per_contract_or_share",
+        "recommended_instrument",
+        "risk_budget_dollars",
+        "allocated_risk_per_trade_dollars",
+        "pilot_risk_cap_pct",
+        "safe_f_risk_ceiling_dollars",
+        "wfa_risk_per_contract_dollars",
+        "wfa_optimal_risk_fraction",
+        "wfa_drawdown_breach_probability",
+        "wfa_drawdown_limit",
+        "wfa_car25",
         "contracts_or_shares_to_trade",
         "total_return",
         "max_drawdown",
@@ -4365,6 +6706,62 @@ def build_capital_allocation_table(strategy_decision):
 
     return allocation[
         [column for column in columns if column in allocation.columns]
+    ].copy()
+
+
+def build_compact_capital_allocation_table(capital_allocation):
+    if capital_allocation is None or capital_allocation.empty:
+        return pd.DataFrame(columns=[])
+
+    compact = capital_allocation.copy()
+    has_wfa_sizing = (
+        (
+            "wfa_optimal_risk_fraction" in compact.columns
+            and compact["wfa_optimal_risk_fraction"].notna().any()
+        )
+        or (
+            "pilot_risk_cap_pct" in compact.columns
+            and compact["pilot_risk_cap_pct"].notna().any()
+        )
+    )
+    has_growth_sizing = (
+        "sizing_method" in compact.columns
+        and compact["sizing_method"].eq(
+            "drawdown_constrained_car25"
+        ).any()
+    )
+    if has_wfa_sizing:
+        columns = [
+            "Strategy_Name",
+            "recommended_instrument",
+            "contracts_or_shares_to_trade",
+            "allocated_risk_per_trade_dollars",
+            "risk_budget_dollars",
+            "safe_f_risk_ceiling_dollars",
+            "wfa_optimal_risk_fraction",
+            "wfa_drawdown_breach_probability",
+        ]
+    elif has_growth_sizing:
+        columns = [
+            "Strategy_Name",
+            "suggested_action",
+            "allocation_readiness",
+            "contracts_or_shares_to_trade",
+            "sizing_basis",
+            "safe_f",
+            "risk_per_trade_dollars",
+            "CAR25",
+            "drawdown_breach_probability",
+        ]
+    else:
+        columns = [
+            "Strategy_Name",
+            "contracts_or_shares_to_trade",
+            "risk_per_trade_dollars",
+        ]
+
+    return compact[
+        [column for column in columns if column in compact.columns]
     ].copy()
 
 
@@ -4406,6 +6803,17 @@ def format_dashboard_metric(metric, value):
         "rolling_20_max_drawdown",
         "rolling_20_win_rate",
         "average_return_on_margin",
+        "pilot_risk_cap_pct",
+        "wfa_optimal_risk_fraction",
+        "wfa_drawdown_breach_probability",
+        "wfa_drawdown_limit",
+        "wfa_car25",
+        "CAR25",
+        "drawdown_limit",
+        "drawdown_breach_probability",
+        "pct_above_drawdown_limit",
+        "risk_ceiling_fraction",
+        "cagr_objective_quantile",
     }:
         return f"{numeric_value * 100:,.2f}%"
 
@@ -4431,8 +6839,38 @@ def format_dashboard_metric(metric, value):
         "largest_win",
         "largest_loss",
         "risk_per_trade_dollars",
+        "risk_budget_dollars",
+        "allocated_risk_per_trade_dollars",
+        "safe_f_risk_ceiling_dollars",
+        "wfa_risk_per_contract_dollars",
         "estimated_max_risk_per_contract_or_share",
         "estimated_margin_per_contract_or_share",
+        "statement_gross_ytd_pnl",
+        "statement_open_position_pnl",
+        "statement_closed_gross_ytd_pnl",
+        "statement_total_ytd_commissions_and_fees",
+        "statement_closed_net_ytd_pnl",
+        "realized_trade_closed_gross_pnl",
+        "realized_trade_closed_net_pnl",
+        "trade_history_closed_gross_ytd_pnl",
+        "trade_history_closed_net_ytd_pnl",
+        "trade_history_adjusted_closed_gross_ytd_pnl",
+        "trade_history_adjusted_closed_net_ytd_pnl",
+        "open_trade_exclusion",
+        "ytd_bridge_adjustment",
+        "total_closed_pnl_adjustment",
+        "script_realized_closed_gross_pnl",
+        "script_realized_closed_fees",
+        "script_realized_closed_net_pnl",
+        "closed_net_delta_statement_minus_script",
+        "closed_net_delta_statement_minus_trade_history",
+        "closed_gross_delta_statement_minus_trade_history",
+        "delta_statement_minus_trade_history",
+        "trade_history_value",
+        "cash_ledger_statement_value",
+        "ytd_statement_value",
+        "statement_open_pnl",
+        "script_open_pnl",
     }:
         return f"${numeric_value:,.2f}"
 
@@ -4466,7 +6904,7 @@ def status_badge_class(status):
     if normalized == "healthy":
         return "status-healthy"
 
-    if normalized == "watch":
+    if normalized in {"watch", "below minimum size"}:
         return "status-watch"
 
     if normalized == "pause":
@@ -4484,7 +6922,10 @@ def action_badge_class(action):
     if normalized == "watch":
         return "status-watch"
 
-    if normalized in {"pause", "needs data"}:
+    if normalized == "pilot":
+        return "status-watch"
+
+    if normalized in {"pause", "needs data", "no allocation"}:
         return "status-pause"
 
     return "status-neutral"
@@ -4530,17 +6971,42 @@ def benchmark_caption(benchmark, metric):
     )
 
 
-def build_account_kpi_cards(account_summary, benchmark_summary=None):
-    account = metric_lookup(account_summary)
-    benchmark = metric_lookup(benchmark_summary)
-    cards = [
+def render_account_kpi_grid(cards, heading=None):
+    rendered_cards = []
+
+    for label, metric, value, caption in cards:
+        value_class = summary_value_class(metric, value)
+        rendered_cards.append(
+            '<article class="kpi-card">'
+            f'<div class="kpi-label">{html.escape(label)}</div>'
+            f'<div class="kpi-value {value_class}">{format_dashboard_metric(metric, value)}</div>'
+            f'<div class="kpi-caption">{html.escape(caption)}</div>'
+            "</article>"
+        )
+
+    heading_html = f"<h3>{html.escape(heading)}</h3>" if heading else ""
+
+    return (
+        '<div class="kpi-section">'
+        f"{heading_html}"
+        '<div class="kpi-grid">'
+        f"{''.join(rendered_cards)}"
+        "</div>"
+        "</div>"
+    )
+
+
+def build_realized_performance_cards(account, benchmark):
+    cards = []
+
+    for label, metric, caption in [
         (
             "Realized Trade PNL",
             "total_pnl",
             "Closed-trade PnL used for strategy attribution.",
         ),
         (
-            "Realized Annual Return",
+            "Annualized Real Return",
             "cagr",
             "Annualized return from the realized-trade equity curve.",
         ),
@@ -4559,30 +7025,123 @@ def build_account_kpi_cards(account_summary, benchmark_summary=None):
             "profit_factor",
             "Gross realized profit divided by gross realized loss.",
         ),
-    ]
-    rendered_cards = []
-
-    for label, metric, caption in cards:
-        value = account.get(metric)
-        value_class = summary_value_class(metric, value)
+    ]:
         comparison = benchmark_caption(
             benchmark,
             metric,
         )
-        rendered_caption = (
-            comparison
-            if comparison is not None
-            else caption
-        )
-        rendered_cards.append(
-            '<article class="kpi-card">'
-            f'<div class="kpi-label">{html.escape(label)}</div>'
-            f'<div class="kpi-value {value_class}">{format_dashboard_metric(metric, value)}</div>'
-            f'<div class="kpi-caption">{html.escape(rendered_caption)}</div>'
-            "</article>"
+        cards.append(
+            (
+                label,
+                metric,
+                account.get(metric),
+                comparison if comparison is not None else caption,
+            )
         )
 
-    return "".join(rendered_cards)
+    return cards
+
+
+def build_account_kpi_cards(
+    account_summary,
+    benchmark_summary=None,
+    ytd_reports=None,
+):
+    account = metric_lookup(account_summary)
+    benchmark = metric_lookup(benchmark_summary)
+    sections = []
+    ytd_summary = (
+        ytd_reports.get("summary", pd.DataFrame())
+        if ytd_reports
+        else pd.DataFrame()
+    )
+
+    if ytd_summary is not None and not ytd_summary.empty:
+        ytd = ytd_summary.iloc[0]
+        raw_trade_history_net_metric = (
+            "trade_history_closed_net_ytd_pnl"
+            if "trade_history_closed_net_ytd_pnl" in ytd
+            else "script_realized_closed_net_pnl"
+        )
+        raw_trade_history_net_value = ytd.get(
+            "trade_history_closed_net_ytd_pnl",
+            ytd.get("script_realized_closed_net_pnl"),
+        )
+        adjusted_trade_history_net_value = ytd.get(
+            "trade_history_adjusted_closed_net_ytd_pnl",
+            raw_trade_history_net_value,
+        )
+        discrepancy_metric = (
+            "closed_net_delta_statement_minus_trade_history"
+            if "closed_net_delta_statement_minus_trade_history" in ytd
+            else "closed_net_delta_statement_minus_script"
+        )
+        discrepancy_value = ytd.get(
+            "closed_net_delta_statement_minus_trade_history",
+            ytd.get("closed_net_delta_statement_minus_script"),
+        )
+        ytd_cards = [
+            (
+                "Net YTD PNL",
+                "statement_closed_net_ytd_pnl",
+                ytd.get("statement_closed_net_ytd_pnl"),
+                "Closed net YTD PnL from the account statement.",
+            ),
+            (
+                "Raw Trade History Net PNL",
+                raw_trade_history_net_metric,
+                raw_trade_history_net_value,
+                "Closed net YTD PnL directly from imported trade history.",
+            ),
+        ]
+
+        if "total_closed_pnl_adjustment" in ytd:
+            ytd_cards.append(
+                (
+                    "YTD Bridge Adjustment",
+                    "total_closed_pnl_adjustment",
+                    ytd.get("total_closed_pnl_adjustment"),
+                    (
+                        "Open-position exclusions, carryover residuals, and "
+                        "fee true-ups applied for statement reconciliation."
+                    ),
+                )
+            )
+
+        if "trade_history_adjusted_closed_net_ytd_pnl" in ytd:
+            ytd_cards.append(
+                (
+                    "Adjusted Trade History Net PNL",
+                    "trade_history_adjusted_closed_net_ytd_pnl",
+                    adjusted_trade_history_net_value,
+                    "Raw trade history plus YTD bridge adjustments.",
+                )
+            )
+
+        ytd_cards.append(
+            (
+                "Discrepancy",
+                discrepancy_metric,
+                discrepancy_value,
+                "Statement minus adjusted trade history. This should be near zero.",
+            )
+        )
+
+        sections.append(
+            render_account_kpi_grid(
+                ytd_cards,
+                heading="YTD Reconciliation",
+            )
+        )
+
+    sections.append(
+        render_account_kpi_grid(
+            build_realized_performance_cards(account, benchmark),
+            heading="Realized Performance",
+        )
+    )
+
+    return "".join(sections)
 
 
 def correlation_alert_for_strategy(strategy_name, pnl_correlation):
@@ -4695,6 +7254,437 @@ def build_strategy_top_summary(summary, pnl_correlation):
     )
 
 
+def dashboard_json_payload(payload):
+    return json.dumps(
+        payload,
+        allow_nan=False,
+    ).replace(
+        "</",
+        "<\\/",
+    )
+
+
+def dashboard_json_value(value):
+    if value is None or pd.isna(value):
+        return None
+
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+
+    if isinstance(value, float):
+        return float(value)
+
+    if isinstance(value, int):
+        return int(value)
+
+    return str(value)
+
+
+def apply_strategy_name_updates_to_master(input_file, updates):
+    if not isinstance(updates, list):
+        raise ValueError("Strategy updates must be a list")
+
+    input_path = Path(input_file)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Could not find {input_path}")
+
+    master = pd.read_csv(input_path)
+    if "Strategy_Name" not in master.columns:
+        master["Strategy_Name"] = ""
+
+    changed_rows = set()
+    skipped_updates = 0
+
+    for update in updates:
+        if not isinstance(update, dict):
+            skipped_updates += 1
+            continue
+
+        strategy_name = clean_strategy_name(update.get("strategy_name", ""))
+        row_ids = source_row_ids_from_value(
+            update.get(
+                "source_row_ids",
+                update.get("sourceRowIds"),
+            )
+        )
+
+        if not strategy_name or not row_ids:
+            skipped_updates += 1
+            continue
+
+        valid_row_ids = [
+            row_id
+            for row_id in row_ids
+            if 0 <= row_id < len(master)
+        ]
+
+        if not valid_row_ids:
+            skipped_updates += 1
+            continue
+
+        for row_id in valid_row_ids:
+            current_strategy = clean_strategy_name(
+                master.at[row_id, "Strategy_Name"]
+            )
+            if current_strategy != strategy_name:
+                master.at[row_id, "Strategy_Name"] = strategy_name
+                changed_rows.add(row_id)
+
+    if changed_rows:
+        master.to_csv(input_path, index=False)
+
+    return {
+        "saved_rows": len(changed_rows),
+        "skipped_updates": skipped_updates,
+        "input_file": str(input_path),
+    }
+
+
+def dashboard_trade_date(value, date_only=False):
+    if value is None or pd.isna(value):
+        return ""
+
+    timestamp = pd.to_datetime(
+        value,
+        errors="coerce",
+    )
+
+    if pd.isna(timestamp):
+        return str(value)
+
+    if date_only:
+        return timestamp.strftime("%Y-%m-%d")
+
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def strategy_trade_browser_payload(realized_trades, summary=None):
+    strategy_names = []
+
+    if summary is not None and not summary.empty and "Strategy_Name" in summary.columns:
+        strategy_names.extend(
+            summary["Strategy_Name"]
+            .dropna()
+            .astype(str)
+            .tolist()
+        )
+
+    trades = []
+    if realized_trades is not None and not realized_trades.empty:
+        working = realized_trades.copy()
+        sort_column = "timestamp" if "timestamp" in working.columns else "Exec Time"
+        if sort_column in working.columns:
+            working["_dashboard_sort"] = pd.to_datetime(
+                working[sort_column],
+                errors="coerce",
+            )
+            working = working.sort_values(
+                "_dashboard_sort",
+                ascending=False,
+                na_position="last",
+            )
+
+        for _, row in working.iterrows():
+            strategy_name = str(row.get("Strategy_Name", "") or "")
+            if strategy_name:
+                strategy_names.append(strategy_name)
+
+            timestamp = row.get("timestamp", row.get("Exec Time"))
+            trades.append({
+                "strategy": strategy_name,
+                "sourceRowIds": source_row_ids_from_row(row),
+                "date": dashboard_trade_date(timestamp, date_only=True),
+                "symbol": dashboard_json_value(row.get("Symbol")),
+                "spread": dashboard_json_value(row.get("Spread")),
+                "side": dashboard_json_value(row.get("Side")),
+                "qty": dashboard_json_value(row.get("Qty")),
+                "status": dashboard_json_value(row.get("realized_status")),
+                "entry": dashboard_json_value(row.get("open_exec_time")),
+                "exit": dashboard_json_value(row.get("close_exec_time")),
+                "grossPnl": dashboard_json_value(row.get("trade_pnl")),
+                "fees": dashboard_json_value(row.get("fees")),
+                "netPnl": dashboard_json_value(row.get("net_pnl")),
+            })
+
+    strategy_options = sorted(
+        {
+            strategy
+            for strategy in strategy_names
+            if str(strategy).strip()
+        },
+        key=lambda value: value.lower(),
+    )
+
+    return {
+        "strategies": strategy_options,
+        "trades": trades,
+    }
+
+
+def strategy_trade_browser_html(realized_trades, summary=None, server_enabled=False):
+    payload = strategy_trade_browser_payload(
+        realized_trades,
+        summary,
+    )
+    payload["serverEnabled"] = bool(server_enabled)
+    payload_json = dashboard_json_payload(payload)
+
+    return f"""
+  <details class="strategy-trades-details">
+    <summary>Strategy Trades</summary>
+    <div class="strategy-trades-content">
+    <div class="strategy-trade-browser">
+      <label for="strategy-trade-select">Strategy</label>
+      <select id="strategy-trade-select"></select>
+      <button class="dashboard-button" type="button" id="save-strategy-edits">
+        Save strategy changes
+      </button>
+      <button class="dashboard-button secondary" type="button" id="exit-dashboard" hidden>
+        Exit dashboard
+      </button>
+      <span class="strategy-save-status" id="strategy-save-status"></span>
+    </div>
+    <div class="table-scroll">
+      <table class="data-table strategy-trade-browser-table" id="strategy-trade-table">
+        <thead>
+          <tr>
+            <th>Strategy</th>
+            <th>Date</th>
+            <th>Symbol</th>
+            <th>Spread</th>
+            <th>Side</th>
+            <th>Qty</th>
+            <th>Status</th>
+            <th>Entry Date</th>
+            <th>Exit Date</th>
+            <th>Gross PNL</th>
+            <th>Fees</th>
+            <th>Net PNL</th>
+          </tr>
+        </thead>
+        <tbody id="strategy-trade-table-body"></tbody>
+      </table>
+    </div>
+    <div class="empty-state strategy-trade-empty" id="strategy-trade-empty" hidden>
+      No realized trades for this strategy.
+    </div>
+    <script type="application/json" id="strategy-trade-data">{payload_json}</script>
+    </div>
+  </details>
+"""
+
+
+def strategy_trade_browser_script():
+    return """
+  <script>
+    (() => {
+      const payloadEl = document.getElementById("strategy-trade-data");
+      const selectEl = document.getElementById("strategy-trade-select");
+      const bodyEl = document.getElementById("strategy-trade-table-body");
+      const emptyEl = document.getElementById("strategy-trade-empty");
+      const saveEl = document.getElementById("save-strategy-edits");
+      const exitEl = document.getElementById("exit-dashboard");
+      const statusEl = document.getElementById("strategy-save-status");
+
+      if (!payloadEl || !selectEl || !bodyEl || !emptyEl || !saveEl || !statusEl) {
+        return;
+      }
+
+      const payload = JSON.parse(payloadEl.textContent || "{}");
+      const serverEnabled = Boolean(payload.serverEnabled);
+      const strategies = [...new Set(payload.strategies || [])].sort((a, b) => a.localeCompare(b));
+      const trades = (payload.trades || []).map((trade) => ({
+        ...trade,
+        savedStrategy: trade.strategy || "",
+        pendingStrategy: trade.strategy || "",
+      }));
+      const dirtyUpdates = new Map();
+      const currencyFormatter = new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency: "USD",
+      });
+
+      const sourceKey = (trade) => (trade.sourceRowIds || []).join(",");
+
+      const setStatus = (message, tone = "") => {
+        statusEl.textContent = message;
+        statusEl.className = "strategy-save-status";
+        if (tone === "good") {
+          statusEl.classList.add("good-value");
+        } else if (tone === "bad") {
+          statusEl.classList.add("bad-value");
+        }
+      };
+
+      const refreshSaveState = () => {
+        saveEl.disabled = !serverEnabled || dirtyUpdates.size === 0;
+        if (!serverEnabled) {
+          setStatus("Read-only");
+        } else if (dirtyUpdates.size === 0) {
+          setStatus("");
+        } else {
+          setStatus(`${dirtyUpdates.size} trade edit(s) ready to save.`);
+        }
+      };
+
+      const textCell = (value) => {
+        const td = document.createElement("td");
+        td.textContent = value === null || value === undefined || value === "" ? "" : value;
+        return td;
+      };
+
+      const moneyCell = (value) => {
+        const td = document.createElement("td");
+        const numeric = Number(value);
+        if (Number.isFinite(numeric)) {
+          td.textContent = currencyFormatter.format(numeric);
+          if (numeric > 0) {
+            td.className = "good-value";
+          } else if (numeric < 0) {
+            td.className = "bad-value";
+          }
+        } else {
+          td.textContent = "";
+        }
+        return td;
+      };
+
+      const strategyOptions = (selectedStrategy) => strategies.map((strategy) => {
+        const option = document.createElement("option");
+        option.value = strategy;
+        option.textContent = strategy;
+        option.selected = strategy === selectedStrategy;
+        return option;
+      });
+
+      const strategyCell = (trade) => {
+        const td = document.createElement("td");
+        const strategySelect = document.createElement("select");
+        const key = sourceKey(trade);
+        strategySelect.className = "strategy-edit-select";
+        strategyOptions(trade.pendingStrategy).forEach((option) => {
+          strategySelect.appendChild(option);
+        });
+        strategySelect.disabled = !serverEnabled || !key;
+        strategySelect.addEventListener("change", () => {
+          trade.pendingStrategy = strategySelect.value;
+          if (trade.pendingStrategy && trade.pendingStrategy !== trade.savedStrategy) {
+            dirtyUpdates.set(key, {
+              source_row_ids: trade.sourceRowIds || [],
+              strategy_name: trade.pendingStrategy,
+            });
+          } else {
+            dirtyUpdates.delete(key);
+          }
+          refreshSaveState();
+        });
+        td.appendChild(strategySelect);
+        return td;
+      };
+
+      const render = () => {
+        const selected = selectEl.value;
+        const rows = trades.filter((trade) => trade.strategy === selected);
+        bodyEl.replaceChildren();
+        emptyEl.hidden = rows.length > 0;
+
+        rows.forEach((trade) => {
+          const tr = document.createElement("tr");
+          [
+            strategyCell(trade),
+            textCell(trade.date),
+            textCell(trade.symbol),
+            textCell(trade.spread),
+            textCell(trade.side),
+            textCell(trade.qty),
+            textCell(trade.status),
+            textCell(trade.entry),
+            textCell(trade.exit),
+            moneyCell(trade.grossPnl),
+            moneyCell(trade.fees),
+            moneyCell(trade.netPnl),
+          ].forEach((cell) => tr.appendChild(cell));
+          bodyEl.appendChild(tr);
+        });
+      };
+
+      strategies.forEach((strategy) => {
+        const option = document.createElement("option");
+        option.value = strategy;
+        option.textContent = strategy;
+        selectEl.appendChild(option);
+      });
+
+      selectEl.disabled = strategies.length === 0;
+      selectEl.addEventListener("change", render);
+      saveEl.addEventListener("click", async () => {
+        const updates = Array.from(dirtyUpdates.values());
+        if (!serverEnabled) {
+          setStatus("Start the dashboard with --serve-dashboard to save.", "bad");
+          return;
+        }
+        if (updates.length === 0) {
+          refreshSaveState();
+          return;
+        }
+
+        saveEl.disabled = true;
+        setStatus("Saving...");
+        try {
+          const response = await fetch("/api/strategy-updates", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({updates}),
+          });
+          const result = await response.json();
+          if (!response.ok) {
+            throw new Error(result.error || response.statusText);
+          }
+
+          updates.forEach((update) => {
+            const key = (update.source_row_ids || []).join(",");
+            trades.forEach((trade) => {
+              if (sourceKey(trade) === key) {
+                trade.savedStrategy = update.strategy_name;
+                trade.pendingStrategy = update.strategy_name;
+                trade.strategy = update.strategy_name;
+              }
+            });
+          });
+          dirtyUpdates.clear();
+          setStatus(`Saved ${result.saved_rows} source row(s). Rerun analysis to refresh summaries.`, "good");
+          render();
+        } catch (error) {
+          setStatus(`Save failed: ${error.message || error}`, "bad");
+        } finally {
+          saveEl.disabled = !serverEnabled || dirtyUpdates.size === 0;
+        }
+      });
+
+      if (exitEl) {
+        exitEl.hidden = !serverEnabled;
+        exitEl.addEventListener("click", async () => {
+          if (dirtyUpdates.size && !confirm("You have unsaved strategy changes. Close anyway?")) {
+            return;
+          }
+
+          try {
+            await fetch("/api/shutdown", {method: "POST"});
+            setStatus("Dashboard server stopped.", "good");
+            window.close();
+          } catch (error) {
+            setStatus(`Exit failed: ${error.message || error}`, "bad");
+          }
+        });
+      }
+
+      render();
+      refreshSaveState();
+    })();
+  </script>
+"""
+
+
 GOOD_WHEN_POSITIVE = {
     "gross_profit",
     "total_pnl",
@@ -4790,6 +7780,14 @@ def summary_value_class(metric, value):
     except (TypeError, ValueError):
         return ""
 
+    if metric in {
+        "closed_net_delta_statement_minus_script",
+        "delta_statement_minus_trade_history",
+    }:
+        if abs(numeric_value) <= 1:
+            return "good-value"
+        return "bad-value"
+
     if metric in GOOD_WHEN_POSITIVE:
         if numeric_value > 0:
             return "good-value"
@@ -4879,6 +7877,7 @@ def decision_dataframe_to_html_table(df, max_rows=None):
         "suggested_action": "Action",
         "strategy_status": "Status",
         "data_confidence": "Data",
+        "allocation_readiness": "Sizing Data",
         "total_pnl": "PNL",
         "total_return": "Total Return",
         "cagr": "Ann. Return",
@@ -4886,6 +7885,30 @@ def decision_dataframe_to_html_table(df, max_rows=None):
         "profit_factor": "PF",
         "safe_f": "Safe-F",
         "risk_per_trade_dollars": "Risk $",
+        "simulations": "Simulations",
+        "CAR25": "CAR25",
+        "sizing_method": "Sizing Method",
+        "return_basis": "Return Basis",
+        "drawdown_limit": "DD Limit",
+        "drawdown_breach_probability": "DD Breach Probability",
+        "pct_above_drawdown_limit": "Required DD Survival",
+        "risk_ceiling_fraction": "Risk Ceiling",
+        "cagr_objective_quantile": "CAGR Quantile",
+        "mean_block_length": "Avg. Block Trades",
+        "elapsed_years": "History Years",
+        "risk_model_trade_count": "Sizing Trades",
+        "recommended_instrument": "Instrument",
+        "risk_budget_dollars": "Risk Budget",
+        "allocated_risk_per_trade_dollars": "Allocated Risk",
+        "pilot_risk_cap_pct": "Pilot Risk Cap",
+        "safe_f_risk_ceiling_dollars": "Safe-F Risk $ Ceiling",
+        "wfa_risk_per_contract_dollars": "Risk / Contract",
+        "wfa_optimal_risk_fraction": "Optimized Risk %",
+        "wfa_drawdown_breach_probability": "DD Breach Probability",
+        "wfa_drawdown_limit": "DD Limit",
+        "wfa_car25": "CAR25",
+        "sizing_basis": "Sizing Basis",
+        "estimated_max_risk_per_contract_or_share": "Risk / Contract",
         "contracts_or_shares_to_trade": "Size",
         "settlement_coverage_ratio": "Settlement",
         "settlement_missing_count": "Missing Settle",
@@ -4944,6 +7967,8 @@ def decision_dataframe_to_html_table(df, max_rows=None):
                 "allocation_note",
                 "data_confidence_reason",
                 "contracts_or_shares_to_trade",
+                "recommended_instrument",
+                "sizing_basis",
             }:
                 text = str(value) if not pd.isna(value) else ""
                 class_name = (
@@ -5044,6 +8069,872 @@ def summary_dataframe_to_html_table(df):
     )
 
 
+PRIMARY_DASHBOARD_CHARTS = {
+    "account_equity_curve.png",
+    "strategy_equity_curves.png",
+    "recent_trade_pnl_by_strategy.png",
+    "daily_pnl_correlation_heatmap.png",
+    "drawdown_correlation_heatmap.png",
+    "risk_simulation_cagr_boxplot.png",
+    "risk_simulation_max_drawdown_boxplot.png",
+}
+
+
+DASHBOARD_CHART_TITLES = {
+    "account_equity_curve.png": "Account Equity Curve",
+    "strategy_equity_curves.png": "Strategy Equity Curves",
+    "recent_trade_pnl_by_strategy.png": "Recent Trade PNL By Strategy",
+    "daily_pnl_correlation_heatmap.png": "Daily PNL Correlation",
+    "drawdown_correlation_heatmap.png": "Drawdown Correlation",
+    "risk_simulation_cagr_boxplot.png": "Simulation CAGR",
+    "risk_simulation_max_drawdown_boxplot.png": "Simulation Max Drawdown",
+}
+
+
+def dashboard_chart_title(path):
+    mapped_title = DASHBOARD_CHART_TITLES.get(os.path.basename(path))
+
+    if mapped_title:
+        return mapped_title
+
+    title = os.path.basename(path).replace("_", " ").replace(".png", "")
+    return title.title()
+
+
+def dashboard_chart_sections(paths):
+    return "\n".join(
+        f'<section><h2>{html.escape(dashboard_chart_title(path))}</h2>'
+        f'<img src="{html.escape(os.path.relpath(path, OUTPUT_DIR))}" '
+        f'alt="{html.escape(path)}"></section>'
+        for path in paths
+    )
+
+
+def split_dashboard_chart_files(chart_files, bottom_chart_files=None):
+    primary_chart_files = []
+    detail_chart_files = []
+
+    for path in list(chart_files or []) + list(bottom_chart_files or []):
+        if os.path.basename(path) in PRIMARY_DASHBOARD_CHARTS:
+            primary_chart_files.append(path)
+        else:
+            detail_chart_files.append(path)
+
+    return primary_chart_files, detail_chart_files
+
+
+def wfa_profit_factor(pnl):
+    values = pd.to_numeric(pd.Series(pnl), errors="coerce").dropna()
+    gross_profit = values[values > 0].sum()
+    gross_loss = abs(values[values < 0].sum())
+
+    if gross_loss == 0:
+        return float("inf") if gross_profit > 0 else None
+
+    return float(gross_profit / gross_loss)
+
+
+def wfa_gate(
+    key,
+    label,
+    display_value,
+    target,
+    status,
+    description,
+    blocking=True,
+):
+    return {
+        "key": key,
+        "label": label,
+        "display_value": display_value,
+        "target": target,
+        "status": status,
+        "description": description,
+        "blocking": blocking,
+    }
+
+
+def wfa_metric_display(value, suffix="", decimals=2):
+    if value is None or pd.isna(value):
+        return "n/a"
+    if math.isinf(float(value)):
+        return "inf"
+    return f"{float(value):,.{decimals}f}{suffix}"
+
+
+def bootstrap_wfa_metrics(
+    pnl,
+    starting_equity,
+    elapsed_years,
+    simulations,
+    random_seed,
+):
+    values = pd.to_numeric(pd.Series(pnl), errors="coerce").dropna().to_numpy()
+    if len(values) == 0 or simulations <= 0:
+        return {"cagr_q25": None, "profit_factor_q25": None}
+
+    rng = np.random.default_rng(random_seed)
+    sampled = values[
+        rng.integers(0, len(values), size=(len(values), simulations))
+    ]
+    ending_equity = starting_equity + sampled.sum(axis=0)
+    valid_ending = ending_equity > 0
+    cagr = np.full(simulations, np.nan)
+    cagr[valid_ending] = (
+        (ending_equity[valid_ending] / starting_equity)
+        ** (1 / max(elapsed_years, 1.0))
+        - 1
+    )
+    gross_profit = np.where(sampled > 0, sampled, 0).sum(axis=0)
+    gross_loss = np.abs(np.where(sampled < 0, sampled, 0).sum(axis=0))
+    profit_factor = np.divide(
+        gross_profit,
+        gross_loss,
+        out=np.full(simulations, np.nan),
+        where=gross_loss > 0,
+    )
+
+    return {
+        "cagr_q25": float(np.nanquantile(cagr, 0.25)),
+        "profit_factor_q25": float(np.nanquantile(profit_factor, 0.25)),
+    }
+
+
+def build_wfa_validation(
+    cleaned_trades,
+    simulations=DEFAULT_WFA_SIMULATIONS,
+    round_trip_cost=0.0,
+    cost_stress_multiple=2.0,
+    random_seed=42,
+    as_of_date=None,
+    minimum_total_trades=50,
+    minimum_segment_count=5,
+    minimum_trades_per_segment=5,
+    minimum_latest_segment_trades=5,
+    mean_block_length=DEFAULT_WFA_BLOCK_LENGTH,
+    drawdown_limit=DEFAULT_WFA_DRAWDOWN_LIMIT,
+    max_drawdown_breach_probability=(
+        DEFAULT_WFA_MAX_DRAWDOWN_BREACH_PROBABILITY
+    ),
+    max_risk_fraction=DEFAULT_WFA_MAX_RISK_FRACTION,
+    cagr_objective_quantile=DEFAULT_WFA_CAGR_QUANTILE,
+):
+    required = {
+        "WFA_01_Segment",
+        "net_pnl",
+        "starting_equity",
+        "timestamp",
+        "Qty",
+        "Symbol",
+    }
+    missing = required - set(cleaned_trades.columns)
+    if missing:
+        raise ValueError(
+            "--wfa-validation requires WFA analyzer input columns: "
+            + ", ".join(sorted(missing))
+        )
+
+    if "WFA_Execution_Type" in cleaned_trades.columns:
+        closes = cleaned_trades[
+            cleaned_trades["WFA_Execution_Type"].astype(str).str.upper() == "EXIT"
+        ].copy()
+    else:
+        closes = cleaned_trades[
+            cleaned_trades["Pos Effect"].astype(str).str.upper() == "TO CLOSE"
+        ].copy()
+
+    if closes.empty:
+        raise ValueError("--wfa-validation found no WFA close executions.")
+
+    closes["timestamp"] = pd.to_datetime(closes["timestamp"], errors="coerce")
+    closes["_raw_pnl"] = pd.to_numeric(closes["net_pnl"], errors="coerce")
+    closes = closes.dropna(subset=["timestamp", "_raw_pnl"])
+    if closes.empty:
+        raise ValueError("WFA close executions have no valid dates or P&L values.")
+    closes = closes.sort_values("timestamp").copy()
+    strategy_names = closes.get(
+        "Strategy_Name",
+        pd.Series(dtype=object),
+    ).dropna().astype(str).str.strip()
+    strategy_names = strategy_names[strategy_names != ""]
+    strategy_name = (
+        strategy_names.iloc[0]
+        if not strategy_names.empty
+        else "WFA Strategy"
+    )
+    tested_symbols = sorted({
+        str(symbol).strip()
+        for symbol in closes["Symbol"].dropna()
+        if str(symbol).strip()
+    })
+
+    starting_values = pd.to_numeric(
+        closes["starting_equity"], errors="coerce"
+    ).dropna()
+    if starting_values.empty or starting_values.iloc[0] <= 0:
+        raise ValueError("WFA validation requires positive starting equity.")
+    starting_equity = float(starting_values.iloc[0])
+    stressed_cost = max(float(round_trip_cost), 0.0) * max(
+        float(cost_stress_multiple), 0.0
+    )
+    closes["_adjusted_pnl"] = closes["_raw_pnl"] - stressed_cost
+
+    segment_rows = []
+    for segment, group in closes.groupby("WFA_01_Segment", sort=True):
+        pnl = group["_adjusted_pnl"]
+        segment_rows.append({
+            "Segment": str(segment),
+            "Trades": int(len(group)),
+            "Net PNL": float(pnl.sum()),
+            "Profit Factor": wfa_profit_factor(pnl),
+            "Win Rate": float((pnl > 0).mean()),
+            "Positive": bool(pnl.sum() > 0),
+        })
+    segment_summary = pd.DataFrame(segment_rows)
+
+    pnl = closes.sort_values("timestamp")["_adjusted_pnl"]
+    aggregate_pf = wfa_profit_factor(pnl)
+    equity = starting_equity + pnl.cumsum()
+    peak = pd.concat([
+        pd.Series([starting_equity]),
+        equity.reset_index(drop=True),
+    ]).cummax().iloc[1:].reset_index(drop=True)
+    max_drawdown = float((equity.reset_index(drop=True) / peak - 1).min())
+    elapsed_days = max(
+        (closes["timestamp"].max() - closes["timestamp"].min()).days,
+        1,
+    )
+
+    positive_segment_pct = float(segment_summary["Positive"].mean() * 100)
+    segment_profit_factors = pd.to_numeric(
+        segment_summary["Profit Factor"], errors="coerce"
+    ).replace([np.inf, -np.inf], np.nan).dropna()
+    median_segment_pf = (
+        float(segment_profit_factors.median())
+        if not segment_profit_factors.empty
+        else None
+    )
+    minimum_segment_trades = int(segment_summary["Trades"].min())
+    positive_segment_pnl = segment_summary.loc[
+        segment_summary["Net PNL"] > 0,
+        "Net PNL",
+    ]
+    concentration = (
+        float(positive_segment_pnl.max() / positive_segment_pnl.sum())
+        if not positive_segment_pnl.empty and positive_segment_pnl.sum() > 0
+        else None
+    )
+
+    def numeric_wfa_column(column):
+        if column not in closes.columns:
+            return pd.Series(float("nan"), index=closes.index)
+        return pd.to_numeric(closes[column], errors="coerce")
+
+    risk_per_contract = numeric_wfa_column("WFA_Risk_Per_Contract")
+    dollars_per_point = numeric_wfa_column("WFA_13_DollarsPerPt").abs()
+    stop_distance = numeric_wfa_column("WFA_14_StopDist").abs()
+    calculated_risk = dollars_per_point * stop_distance
+    valid_risk = risk_per_contract.gt(0) & calculated_risk.gt(0)
+    missing_risk_count = int((~valid_risk).sum())
+    relative_risk_error = (
+        (risk_per_contract - calculated_risk).abs() / calculated_risk
+    )
+    inconsistent_risk_count = int(
+        (valid_risk & relative_risk_error.gt(0.01)).sum()
+    )
+    symbol_count = int(closes["Symbol"].astype(str).nunique())
+
+    total_initial_risk = numeric_wfa_column("WFA_Total_Initial_Risk").abs()
+    calculated_total_risk = (
+        pd.to_numeric(closes["Qty"], errors="coerce").abs()
+        * risk_per_contract
+    )
+    total_initial_risk = total_initial_risk.where(
+        total_initial_risk > 0,
+        calculated_total_risk,
+    )
+    valid_simulation_risk = total_initial_risk.gt(0)
+    wfa_simulation = None
+    bootstrap = {
+        "cagr_q25": None,
+        "profit_factor_q25": None,
+    }
+    if valid_simulation_risk.any():
+        trade_r = (
+            closes.loc[valid_simulation_risk, "_adjusted_pnl"]
+            / total_initial_risk.loc[valid_simulation_risk]
+        )
+        wfa_simulation = build_wfa_simulation(
+            trade_r,
+            elapsed_days / 365.25,
+            strategy_name,
+            simulations=simulations,
+            mean_block_length=mean_block_length,
+            drawdown_limit=drawdown_limit,
+            max_breach_probability=max_drawdown_breach_probability,
+            max_risk_fraction=max_risk_fraction,
+            cagr_quantile=cagr_objective_quantile,
+            random_seed=random_seed,
+        )
+        iqr = wfa_simulation["summary"].set_index("metric_key")
+        if "cagr" in iqr.index:
+            bootstrap["cagr_q25"] = float(iqr.loc["cagr", "Q25"])
+        if "profit_factor" in iqr.index:
+            bootstrap["profit_factor_q25"] = float(
+                iqr.loc["profit_factor", "Q25"]
+            )
+
+    latest_row = closes.loc[closes["timestamp"].idxmax()]
+    latest_segment = str(latest_row["WFA_01_Segment"])
+    latest_segment_trades = closes[
+        closes["WFA_01_Segment"].astype(str) == latest_segment
+    ]
+    latest_segment_pf = wfa_profit_factor(
+        latest_segment_trades["_adjusted_pnl"]
+    )
+    latest_segment_passed = (
+        len(latest_segment_trades) >= minimum_latest_segment_trades
+        and latest_segment_trades["_adjusted_pnl"].sum() > 0
+        and latest_segment_pf is not None
+        and latest_segment_pf > 1.0
+    )
+
+    if positive_segment_pct >= 65:
+        positive_segment_status = "good"
+    elif positive_segment_pct >= 50:
+        positive_segment_status = "review"
+    else:
+        positive_segment_status = "bad"
+
+    gates = [
+        wfa_gate(
+            "aggregate_profit_factor",
+            "Aggregate OOS Profit Factor",
+            wfa_metric_display(aggregate_pf),
+            ">= 1.10 after stressed costs",
+            "good" if aggregate_pf is not None and aggregate_pf >= 1.10 else "bad",
+            f"Uses an additional ${stressed_cost:,.2f} cost per completed trade.",
+        ),
+        wfa_gate(
+            "bootstrap_downside",
+            "Bootstrap Downside",
+            (
+                f"PF Q25 {wfa_metric_display(bootstrap['profit_factor_q25'])}; "
+                "CAGR Q25 "
+                f"{wfa_metric_display(bootstrap['cagr_q25'] * 100 if bootstrap['cagr_q25'] is not None else None, '%', 2)}"
+            ),
+            "PF Q25 > 1.00 and CAGR Q25 > 0%",
+            (
+                "good"
+                if bootstrap["profit_factor_q25"] is not None
+                and bootstrap["profit_factor_q25"] > 1.0
+                and bootstrap["cagr_q25"] is not None
+                and bootstrap["cagr_q25"] > 0
+                else "bad"
+            ),
+            (
+                f"{simulations:,} stationary block resamples using "
+                f"{mean_block_length:g}-trade average blocks and the OOS horizon."
+            ),
+        ),
+        wfa_gate(
+            "bandy_safe_f",
+            "Drawdown-Constrained Safe-F",
+            (
+                "n/a"
+                if wfa_simulation is None
+                else (
+                    f"{wfa_simulation['optimization']['risk_fraction'] * 100:.2f}% risk; "
+                    f"CAR25 {wfa_simulation['optimization']['cagr_objective'] * 100:.2f}%; "
+                    "breach "
+                    f"{wfa_simulation['optimization']['drawdown_breach_probability'] * 100:.2f}%"
+                )
+            ),
+            (
+                f"maximize CAR{cagr_objective_quantile * 100:.0f} with <= "
+                f"{max_drawdown_breach_probability * 100:.1f}% probability "
+                f"of drawdown below {drawdown_limit * 100:.0f}%"
+            ),
+            (
+                "bad"
+                if wfa_simulation is None
+                else (
+                    "good"
+                    if wfa_simulation["optimization"]["risk_fraction"] > 0
+                    and wfa_simulation["optimization"]["cagr_objective"] > 0
+                    and wfa_simulation["optimization"][
+                        "drawdown_breach_probability"
+                    ]
+                    <= max_drawdown_breach_probability
+                    else "bad"
+                )
+            ),
+            (
+                "Risk is a fraction of current account equity. A non-positive "
+                "conservative growth optimum reduces the allocation to zero."
+            ),
+        ),
+        wfa_gate(
+            "positive_segments",
+            "Profitable OOS Segments",
+            wfa_metric_display(positive_segment_pct, "%", 1),
+            ">= 65% pass; 50-64.9% pilot",
+            positive_segment_status,
+            "Measures persistence across windows; a mixed result limits deployment size.",
+        ),
+        wfa_gate(
+            "median_segment_pf",
+            "Median Segment Profit Factor",
+            wfa_metric_display(median_segment_pf),
+            "> 1.00",
+            "good" if median_segment_pf is not None and median_segment_pf > 1 else "bad",
+            "Prevents one exceptional segment from hiding weak typical performance.",
+        ),
+        wfa_gate(
+            "maximum_drawdown",
+            "Stitched OOS Max Drawdown",
+            wfa_metric_display(max_drawdown * 100, "%", 1),
+            ">= -20%",
+            "good" if max_drawdown >= -0.20 else "bad",
+            "Drawdown from the chronologically stitched OOS trade stream.",
+        ),
+        wfa_gate(
+            "trade_coverage",
+            "Trade Coverage",
+            (
+                f"{len(closes):,} total; {len(segment_summary):,} segments; "
+                f"{minimum_segment_trades:,} minimum/segment"
+            ),
+            (
+                f">= {minimum_total_trades} total, >= {minimum_segment_count} "
+                f"segments, >= {minimum_trades_per_segment}/segment"
+            ),
+            (
+                "good"
+                if len(closes) >= minimum_total_trades
+                and len(segment_summary) >= minimum_segment_count
+                and minimum_segment_trades >= minimum_trades_per_segment
+                else "bad"
+            ),
+            "Uses coverage plus bootstrap uncertainty rather than requiring 100 trades.",
+        ),
+        wfa_gate(
+            "segment_concentration",
+            "Profit Concentration",
+            wfa_metric_display(
+                concentration * 100 if concentration is not None else None,
+                "%",
+                1,
+            ),
+            "largest positive segment <= 50% of positive-segment PNL",
+            "good" if concentration is not None and concentration <= 0.50 else "bad",
+            "Flags results dominated by one favorable period.",
+        ),
+        wfa_gate(
+            "position_sizing_integrity",
+            "Stop-Risk Field Integrity",
+            (
+                f"{missing_risk_count} missing; "
+                f"{inconsistent_risk_count} inconsistent"
+            ),
+            "risk/contract present and within 1% of point value x stop distance",
+            (
+                "good"
+                if missing_risk_count == 0 and inconsistent_risk_count == 0
+                else "bad"
+            ),
+            "Fractional AmiBroker backtest quantities are expected; live size uses whole contracts.",
+        ),
+        wfa_gate(
+            "cross_market_robustness",
+            "Parameter and Cross-Market Robustness",
+            f"{symbol_count} symbol(s); neighborhood data not in trade export",
+            "not evaluated from a WFA trade list",
+            "na",
+            "Use the optimization-surface and cross-sector dashboards separately when available.",
+            blocking=False,
+        ),
+        wfa_gate(
+            "recent_untouched_data",
+            "Latest Complete OOS Segment",
+            (
+                f"{latest_segment}: {len(latest_segment_trades)} trades; "
+                f"PNL ${latest_segment_trades['_adjusted_pnl'].sum():,.0f}; "
+                f"PF {wfa_metric_display(latest_segment_pf)}"
+            ),
+            (
+                f">= {minimum_latest_segment_trades} trades, positive PNL, "
+                "and PF > 1.00"
+            ),
+            "good" if latest_segment_passed else "bad",
+            "Uses the latest completed WFA segment instead of a partial calendar year.",
+        ),
+    ]
+
+    statuses = [gate["status"] for gate in gates if gate["blocking"]]
+    verdict = (
+        "FAIL"
+        if "bad" in statuses
+        else "PILOT"
+        if "review" in statuses
+        else "PASS"
+    )
+    return {
+        "verdict": verdict,
+        "gates": gates,
+        "segments": segment_summary,
+        "starting_equity": starting_equity,
+        "stressed_cost": stressed_cost,
+        "simulations": simulations,
+        "latest_segment": latest_segment,
+        "simulation": wfa_simulation,
+        "strategy_name": strategy_name,
+        "tested_symbols": tested_symbols,
+    }
+
+
+def attach_wfa_deployment_recommendation(validation, capital_allocation):
+    if not validation:
+        return validation
+
+    result = validation.copy()
+    result["deployment"] = None
+    if capital_allocation is None or capital_allocation.empty:
+        return result
+
+    strategy_name = str(validation.get("strategy_name", "")).strip()
+    matches = capital_allocation[
+        capital_allocation["Strategy_Name"].astype(str) == strategy_name
+    ]
+    if matches.empty:
+        matches = capital_allocation.head(1)
+    if matches.empty:
+        return result
+
+    row = matches.iloc[0]
+    result["deployment"] = {
+        "strategy_name": strategy_name or str(row.get("Strategy_Name", "")),
+        "tested_symbols": list(validation.get("tested_symbols", [])),
+        "recommended_instrument": str(
+            row.get("recommended_instrument", "") or ""
+        ),
+        "contracts": parse_number(row.get("contracts_or_shares_to_trade")),
+        "risk_per_contract": parse_number(
+            row.get("wfa_risk_per_contract_dollars")
+        ),
+        "risk_budget": parse_number(row.get("risk_budget_dollars")),
+        "allocated_risk": parse_number(
+            row.get("allocated_risk_per_trade_dollars")
+        ),
+        "action": str(row.get("suggested_action", "")),
+    }
+    return result
+
+
+def wfa_validation_panel_html(validation):
+    if not validation:
+        return ""
+
+    cards = []
+    for gate in validation["gates"]:
+        cards.append(f"""
+<article class="wfa-gate-card {html.escape(gate['status'])}">
+  <div class="wfa-gate-label">{html.escape(gate['label'])}</div>
+  <div class="wfa-gate-value">{html.escape(gate['display_value'])}</div>
+  <div class="wfa-gate-target">Target {html.escape(gate['target'])}</div>
+  <div class="wfa-gate-description">{html.escape(gate['description'])}</div>
+</article>
+""")
+
+    deployment = validation.get("deployment") or {}
+    tested_symbol_text = ", ".join(deployment.get("tested_symbols", [])) or "n/a"
+    recommended_instrument = deployment.get("recommended_instrument") or "n/a"
+    contracts = deployment.get("contracts")
+    contract_text = (
+        "n/a"
+        if contracts is None
+        else f"{int(contracts):,} contract{'s' if int(contracts) != 1 else ''}"
+    )
+    risk_per_contract = deployment.get("risk_per_contract")
+    allocated_risk = deployment.get("allocated_risk")
+    risk_budget = deployment.get("risk_budget")
+    deployment_html = ""
+    if deployment:
+        deployment_html = f"""
+  <div class="wfa-deployment-heading">
+    <div>
+      <h2>{html.escape(deployment.get('strategy_name') or 'WFA Strategy')}</h2>
+      <p>Walk-forward deployment estimate based on the current risk bankroll and the latest initial-stop risk.</p>
+    </div>
+    <span class="status-badge {action_badge_class(deployment.get('action'))}">{html.escape(deployment.get('action') or 'Research')}</span>
+  </div>
+  <div class="wfa-deployment-strip">
+    <div><span>Tested On</span><strong>{html.escape(tested_symbol_text)}</strong></div>
+    <div><span>Live Instrument</span><strong>{html.escape(recommended_instrument)}</strong></div>
+    <div><span>Estimated Size</span><strong>{html.escape(contract_text)}</strong></div>
+    <div><span>Risk / Contract</span><strong>{'n/a' if risk_per_contract is None else f'${risk_per_contract:,.2f}'}</strong></div>
+    <div><span>Allocated Risk</span><strong>{'n/a' if allocated_risk is None else f'${allocated_risk:,.2f}'}</strong></div>
+    <div><span>Risk Budget</span><strong>{'n/a' if risk_budget is None else f'${risk_budget:,.2f}'}</strong></div>
+  </div>
+"""
+
+    segment_display = validation["segments"].copy()
+    segment_display["Net PNL"] = segment_display["Net PNL"].map(
+        lambda value: f"${value:,.2f}"
+    )
+    segment_display["Profit Factor"] = segment_display["Profit Factor"].map(
+        wfa_metric_display
+    )
+    segment_display["Win Rate"] = segment_display["Win Rate"].map(
+        lambda value: f"{value:.1%}"
+    )
+    segment_display["Positive"] = segment_display["Positive"].map(
+        lambda value: "Yes" if value else "No"
+    )
+    simulation = validation.get("simulation")
+    simulation_html = ""
+    if simulation:
+        optimization = simulation["optimization"]
+        optimization_display = pd.DataFrame([
+            {
+                "Measure": "Optimized risk per trade",
+                "Value": (
+                    f"{optimization['risk_fraction'] * 100:.2f}% of equity"
+                ),
+            },
+            {
+                "Measure": "Risk ceiling at drawdown constraint",
+                "Value": (
+                    f"{optimization['risk_ceiling_fraction'] * 100:.2f}%"
+                ),
+            },
+            {
+                "Measure": "Conservative growth objective",
+                "Value": (
+                    f"CAR{optimization['cagr_objective_quantile'] * 100:.0f} "
+                    f"{optimization['cagr_objective'] * 100:.2f}%"
+                ),
+            },
+            {
+                "Measure": "Median simulated CAGR",
+                "Value": f"{optimization['median_cagr'] * 100:.2f}%",
+            },
+            {
+                "Measure": "Probability of breaching drawdown limit",
+                "Value": (
+                    f"{optimization['drawdown_breach_probability'] * 100:.2f}% "
+                    f"below {optimization['drawdown_limit'] * 100:.0f}%"
+                ),
+            },
+            {
+                "Measure": "Simulation design",
+                "Value": (
+                    f"{optimization['simulations']:,} paths; "
+                    f"{optimization['source_trades']} trades/path; "
+                    f"{optimization['mean_block_length']:g}-trade average blocks"
+                ),
+            },
+        ])
+        iqr_display = simulation["summary"].copy()
+
+        def format_distribution_value(row, column):
+            value = row[column]
+            if pd.isna(value):
+                return "n/a"
+            if row["Unit"] == "percent":
+                return f"{float(value) * 100:.2f}%"
+            if row["Unit"] == "trades":
+                return f"{float(value):.1f}"
+            return f"{float(value):.3f}"
+
+        for column in [
+            "Q05",
+            "Q25",
+            "Median",
+            "Q75",
+            "Q95",
+            "IQR",
+            "Observed WFA",
+        ]:
+            iqr_display[column] = iqr_display.apply(
+                lambda row, current=column: format_distribution_value(
+                    row,
+                    current,
+                ),
+                axis=1,
+            )
+        iqr_display = iqr_display[
+            [
+                "Metric",
+                "Unit",
+                "Q05",
+                "Q25",
+                "Median",
+                "Q75",
+                "Q95",
+                "IQR",
+                "Observed WFA",
+            ]
+        ]
+        chart_html = "".join(
+            (
+                '<figure class="wfa-simulation-chart">'
+                f'<img src="{html.escape(os.path.relpath(path, OUTPUT_DIR))}" '
+                f'alt="{html.escape(dashboard_chart_title(path))}">'
+                "</figure>"
+            )
+            for path in simulation.get("boxplot_files", [])
+        )
+        simulation_html = f"""
+  <h3>WFA Simulation And Position Sizing</h3>
+  <p class="wfa-simulation-note">Risk uses initial-stop R multiples. The optimizer selects the CAR25-maximizing fraction of current equity while limiting the chance of a drawdown below 20% to 5%.</p>
+  <div class="table-scroll">{dataframe_to_html_table(optimization_display)}</div>
+  <h3>Simulation IQR Values</h3>
+  <div class="table-scroll">{dataframe_to_html_table(iqr_display)}</div>
+  <div class="wfa-simulation-chart-grid">{chart_html}</div>
+"""
+    return f"""
+<section class="wfa-validation-panel">
+  {deployment_html}
+  <div class="wfa-verdict-row">
+    <div>
+      <h2>Walk-Forward Pass Gates</h2>
+      <p>Opt-in research checks. Passing improves confidence but does not guarantee live performance.</p>
+    </div>
+    <div class="wfa-verdict {html.escape(validation['verdict'].lower())}">{html.escape(validation['verdict'])}</div>
+  </div>
+  <div class="wfa-gate-grid">{"".join(cards)}</div>
+  {simulation_html}
+  <h3>OOS Segment Detail</h3>
+  <div class="table-scroll">{dataframe_to_html_table(segment_display)}</div>
+</section>
+"""
+
+
+def degradation_status_badge_class(status):
+    normalized = str(status).strip().lower()
+    if normalized == "normal":
+        return "status-healthy"
+    if normalized in {"watch", "informational"}:
+        return "status-watch"
+    if normalized == "critical":
+        return "status-pause"
+    return "status-neutral"
+
+
+def live_degradation_monitor_html(monitor):
+    if monitor is None:
+        return ""
+
+    strategies = monitor.get("strategies", pd.DataFrame())
+    horizons = monitor.get("horizons", pd.DataFrame())
+    bands = monitor.get("metric_bands", pd.DataFrame())
+    if strategies.empty:
+        return """
+<section class="degradation-panel">
+  <h2>Live Degradation Monitor</h2>
+  <div class="empty-state">No immutable WFA baselines were found in the strategy library.</div>
+</section>
+"""
+
+    strategy_sections = []
+    for _, strategy in strategies.iterrows():
+        strategy_name = str(strategy["Strategy_Name"])
+        strategy_horizons = horizons[
+            horizons["Strategy_Name"].astype(str) == strategy_name
+        ]
+        cards = []
+        for _, horizon in strategy_horizons.iterrows():
+            status = str(horizon["Status"])
+            observed_trades = int(horizon["Observed Trades"])
+            expected_trades = (
+                f"{horizon['Expected Trades Q25']:.0f}-"
+                f"{horizon['Expected Trades Q75']:.0f}"
+            )
+            has_performance = observed_trades > 0 and status not in {
+                "Awaiting Live Trades",
+            }
+            total_r = (
+                f"{horizon['Observed Total R']:.2f} R"
+                if has_performance
+                and pd.notna(horizon["Observed Total R"])
+                else "n/a"
+            )
+            drawdown_r = (
+                f"{horizon['Observed Max Drawdown R']:.2f} R"
+                if has_performance
+                and pd.notna(horizon["Observed Max Drawdown R"])
+                else "n/a"
+            )
+            cards.append(f"""
+<article class="degradation-horizon-card">
+  <div class="degradation-card-heading">
+    <strong>{html.escape(str(horizon['Horizon']))}</strong>
+    <span class="status-badge {degradation_status_badge_class(status)}">{html.escape(status)}</span>
+  </div>
+  <dl>
+    <div><dt>Live Trades</dt><dd>{observed_trades} <small>expected IQR {expected_trades}</small></dd></div>
+    <div><dt>Total Return</dt><dd>{total_r} <small>IQR {horizon['Total R Q25']:.2f} to {horizon['Total R Q75']:.2f} R</small></dd></div>
+    <div><dt>Max Drawdown</dt><dd>{drawdown_r} <small>IQR {horizon['Max Drawdown R Q25']:.2f} to {horizon['Max Drawdown R Q75']:.2f} R</small></dd></div>
+  </dl>
+</article>
+""")
+
+        detail_html = ""
+        if not bands.empty:
+            strategy_bands = bands[
+                bands["Strategy_Name"].astype(str) == strategy_name
+            ].copy()
+            display_columns = [
+                "Horizon",
+                "Metric",
+                "Unit",
+                "Q05",
+                "Q25",
+                "Median",
+                "Q75",
+                "Q95",
+                "Observed Live",
+                "Metric Status",
+            ]
+            strategy_bands = strategy_bands[
+                [column for column in display_columns if column in strategy_bands]
+            ]
+            detail_html = f"""
+<details class="degradation-details">
+  <summary>Simulation percentile details</summary>
+  <div class="table-scroll">{dataframe_to_html_table(strategy_bands)}</div>
+</details>
+"""
+
+        overall_status = str(strategy["Status"])
+        strategy_sections.append(f"""
+<div class="degradation-strategy">
+  <div class="degradation-strategy-heading">
+    <div>
+      <h3>{html.escape(strategy_name)}</h3>
+      <p>{int(strategy['Live Trades'])} live trades; WFA reference {html.escape(str(strategy['WFA Start']))} through {html.escape(str(strategy['WFA End']))}. R basis: {html.escape(str(strategy['R Basis']))}.</p>
+    </div>
+    <span class="status-badge {degradation_status_badge_class(overall_status)}">{html.escape(overall_status)}</span>
+  </div>
+  <div class="degradation-horizon-grid">{"".join(cards)}</div>
+  {detail_html}
+</div>
+""")
+
+    return f"""
+<section class="degradation-panel">
+  <div class="degradation-panel-heading">
+    <div>
+      <h2>Live Degradation Monitor</h2>
+      <p>{monitor.get('simulations', 0):,} horizon-matched WFA simulations. Q25 is an early warning; Q05 is an unusually adverse result. Monitoring does not change allocation automatically.</p>
+    </div>
+  </div>
+  {"".join(strategy_sections)}
+</section>
+"""
+
+
 def save_dashboard(
     account_summary,
     benchmark_summary,
@@ -5059,25 +8950,32 @@ def save_dashboard(
     drawdown_overlap,
     chart_files,
     bottom_chart_files=None,
+    ytd_reports=None,
+    realized_trades=None,
+    server_enabled=False,
+    wfa_validation=None,
+    live_degradation_monitor=None,
 ):
-    bottom_chart_files = bottom_chart_files or []
-    chart_tags = "\n".join(
-        f'<section><h2>{html.escape(os.path.basename(path).replace("_", " ").replace(".png", "").title())}</h2>'
-        f'<img src="{html.escape(os.path.relpath(path, OUTPUT_DIR))}" alt="{html.escape(path)}"></section>'
-        for path in chart_files
+    primary_chart_files, detail_chart_files = split_dashboard_chart_files(
+        chart_files,
+        bottom_chart_files,
     )
-    bottom_chart_tags = "\n".join(
-        f'<section><h2>{html.escape(os.path.basename(path).replace("_", " ").replace(".png", "").title())}</h2>'
-        f'<img src="{html.escape(os.path.relpath(path, OUTPUT_DIR))}" alt="{html.escape(path)}"></section>'
-        for path in bottom_chart_files
-    )
+    ytd_details = ytd_reports_dashboard_section(ytd_reports)
+    chart_tags = dashboard_chart_sections(primary_chart_files)
+    detail_chart_tags = dashboard_chart_sections(detail_chart_files)
     account_kpi_cards = build_account_kpi_cards(
         account_summary,
         benchmark_summary,
+        ytd_reports,
     )
     strategy_top_summary = build_strategy_top_summary(
         summary,
         pnl_correlation,
+    )
+    strategy_trade_browser = strategy_trade_browser_html(
+        realized_trades,
+        summary,
+        server_enabled=server_enabled,
     )
     strategy_decision_display = strategy_decision
     if strategy_decision is not None and not strategy_decision.empty:
@@ -5108,9 +9006,54 @@ def save_dashboard(
     strategy_decision_table = decision_dataframe_to_html_table(
         strategy_decision_display,
     )
-    capital_allocation_table = decision_dataframe_to_html_table(
+    compact_capital_allocation = build_compact_capital_allocation_table(
         capital_allocation,
     )
+    capital_allocation_table = decision_dataframe_to_html_table(
+        compact_capital_allocation,
+    )
+    detail_capital_allocation_table = decision_dataframe_to_html_table(
+        capital_allocation,
+    )
+    capital_allocation_method_note = ""
+    if (
+        capital_allocation is not None
+        and not capital_allocation.empty
+        and "sizing_method" in capital_allocation.columns
+        and (
+            capital_allocation["sizing_method"]
+            == "drawdown_constrained_car25"
+        ).any()
+    ):
+        method_row = capital_allocation.loc[
+            capital_allocation["sizing_method"]
+            == "drawdown_constrained_car25"
+        ].iloc[0]
+        method_simulations = int(
+            parse_number(method_row.get("simulations")) or 0
+        )
+        method_drawdown = parse_number(method_row.get("drawdown_limit"))
+        method_survival = parse_number(
+            method_row.get("pct_above_drawdown_limit")
+        )
+        capital_allocation_method_note = (
+            '<p class="allocation-method-note">Automated strategy size uses '
+            f'{method_simulations:,} block-bootstrap paths to maximize CAR25 '
+            f'while requiring {method_survival:.0%} of paths to remain above '
+            f'a {method_drawdown:.0%} drawdown. Defined-risk spreads use '
+            'estimated maximum loss; uncovered positions use broker margin as '
+            'a sizing proxy.</p>'
+        )
+    wfa_validation_panel = wfa_validation_panel_html(wfa_validation)
+    degradation_panel = live_degradation_monitor_html(
+        live_degradation_monitor
+    )
+    drawdown_overlap_display = drawdown_overlap
+    if "drawdown_overlap_ratio" in drawdown_overlap.columns:
+        drawdown_overlap_display = drawdown_overlap.sort_values(
+            "drawdown_overlap_ratio",
+            ascending=False,
+        )
 
     dashboard = f"""<!doctype html>
 <html lang="en">
@@ -5192,8 +9135,19 @@ def save_dashboard(
     }}
     .kpi-grid {{
       display: grid;
-      grid-template-columns: repeat(5, minmax(160px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 12px;
+    }}
+    .kpi-section + .kpi-section {{
+      margin-top: 18px;
+    }}
+    .kpi-section h3 {{
+      margin: 0 0 10px;
+      color: #334155;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0;
+      text-transform: uppercase;
     }}
     .kpi-card {{
       min-height: 132px;
@@ -5342,9 +9296,370 @@ def save_dashboard(
     .table-scroll .data-table td {{
       border-bottom: 1px solid #e6ebf1;
     }}
+    .strategy-trade-browser {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }}
+    .strategy-trade-browser label {{
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }}
+    .strategy-trade-browser select {{
+      min-width: min(100%, 360px);
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--ink);
+      padding: 7px 10px;
+      font: inherit;
+    }}
+    .dashboard-button {{
+      min-height: 38px;
+      border: 1px solid var(--teal);
+      border-radius: 8px;
+      background: var(--teal);
+      color: #ffffff;
+      padding: 7px 12px;
+      font: inherit;
+      font-weight: 750;
+      cursor: pointer;
+    }}
+    .dashboard-button.secondary {{
+      border-color: var(--line);
+      background: #ffffff;
+      color: var(--ink);
+    }}
+    .dashboard-button:disabled {{
+      cursor: not-allowed;
+      opacity: 0.55;
+    }}
+    .strategy-save-status {{
+      min-height: 20px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .strategy-save-status.good-value,
+    .strategy-save-status.bad-value {{
+      font-weight: 800;
+    }}
+    .strategy-edit-select {{
+      width: min(100%, 260px);
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--ink);
+      padding: 6px 8px;
+      font: inherit;
+    }}
+    .strategy-trade-browser-table td:nth-child(3),
+    .strategy-trade-browser-table td:nth-child(4),
+    .strategy-trade-browser-table td:nth-child(8),
+    .strategy-trade-browser-table td:nth-child(9) {{
+      white-space: normal;
+    }}
+    .strategy-trade-empty[hidden] {{
+      display: none;
+    }}
+    .wfa-validation-panel {{
+      border-top: 5px solid var(--navy);
+    }}
+    .wfa-deployment-heading {{
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      padding-bottom: 13px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 0;
+    }}
+    .wfa-deployment-heading h2 {{
+      margin: 0;
+      font-size: 21px;
+      overflow-wrap: anywhere;
+    }}
+    .wfa-deployment-heading p {{
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .wfa-deployment-strip {{
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 20px;
+    }}
+    .wfa-deployment-strip > div {{
+      min-width: 0;
+      padding: 12px 12px 13px 0;
+    }}
+    .wfa-deployment-strip > div + div {{
+      border-left: 1px solid var(--line);
+      padding-left: 12px;
+    }}
+    .wfa-deployment-strip span {{
+      display: block;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }}
+    .wfa-deployment-strip strong {{
+      display: block;
+      margin-top: 5px;
+      color: var(--ink);
+      font-size: 17px;
+      overflow-wrap: anywhere;
+    }}
+    .wfa-verdict-row {{
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 18px;
+      margin-bottom: 14px;
+    }}
+    .wfa-verdict-row p {{
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .wfa-verdict {{
+      border-left: 5px solid var(--amber);
+      padding: 7px 10px;
+      color: var(--amber);
+      font-size: 18px;
+      font-weight: 850;
+    }}
+    .wfa-verdict.pass {{ border-color: var(--green); color: var(--green); }}
+    .wfa-verdict.fail {{ border-color: var(--red); color: var(--red); }}
+    .wfa-verdict.pilot {{ border-color: var(--amber); color: var(--amber); }}
+    .wfa-gate-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(245px, 1fr));
+      gap: 10px;
+      margin-bottom: 18px;
+    }}
+    .wfa-gate-card {{
+      min-height: 172px;
+      border: 1px solid var(--line);
+      border-left: 5px solid var(--amber);
+      border-radius: 8px;
+      background: #fffaf0;
+      padding: 13px;
+    }}
+    .wfa-gate-card.good {{ border-left-color: var(--green); background: #f0fdf4; }}
+    .wfa-gate-card.bad {{ border-left-color: var(--red); background: #fff1f2; }}
+    .wfa-gate-card.na {{ border-left-color: #64748b; background: #f8fafc; }}
+    .wfa-gate-label {{
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }}
+    .wfa-gate-value {{
+      margin-top: 7px;
+      color: var(--ink);
+      font-size: 20px;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }}
+    .wfa-gate-target {{
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    .wfa-gate-description {{
+      margin-top: 8px;
+      color: #475569;
+      font-size: 12px;
+    }}
+    .wfa-validation-panel h3 {{
+      margin: 18px 0 9px;
+      font-size: 14px;
+    }}
+    .wfa-simulation-note {{
+      margin: -3px 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .allocation-method-note {{
+      margin: -5px 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .wfa-simulation-chart-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }}
+    .wfa-simulation-chart {{
+      margin: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 8px;
+    }}
+    .degradation-panel {{
+      border-top: 5px solid var(--teal);
+    }}
+    .degradation-panel-heading h2 {{
+      margin-bottom: 3px;
+    }}
+    .degradation-panel-heading p,
+    .degradation-strategy-heading p {{
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .degradation-strategy {{
+      padding-top: 17px;
+      margin-top: 17px;
+      border-top: 1px solid var(--line);
+    }}
+    .degradation-strategy-heading,
+    .degradation-card-heading {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+    }}
+    .degradation-strategy-heading h3 {{
+      margin: 0 0 4px;
+      font-size: 16px;
+      overflow-wrap: anywhere;
+    }}
+    .degradation-horizon-grid {{
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }}
+    .degradation-horizon-card {{
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      padding: 12px;
+    }}
+    .degradation-horizon-card dl {{
+      margin: 11px 0 0;
+    }}
+    .degradation-horizon-card dl > div + div {{
+      margin-top: 9px;
+      padding-top: 9px;
+      border-top: 1px solid #e6ebf1;
+    }}
+    .degradation-horizon-card dt {{
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }}
+    .degradation-horizon-card dd {{
+      margin: 3px 0 0;
+      color: var(--ink);
+      font-size: 17px;
+      font-weight: 800;
+    }}
+    .degradation-horizon-card small {{
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 600;
+    }}
+    .degradation-details {{
+      margin-top: 12px;
+    }}
+    .degradation-details > summary {{
+      cursor: pointer;
+      color: var(--teal);
+      font-size: 12px;
+      font-weight: 800;
+    }}
+    .degradation-details .table-scroll {{
+      margin-top: 9px;
+    }}
+    .strategy-trades-details {{
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 10px 28px rgba(16, 32, 51, 0.06);
+      margin-top: 18px;
+    }}
+    .strategy-trades-details > summary {{
+      cursor: pointer;
+      list-style: none;
+      padding: 16px 18px;
+      color: var(--navy);
+      font-size: 17px;
+      font-weight: 800;
+    }}
+    .strategy-trades-details > summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .strategy-trades-details > summary::after {{
+      content: "+";
+      float: right;
+      color: var(--muted);
+    }}
+    .strategy-trades-details[open] > summary::after {{
+      content: "-";
+    }}
+    .strategy-trades-content {{
+      border-top: 1px solid var(--line);
+      padding: 18px;
+    }}
+    .supporting-details {{
+      background: transparent;
+      border: 0;
+      box-shadow: none;
+      padding: 0;
+      margin: 6px 0 0;
+    }}
+    .supporting-details > summary {{
+      cursor: pointer;
+      list-style: none;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-size: 16px;
+      font-weight: 800;
+      color: var(--navy);
+    }}
+    .supporting-details > summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .supporting-details > summary::after {{
+      content: "+";
+      float: right;
+      color: var(--muted);
+    }}
+    .supporting-details[open] > summary::after {{
+      content: "-";
+    }}
+    .supporting-details-content {{
+      margin-top: 18px;
+    }}
     @media (max-width: 1200px) {{
       .kpi-grid {{
         grid-template-columns: repeat(2, minmax(180px, 1fr));
+      }}
+      .wfa-deployment-strip {{
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }}
+      .degradation-horizon-grid {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
       }}
     }}
     @media (max-width: 720px) {{
@@ -5355,21 +9670,41 @@ def save_dashboard(
       .kpi-grid {{
         grid-template-columns: 1fr;
       }}
+      .wfa-simulation-chart-grid {{
+        grid-template-columns: 1fr;
+      }}
+      .wfa-deployment-heading {{
+        display: block;
+      }}
+      .wfa-deployment-heading .status-badge {{
+        margin-top: 10px;
+      }}
+      .wfa-deployment-strip {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }}
+      .degradation-strategy-heading {{
+        display: block;
+      }}
+      .degradation-strategy-heading .status-badge {{
+        margin-top: 9px;
+      }}
+      .degradation-horizon-grid {{
+        grid-template-columns: 1fr;
+      }}
     }}
   </style>
 </head>
 <body>
   <header class="page-header">
     <h1>Strategy Performance Dashboard</h1>
-    <p>Account and strategy performance, drawdown, status, and correlation risk.</p>
+    <p>Compact account reconciliation, strategy performance, allocation, and correlation risk.</p>
   </header>
   <main>
+  {wfa_validation_panel}
   <div class="top-grid">
     <section>
       <h2>Account Summary</h2>
-      <div class="kpi-grid">
-        {account_kpi_cards}
-      </div>
+      {account_kpi_cards}
     </section>
     <section>
       <h2>Strategy Summary</h2>
@@ -5378,45 +9713,61 @@ def save_dashboard(
       </div>
     </section>
     <section>
-      <h2>Decision Board</h2>
-      <div class="table-scroll">
-        {strategy_decision_table}
-      </div>
-    </section>
-    <section>
       <h2>Capital Allocation</h2>
+      {capital_allocation_method_note}
       <div class="table-scroll">
         {capital_allocation_table}
       </div>
     </section>
   </div>
-  <section>
-    <h2>Open Position Audit</h2>
-    <div class="table-scroll">{dataframe_to_html_table(open_position_audit, max_rows=80)}</div>
-  </section>
-  <section>
-    <h2>Open Positions Not Counted Yet</h2>
-    <div class="table-scroll">{dataframe_to_html_table(open_positions, max_rows=80)}</div>
-  </section>
-  <section>
-    <h2>Data Quality Warnings</h2>
-    <div class="table-scroll">{dataframe_to_html_table(data_quality_warnings, max_rows=80)}</div>
-  </section>
+  {degradation_panel}
   {chart_tags}
-  <section>
-    <h2>Daily PnL Correlation</h2>
-    <div class="table-scroll">{dataframe_to_html_table(pnl_correlation.reset_index(), highlight_correlation=True)}</div>
-  </section>
-  <section>
-    <h2>Drawdown Correlation</h2>
-    <div class="table-scroll">{dataframe_to_html_table(drawdown_correlation.reset_index(), highlight_correlation=True)}</div>
-  </section>
-  <section>
-    <h2>Drawdown Overlap</h2>
-    <div class="table-scroll">{dataframe_to_html_table(drawdown_overlap.sort_values("drawdown_overlap_ratio", ascending=False), max_rows=40, highlight_correlation=True, correlation_columns_only=True)}</div>
-  </section>
-  {bottom_chart_tags}
+  <details class="supporting-details">
+    <summary>Supporting Details</summary>
+    <div class="supporting-details-content">
+      <section>
+        <h2>Decision Board</h2>
+        <div class="table-scroll">
+          {strategy_decision_table}
+        </div>
+      </section>
+      <section>
+        <h2>Detailed Capital Allocation</h2>
+        <div class="table-scroll">
+          {detail_capital_allocation_table}
+        </div>
+      </section>
+      {ytd_details}
+      <section>
+        <h2>Open Position Audit</h2>
+        <div class="table-scroll">{dataframe_to_html_table(open_position_audit, max_rows=80)}</div>
+      </section>
+      <section>
+        <h2>Open Positions Not Counted Yet</h2>
+        <div class="table-scroll">{dataframe_to_html_table(open_positions, max_rows=80)}</div>
+      </section>
+      <section>
+        <h2>Data Quality Warnings</h2>
+        <div class="table-scroll">{dataframe_to_html_table(data_quality_warnings, max_rows=80)}</div>
+      </section>
+      <section>
+        <h2>Daily PnL Correlation Table</h2>
+        <div class="table-scroll">{dataframe_to_html_table(pnl_correlation.reset_index(), highlight_correlation=True)}</div>
+      </section>
+      <section>
+        <h2>Drawdown Correlation Table</h2>
+        <div class="table-scroll">{dataframe_to_html_table(drawdown_correlation.reset_index(), highlight_correlation=True)}</div>
+      </section>
+      <section>
+        <h2>Drawdown Overlap</h2>
+        <div class="table-scroll">{dataframe_to_html_table(drawdown_overlap_display, max_rows=40, highlight_correlation=True, correlation_columns_only=True)}</div>
+      </section>
+      {detail_chart_tags}
+    </div>
+  </details>
+  {strategy_trade_browser}
   </main>
+  {strategy_trade_browser_script()}
 </body>
 </html>
 """
@@ -5436,6 +9787,167 @@ def open_dashboard(path):
     except Exception as error:
         print(f"Could not open dashboard automatically: {error}")
         return False
+
+
+def shutdown_strategy_dashboard_server(server):
+    thread = threading.Thread(
+        target=server.shutdown,
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+class StrategyDashboardHandler(BaseHTTPRequestHandler):
+    def send_json(self, status_code, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def read_json_body(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            return {}
+
+        return json.loads(
+            self.rfile.read(length).decode("utf-8")
+        )
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        request_path = unquote(parsed.path or "/")
+
+        if request_path in {"", "/"}:
+            file_path = Path(self.server.dashboard_path)
+        else:
+            file_path = (Path(self.server.web_root) / request_path.lstrip("/"))
+
+        try:
+            resolved_file = file_path.resolve()
+            resolved_root = Path(self.server.web_root).resolve()
+            if (
+                resolved_root != resolved_file
+                and resolved_root not in resolved_file.parents
+            ):
+                self.send_error(403)
+                return
+
+            if not resolved_file.exists() or not resolved_file.is_file():
+                self.send_error(404)
+                return
+
+            body = resolved_file.read_bytes()
+            content_type = (
+                mimetypes.guess_type(str(resolved_file))[0]
+                or "application/octet-stream"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except OSError as error:
+            self.send_error(500, str(error))
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/api/shutdown":
+            self.send_json(200, {"message": "Dashboard server is stopping."})
+            shutdown_strategy_dashboard_server(self.server)
+            return
+
+        if path != "/api/strategy-updates":
+            self.send_json(404, {"error": "Unknown endpoint"})
+            return
+
+        try:
+            payload = self.read_json_body()
+            result = apply_strategy_name_updates_to_master(
+                self.server.input_file,
+                payload.get("updates", []),
+            )
+            self.send_json(200, result)
+        except Exception as error:
+            self.send_json(500, {"error": str(error)})
+
+
+def serve_strategy_dashboard(
+    dashboard_path,
+    input_file,
+    host="127.0.0.1",
+    port=8780,
+    open_browser=True,
+):
+    dashboard_path = Path(dashboard_path).resolve()
+    server = HTTPServer((host, port), StrategyDashboardHandler)
+    server.dashboard_path = str(dashboard_path)
+    server.web_root = str(dashboard_path.parent)
+    server.input_file = str(input_file)
+    url = f"http://{host}:{port}/{dashboard_path.name}"
+
+    print(f"Serving strategy dashboard at {url}")
+    if open_browser:
+        try:
+            webbrowser.open(url, new=2)
+        except Exception as error:
+            print(f"Could not open dashboard automatically: {error}")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("Strategy dashboard server stopped.")
+    finally:
+        server.server_close()
+
+
+def ytd_reports_dashboard_section(ytd_reports):
+    if not ytd_reports or ytd_reports.get("summary", pd.DataFrame()).empty:
+        return """
+  <section>
+    <h2>Statement YTD Reconciliation</h2>
+    <div class="empty-state">No statement YTD values were available.</div>
+  </section>
+"""
+
+    return f"""
+  <section>
+    <h2>Statement YTD Reconciliation</h2>
+    <div class="table-scroll">{dataframe_to_html_table(ytd_reports["summary"], max_rows=1)}</div>
+  </section>
+  <section>
+    <h2>Trade History Validation Summary</h2>
+    <div class="table-scroll">{dataframe_to_html_table(ytd_reports.get("validation_summary", pd.DataFrame()), max_rows=20)}</div>
+  </section>
+  <section>
+    <h2>Trade History Validation Issues</h2>
+    <div class="table-scroll">{dataframe_to_html_table(ytd_reports.get("validation_issues", pd.DataFrame()), max_rows=40)}</div>
+  </section>
+  <section>
+    <h2>Open PnL Reconciliation</h2>
+    <div class="table-scroll">{dataframe_to_html_table(ytd_reports["open_pnl"], max_rows=20)}</div>
+  </section>
+  <section>
+    <h2>YTD Fee Reconciliation</h2>
+    <div class="table-scroll">{dataframe_to_html_table(ytd_reports["fees"], max_rows=20)}</div>
+  </section>
+  <section>
+    <h2>Closed YTD PnL Reconciliation</h2>
+    <div class="table-scroll">{dataframe_to_html_table(ytd_reports["closed_pnl"], max_rows=25)}</div>
+  </section>
+  <section>
+    <h2>Trade Rows To Review Before Adjustment</h2>
+    <div class="table-scroll">{dataframe_to_html_table(ytd_reports["trade_review"], max_rows=30)}</div>
+  </section>
+  <section>
+    <h2>Hypothetical Strategy Impact</h2>
+    <div class="table-scroll">{dataframe_to_html_table(ytd_reports["strategy_impact"], max_rows=20)}</div>
+  </section>
+"""
 
 
 def parse_args():
@@ -5458,10 +9970,48 @@ def parse_args():
         help="Do not open the dashboard in a browser after the script completes.",
     )
     parser.add_argument(
+        "--strategy-library-dir",
+        help=(
+            "Optional persistent directory for per-strategy trades, equity "
+            "curves, daily PNL, and cross-run correlation files."
+        ),
+    )
+    parser.add_argument(
+        "--live-degradation-monitor",
+        action="store_true",
+        help=(
+            "Display horizon-matched WFA degradation benchmarks when "
+            "analyzing live account history."
+        ),
+    )
+    parser.add_argument(
+        "--live-monitor-simulations",
+        type=int,
+        default=DEFAULT_LIVE_MONITOR_SIMULATIONS,
+        help="Bootstrap paths per live degradation horizon. Default: 5000.",
+    )
+    parser.add_argument(
+        "--serve-dashboard",
+        action="store_true",
+        help="Serve the dashboard locally so strategy-name edits can be saved.",
+    )
+    parser.add_argument(
+        "--dashboard-host",
+        default="127.0.0.1",
+        help="Host for --serve-dashboard.",
+    )
+    parser.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=8780,
+        help="Port for --serve-dashboard.",
+    )
+    parser.add_argument(
         "--as-of-date",
         help=(
             "Timestamp used to decide whether unmatched option positions have "
-            "expired. Defaults to the current timestamp when the script runs."
+            "expired. Defaults to the account statement date when one is "
+            "available; otherwise defaults to the current timestamp."
         ),
     )
     parser.add_argument(
@@ -5556,6 +10106,134 @@ def parse_args():
         default=42,
         help="Random seed for risk-per-trade bootstrap sampling.",
     )
+    parser.add_argument(
+        "--risk-bootstrap-block-length",
+        type=float,
+        default=DEFAULT_WFA_BLOCK_LENGTH,
+        help=(
+            "Average consecutive-trade block length used by live strategy "
+            "position-sizing simulations. Default: 3."
+        ),
+    )
+    parser.add_argument(
+        "--risk-cagr-objective-quantile",
+        type=float,
+        default=DEFAULT_WFA_CAGR_QUANTILE,
+        help=(
+            "CAGR percentile maximized by live strategy sizing. "
+            "Default: 0.25 (CAR25)."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-validation",
+        action="store_true",
+        help=(
+            "Normalize and convert a raw AmiBroker WFA export when needed, then "
+            "calculate and display the opt-in Walk-Forward Pass Gates panel."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-simulations",
+        type=int,
+        default=DEFAULT_WFA_SIMULATIONS,
+        help="Stationary bootstrap paths for WFA benchmarking. Default: 5000.",
+    )
+    parser.add_argument(
+        "--wfa-bootstrap-block-length",
+        type=float,
+        default=DEFAULT_WFA_BLOCK_LENGTH,
+        help="Average consecutive-trade block length for WFA resampling.",
+    )
+    parser.add_argument(
+        "--wfa-drawdown-limit",
+        type=float,
+        default=DEFAULT_WFA_DRAWDOWN_LIMIT,
+        help="Maximum tolerable account drawdown for WFA Safe-F sizing.",
+    )
+    parser.add_argument(
+        "--wfa-max-drawdown-breach-probability",
+        type=float,
+        default=DEFAULT_WFA_MAX_DRAWDOWN_BREACH_PROBABILITY,
+        help="Maximum simulated probability of breaching the WFA drawdown limit.",
+    )
+    parser.add_argument(
+        "--wfa-max-risk-pct",
+        type=float,
+        default=DEFAULT_WFA_MAX_RISK_FRACTION * 100,
+        help="Upper search bound for WFA initial-stop risk as percent of equity.",
+    )
+    parser.add_argument(
+        "--wfa-cagr-objective-quantile",
+        type=float,
+        default=DEFAULT_WFA_CAGR_QUANTILE,
+        help="CAGR percentile maximized by WFA sizing. Default: 0.25 (CAR25).",
+    )
+    parser.add_argument(
+        "--wfa-round-trip-cost",
+        type=float,
+        default=0.0,
+        help=(
+            "Additional expected commission plus slippage dollars per completed "
+            "WFA trade. Used only with --wfa-validation."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-cost-stress-multiple",
+        type=float,
+        default=2.0,
+        help=(
+            "Multiplier applied to --wfa-round-trip-cost for WFA pass gates. "
+            "Default: 2.0."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-starting-equity",
+        type=float,
+        help=(
+            "Starting equity for a raw AmiBroker WFA trade export. If omitted, "
+            "the analyzer attempts to infer it from a companion WFA summary CSV."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-strategy-name",
+        help=(
+            "Strategy name assigned when converting a raw WFA trade export. "
+            "Defaults to a name derived from the report directory."
+        ),
+    )
+    parser.add_argument(
+        "--wfa-min-total-trades",
+        type=int,
+        default=50,
+        help="Minimum total OOS trades for WFA sample coverage. Default: 50.",
+    )
+    parser.add_argument(
+        "--wfa-min-segments",
+        type=int,
+        default=5,
+        help="Minimum completed OOS segments for WFA sample coverage. Default: 5.",
+    )
+    parser.add_argument(
+        "--wfa-min-trades-per-segment",
+        type=int,
+        default=5,
+        help="Minimum trades in every completed OOS segment. Default: 5.",
+    )
+    parser.add_argument(
+        "--wfa-min-latest-segment-trades",
+        type=int,
+        default=5,
+        help="Minimum trades in the latest complete OOS segment. Default: 5.",
+    )
+    parser.add_argument(
+        "--wfa-pilot-risk-pct",
+        type=float,
+        default=None,
+        help=(
+            "Optional manual cap on optimized WFA initial-stop risk. By default "
+            "the drawdown-constrained optimizer determines the risk."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -5563,6 +10241,14 @@ def parse_args():
 def main():
     run_started_at = time.monotonic()
     args = parse_args()
+    if args.live_degradation_monitor and args.wfa_validation:
+        raise ValueError(
+            "--live-degradation-monitor is only available for live account "
+            "history; do not combine it with --wfa-validation."
+        )
+    strategy_library_dir = args.strategy_library_dir
+    if args.live_degradation_monitor and not strategy_library_dir:
+        strategy_library_dir = DEFAULT_STRATEGY_LIBRARY_DIR
 
     progress("Starting strategy performance analysis...")
     os.makedirs(
@@ -5583,19 +10269,105 @@ def main():
     )
 
     stage_started_at = time.monotonic()
-    progress(f"Loading cleaned trades from {args.input}...")
-    cleaned_trades = load_cleaned_trades(args.input)
+    analysis_input = args.input
+    progress(f"Loading cleaned trades from {analysis_input}...")
+    try:
+        cleaned_trades = load_cleaned_trades(analysis_input)
+    except ValueError:
+        if not args.wfa_validation:
+            raise
+
+        progress("Normalizing raw AmiBroker WFA trade export...")
+        prepared_path, inferred_equity, inferred_strategy = (
+            prepare_wfa_analysis_input(
+                analysis_input,
+                WFA_PREPARED_INPUT_FILE,
+                starting_equity=args.wfa_starting_equity,
+                strategy_name=args.wfa_strategy_name,
+                normalized_output_path=WFA_NORMALIZED_INPUT_FILE,
+            )
+        )
+        analysis_input = str(prepared_path)
+        progress(
+            "Normalized and prepared raw AmiBroker WFA trades automatically: "
+            f"strategy={inferred_strategy}, "
+            f"starting_equity=${inferred_equity:,.2f}"
+        )
+        cleaned_trades = load_cleaned_trades(analysis_input)
     cleaned_trades = filter_strategies(
         cleaned_trades,
         args.strategy,
     )
+    wfa_validation = None
+    if args.wfa_validation:
+        progress("Calculating opt-in walk-forward validation gates...")
+        wfa_validation = build_wfa_validation(
+            cleaned_trades,
+            simulations=args.wfa_simulations,
+            round_trip_cost=args.wfa_round_trip_cost,
+            cost_stress_multiple=args.wfa_cost_stress_multiple,
+            random_seed=args.risk_random_seed,
+            minimum_total_trades=args.wfa_min_total_trades,
+            minimum_segment_count=args.wfa_min_segments,
+            minimum_trades_per_segment=args.wfa_min_trades_per_segment,
+            minimum_latest_segment_trades=args.wfa_min_latest_segment_trades,
+            mean_block_length=args.wfa_bootstrap_block_length,
+            drawdown_limit=args.wfa_drawdown_limit,
+            max_drawdown_breach_probability=(
+                args.wfa_max_drawdown_breach_probability
+            ),
+            max_risk_fraction=max(args.wfa_max_risk_pct, 0.0) / 100.0,
+            cagr_objective_quantile=args.wfa_cagr_objective_quantile,
+        )
+        progress(
+            "Walk-forward validation verdict: "
+            f"{wfa_validation['verdict']}"
+        )
     original_execution_count = len(cleaned_trades)
     finish_progress(
         f"Loaded {original_execution_count} execution rows",
         stage_started_at,
     )
 
-    as_of_date = args.as_of_date or pd.Timestamp.now()
+    futures_statement_file = args.futures_statement_file
+    if (
+        futures_statement_file is None
+        and not args.no_auto_futures_settlement
+        and not args.wfa_validation
+    ):
+        futures_statement_file = find_latest_account_statement(
+            data_dir=None,
+            preferred_filenames=statement_file_names_from_trades(
+                cleaned_trades,
+            ),
+        )
+
+    cash_balance_curve = pd.DataFrame()
+    statement_cash_ledger = pd.DataFrame()
+    statement_ytd_summary = {}
+    statement_ytd_positions = pd.DataFrame()
+    if futures_statement_file:
+        progress(
+            f"Using futures statement settlement file: {futures_statement_file}"
+        )
+        statement_ytd_summary, statement_ytd_positions = latest_statement_ytd(
+            futures_statement_file
+        )
+
+    as_of_date = args.as_of_date
+    if as_of_date is None:
+        statement_as_of_date = statement_end_of_day(
+            statement_ytd_summary,
+        )
+        if statement_as_of_date is not None:
+            as_of_date = statement_as_of_date
+            progress(
+                "Using statement date as analysis cutoff: "
+                f"{as_of_date}"
+            )
+        else:
+            as_of_date = pd.Timestamp.now()
+
     stage_started_at = time.monotonic()
     progress("Aggregating realized trades and open positions...")
     trades = aggregate_realized_trades(
@@ -5613,24 +10385,7 @@ def main():
         ),
         stage_started_at,
     )
-
-    futures_statement_file = args.futures_statement_file
-    if (
-        futures_statement_file is None
-        and not args.no_auto_futures_settlement
-    ):
-        futures_statement_file = find_latest_account_statement(
-            data_dir=None,
-            preferred_filenames=statement_file_names_from_trades(
-                cleaned_trades,
-            ),
-        )
-
-    cash_balance_curve = pd.DataFrame()
     if futures_statement_file:
-        progress(
-            f"Using futures statement settlement file: {futures_statement_file}"
-        )
         stage_started_at = time.monotonic()
         progress("Reconciling stale futures positions against statement cash flows...")
         futures_statement_rows = parse_futures_statement_rows(
@@ -5686,9 +10441,11 @@ def main():
                 futures_statement_file,
                 errors="replace",
             ) as statement:
-                cash_ledger = parse_cash_ledger(statement.readlines())
+                statement_cash_ledger = parse_cash_ledger(
+                    statement.readlines()
+                )
             cash_balance_curve = build_cash_balance_curve(
-                cash_ledger,
+                statement_cash_ledger,
                 start_timestamp=cash_balance_start_timestamp(cleaned_trades),
             )
             finish_progress(
@@ -5817,6 +10574,26 @@ def main():
         open_position_audit,
         settlement_coverage,
     )
+    ytd_reports = build_ytd_statement_reports(
+        statement_ytd_summary,
+        statement_ytd_positions,
+        cleaned_trades,
+        trades,
+        open_positions,
+        analysis_input,
+    )
+    statement_cash_reconciliation = cash_ledger_daily_reconciliation(
+        cleaned_trades,
+        statement_cash_ledger,
+    )
+    ytd_reports["validation_summary"] = build_trade_history_validation_summary(
+        ytd_reports,
+        statement_cash_reconciliation,
+    )
+    ytd_reports["validation_issues"] = build_trade_history_validation_issues(
+        ytd_reports,
+        statement_cash_reconciliation,
+    )
     finish_progress(
         f"Calculated summaries for {len(summary)} strategies",
         stage_started_at,
@@ -5844,12 +10621,52 @@ def main():
         OPEN_POSITION_AUDIT_FILE,
         index=False,
     )
+    open_position_audit.to_csv(
+        OPEN_POSITIONS_REVIEW_FILE,
+        index=False,
+    )
+    open_position_audit.to_csv(
+        OPEN_POSITIONS_DIAGNOSIS_FILE,
+        index=False,
+    )
     settlement_coverage.to_csv(
         SETTLEMENT_COVERAGE_FILE,
         index=False,
     )
     data_quality_warnings.to_csv(
         DATA_QUALITY_FILE,
+        index=False,
+    )
+    ytd_reports["summary"].to_csv(
+        YTD_STATEMENT_SUMMARY_FILE,
+        index=False,
+    )
+    ytd_reports["open_pnl"].to_csv(
+        YTD_POSITION_RECONCILIATION_FILE,
+        index=False,
+    )
+    ytd_reports["fees"].to_csv(
+        YTD_FEE_RECONCILIATION_FILE,
+        index=False,
+    )
+    ytd_reports["closed_pnl"].to_csv(
+        YTD_CLOSED_PNL_RECONCILIATION_FILE,
+        index=False,
+    )
+    ytd_reports["trade_review"].to_csv(
+        YTD_TRADE_REVIEW_FILE,
+        index=False,
+    )
+    ytd_reports["strategy_impact"].to_csv(
+        YTD_STRATEGY_IMPACT_FILE,
+        index=False,
+    )
+    ytd_reports["validation_summary"].to_csv(
+        TRADE_HISTORY_VALIDATION_SUMMARY_FILE,
+        index=False,
+    )
+    ytd_reports["validation_issues"].to_csv(
+        TRADE_HISTORY_VALIDATION_ISSUES_FILE,
         index=False,
     )
     account_curve.to_csv(
@@ -5894,40 +10711,132 @@ def main():
         f"Saved {len(strategy_trade_files)} strategy trade files",
         stage_started_at,
     )
+    strategy_library = None
 
     stage_started_at = time.monotonic()
     progress(
         "Running risk-per-trade simulations "
         f"({args.risk_simulations} simulations per strategy)..."
     )
-    (
-        risk_summary,
-        risk_report_files,
-        risk_simulations,
-    ) = calculate_risk_per_trade_by_strategy(
-        trades,
-        output_dir=RISK_PER_TRADE_DIR,
-        simulations=args.risk_simulations,
-        safe_f_increment=args.risk_safe_f_increment,
-        safe_f_start=args.risk_safe_f_start,
-        bankroll=args.risk_bankroll,
-        drawdown_limit=args.risk_drawdown_limit,
-        pct_above_dd_limit=args.risk_pct_above_dd_limit,
-        last_n_trades=args.risk_last_n_trades,
-        random_seed=args.risk_random_seed,
-    )
+    if args.wfa_validation:
+        (
+            risk_summary,
+            risk_report_files,
+            risk_simulations,
+        ) = calculate_risk_per_trade_by_strategy(
+            trades,
+            output_dir=RISK_PER_TRADE_DIR,
+            simulations=args.risk_simulations,
+            safe_f_increment=args.risk_safe_f_increment,
+            safe_f_start=args.risk_safe_f_start,
+            bankroll=args.risk_bankroll,
+            drawdown_limit=args.risk_drawdown_limit,
+            pct_above_dd_limit=args.risk_pct_above_dd_limit,
+            last_n_trades=args.risk_last_n_trades,
+            random_seed=args.risk_random_seed,
+        )
+    else:
+        (
+            risk_summary,
+            risk_report_files,
+            risk_simulations,
+            _,
+            _,
+        ) = calculate_growth_optimal_risk_by_strategy(
+            trades,
+            output_dir=RISK_PER_TRADE_DIR,
+            simulations=args.risk_simulations,
+            safe_f_start=args.risk_safe_f_start,
+            bankroll=args.risk_bankroll,
+            drawdown_limit=args.risk_drawdown_limit,
+            pct_above_dd_limit=args.risk_pct_above_dd_limit,
+            last_n_trades=args.risk_last_n_trades,
+            random_seed=args.risk_random_seed,
+            mean_block_length=args.risk_bootstrap_block_length,
+            cagr_objective_quantile=args.risk_cagr_objective_quantile,
+        )
     risk_summary = calculate_strategy_position_sizing(
         risk_summary,
         trades,
+        wfa_pilot_risk_pct=(
+            args.wfa_pilot_risk_pct
+            if args.wfa_validation
+            else None
+        ),
+        wfa_risk_optimization=(
+            wfa_validation["simulation"]["optimization"]
+            if wfa_validation is not None
+            and wfa_validation.get("simulation") is not None
+            else None
+        ),
     )
     strategy_decision = build_strategy_decision_board(
         summary,
         risk_summary,
         pnl_correlation,
     )
+    strategy_decision = apply_wfa_validation_decision(
+        strategy_decision,
+        trades,
+        wfa_validation,
+    )
     capital_allocation = build_capital_allocation_table(
         strategy_decision,
     )
+    if wfa_validation is not None:
+        wfa_validation = attach_wfa_deployment_recommendation(
+            wfa_validation,
+            capital_allocation,
+        )
+    if strategy_library_dir:
+        library_started_at = time.monotonic()
+        progress("Updating persistent strategy correlation library...")
+        strategy_library = export_strategy_library(
+            strategy_trade_ledgers,
+            equity_curves,
+            strategy_library_dir,
+            source_input=args.input,
+            analysis_mode=("wfa" if args.wfa_validation else "live_account"),
+            capital_allocation=capital_allocation,
+        )
+        finish_progress(
+            (
+                "Updated strategy correlation library "
+                f"({strategy_library['strategy_count']} strategies)"
+            ),
+            library_started_at,
+        )
+    live_degradation = None
+    if args.live_degradation_monitor:
+        monitor_started_at = time.monotonic()
+        progress(
+            "Running live degradation monitor "
+            f"({args.live_monitor_simulations} simulations per horizon)..."
+        )
+        live_degradation = build_live_degradation_monitor(
+            trades,
+            strategy_library_dir,
+            capital_allocation=capital_allocation,
+            simulations=args.live_monitor_simulations,
+            mean_block_length=args.risk_bootstrap_block_length,
+            random_seed=args.risk_random_seed,
+            as_of_date=as_of_date,
+        )
+        live_degradation["horizons"].to_csv(
+            LIVE_DEGRADATION_SUMMARY_FILE,
+            index=False,
+        )
+        live_degradation["metric_bands"].to_csv(
+            LIVE_DEGRADATION_BANDS_FILE,
+            index=False,
+        )
+        finish_progress(
+            (
+                "Finished live degradation monitor "
+                f"({len(live_degradation['strategies'])} WFA baselines)"
+            ),
+            monitor_started_at,
+        )
     risk_summary.to_csv(
         f"{RISK_PER_TRADE_DIR}/risk_per_trade_summary.csv",
         index=False,
@@ -5940,6 +10849,28 @@ def main():
         CAPITAL_ALLOCATION_FILE,
         index=False,
     )
+    if wfa_validation is not None:
+        pd.DataFrame(wfa_validation["gates"]).to_csv(
+            WFA_VALIDATION_GATES_FILE,
+            index=False,
+        )
+        wfa_validation["segments"].to_csv(
+            WFA_SEGMENT_SUMMARY_FILE,
+            index=False,
+        )
+        if wfa_validation.get("simulation") is not None:
+            wfa_validation["simulation"]["results"].to_csv(
+                WFA_SIMULATION_RESULTS_FILE,
+                index=False,
+            )
+            wfa_validation["simulation"]["summary"].to_csv(
+                WFA_SIMULATION_IQR_FILE,
+                index=False,
+            )
+            wfa_validation["simulation"]["risk_search"].to_csv(
+                WFA_RISK_SEARCH_FILE,
+                index=False,
+            )
     finish_progress(
         (
             "Finished risk-per-trade simulations "
@@ -5955,10 +10886,12 @@ def main():
         risk_summary,
     )
     risk_boxplot_files = save_risk_simulation_boxplots(risk_simulations)
+    wfa_boxplot_files = save_wfa_simulation_boxplots(wfa_validation)
 
     chart_files = [
         save_account_equity_chart(account_curve),
         save_strategy_equity_chart(equity_curves),
+        save_recent_trade_pnl_chart(trades),
         save_correlation_heatmap(
             pnl_correlation,
             "Daily PnL Correlation Heat Map",
@@ -5979,7 +10912,8 @@ def main():
     finish_progress(
         (
             f"Built {len(chart_files)} dashboard charts and "
-            f"{len(risk_boxplot_files)} risk charts"
+            f"{len(risk_boxplot_files)} risk charts and "
+            f"{len(wfa_boxplot_files)} WFA charts"
         ),
         stage_started_at,
     )
@@ -6001,6 +10935,11 @@ def main():
         drawdown_overlap,
         chart_files,
         risk_boxplot_files,
+        ytd_reports,
+        realized_trades=trades,
+        server_enabled=args.serve_dashboard,
+        wfa_validation=wfa_validation,
+        live_degradation_monitor=live_degradation,
     )
     finish_progress("Wrote strategy dashboard HTML", stage_started_at)
 
@@ -6014,13 +10953,46 @@ def main():
     print(f"Saved open position audit to {OPEN_POSITION_AUDIT_FILE}")
     print(f"Saved settlement coverage to {SETTLEMENT_COVERAGE_FILE}")
     print(f"Saved data quality warnings to {DATA_QUALITY_FILE}")
+    print(f"Saved YTD statement summary to {YTD_STATEMENT_SUMMARY_FILE}")
+    print(f"Saved YTD open PnL reconciliation to {YTD_POSITION_RECONCILIATION_FILE}")
+    print(f"Saved YTD fee reconciliation to {YTD_FEE_RECONCILIATION_FILE}")
+    print(f"Saved YTD closed PnL reconciliation to {YTD_CLOSED_PNL_RECONCILIATION_FILE}")
+    print(f"Saved YTD trade review to {YTD_TRADE_REVIEW_FILE}")
+    print(f"Saved YTD strategy impact to {YTD_STRATEGY_IMPACT_FILE}")
+    print(f"Saved trade history validation summary to {TRADE_HISTORY_VALIDATION_SUMMARY_FILE}")
+    print(f"Saved trade history validation issues to {TRADE_HISTORY_VALIDATION_ISSUES_FILE}")
     print(f"Saved strategy decision board to {STRATEGY_DECISION_FILE}")
     print(f"Saved capital allocation table to {CAPITAL_ALLOCATION_FILE}")
     print(f"Saved strategy trade files to {STRATEGY_TRADES_DIR}")
+    if strategy_library is not None:
+        print(
+            "Saved persistent strategy library to "
+            f"{strategy_library['library_dir']}"
+        )
+        print(
+            "Saved library PNL correlations to "
+            f"{strategy_library['pnl_correlation']}"
+        )
+    if live_degradation is not None:
+        print(
+            "Saved live degradation summary to "
+            f"{LIVE_DEGRADATION_SUMMARY_FILE}"
+        )
+        print(
+            "Saved live degradation metric bands to "
+            f"{LIVE_DEGRADATION_BANDS_FILE}"
+        )
     print(f"Saved risk-per-trade files to {RISK_PER_TRADE_DIR}")
     print(f"Saved strategy equity curves to {EQUITY_CURVES_FILE}")
     print(f"Saved strategy summary statistics to {SUMMARY_STATS_FILE}")
     print(f"Saved strategy dashboard to {DASHBOARD_FILE}")
+    if wfa_validation is not None:
+        print(f"Saved WFA validation gates to {WFA_VALIDATION_GATES_FILE}")
+        print(f"Saved WFA segment summary to {WFA_SEGMENT_SUMMARY_FILE}")
+        if wfa_validation.get("simulation") is not None:
+            print(f"Saved WFA simulations to {WFA_SIMULATION_RESULTS_FILE}")
+            print(f"Saved WFA IQR values to {WFA_SIMULATION_IQR_FILE}")
+            print(f"Saved WFA risk search to {WFA_RISK_SEARCH_FILE}")
     print(
         "Aggregated "
         f"{original_execution_count} execution rows into "
@@ -6040,7 +11012,15 @@ def main():
         f"{format_duration(time.monotonic() - run_started_at)}."
     )
 
-    if not args.no_open_dashboard:
+    if args.serve_dashboard:
+        serve_strategy_dashboard(
+            DASHBOARD_FILE,
+            analysis_input,
+            host=args.dashboard_host,
+            port=args.dashboard_port,
+            open_browser=not args.no_open_dashboard,
+        )
+    elif not args.no_open_dashboard:
         if open_dashboard(DASHBOARD_FILE):
             print("Opened strategy dashboard in your browser.")
         else:

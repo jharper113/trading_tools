@@ -1,0 +1,31 @@
+// Chandelier Breakout Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+entryLen = Param("Entry Channel", 100, 20, 300, 10);
+exitLen = Param("Chandelier Lookback", 22, 5, 100, 1);
+atrLen = Param("ATR Length", 22, 5, 100, 1);
+atrMult = Param("ATR Multiple", 3, 1, 8, 0.25);
+
+upperEntry = Ref(HHV(High, entryLen), -1);
+lowerEntry = Ref(LLV(Low, entryLen), -1);
+longStop = HHV(High, exitLen) - atrMult * ATR(atrLen);
+shortStop = LLV(Low, exitLen) + atrMult * ATR(atrLen);
+
+Buy = Close > upperEntry;
+Sell = Close < longStop;
+Short = Close < lowerEntry;
+Cover = Close > shortStop;
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(longStop, "Long Chandelier", colorRed, styleLine);
+Plot(shortStop, "Short Chandelier", colorGreen, styleLine);

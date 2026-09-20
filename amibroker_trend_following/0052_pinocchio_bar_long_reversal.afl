@@ -1,0 +1,54 @@
+// Pinocchio Bar Long Reversal
+// Long setup: large range bar with both open and close in the top half,
+// leaving a long lower wick that suggests rejection of lower prices.
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+largeBarATR = Param("Large Bar ATR", 1.5, 0.5, 5, 0.1);
+minLowerWickPct = Param("Min Lower Wick % Range", 45, 20, 90, 5);
+maxUpperWickPct = Param("Max Upper Wick % Range", 25, 0, 60, 5);
+trendLen = Param("Trend EMA", 50, 10, 200, 5);
+maxHold = Param("Max Hold Bars", 4, 1, 10, 1);
+profitTargetATR = Param("Profit Target ATR", 2, 0.5, 8, 0.25);
+stopATR = Param("Stop ATR", 1.25, 0.5, 5, 0.25);
+useTrendFilter = ParamToggle("Use Trend Filter", "No|Yes", 1);
+
+barRange = High - Low;
+safeRange = Max(barRange, 0.01);
+bodyLow = Min(Open, Close);
+bodyHigh = Max(Open, Close);
+midpoint = (High + Low) / 2;
+
+lowerWick = bodyLow - Low;
+upperWick = High - bodyHigh;
+lowerWickPct = 100 * lowerWick / safeRange;
+upperWickPct = 100 * upperWick / safeRange;
+
+largeBar = barRange >= largeBarATR * ATR(atrLen);
+bodyInTopHalf = Open >= midpoint AND Close >= midpoint;
+longLowerWick = lowerWickPct >= minLowerWickPct;
+smallEnoughUpperWick = upperWickPct <= maxUpperWickPct;
+trendOK = useTrendFilter == 0 OR Close > EMA(Close, trendLen);
+
+pinocchioLong = largeBar AND bodyInTopHalf AND longLowerWick AND smallEnoughUpperWick AND trendOK;
+
+Buy = pinocchioLong;
+Sell = Close < Ref(Low, -1);
+Short = False;
+Cover = False;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, stopATR * ATR(atrLen), True);
+ApplyStop(stopTypeProfit, stopModePoint, profitTargetATR * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(EMA(Close, trendLen), "Trend EMA", colorBlue, styleLine);
+PlotShapes(IIf(pinocchioLong, shapeUpArrow, shapeNone), colorGreen, 0, Low);

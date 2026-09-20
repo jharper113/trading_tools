@@ -1,0 +1,32 @@
+// Five-Bar Reversal Break
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+lookback = Param("Reversal Lookback", 5, 3, 10, 1);
+trendLen = Param("Trend EMA", 60, 10, 150, 5);
+maxHold = Param("Max Hold Bars", 4, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+trendEMA = EMA(Close, trendLen);
+newLow = Low <= LLV(Low, lookback);
+newHigh = High >= HHV(High, lookback);
+
+Buy = Ref(newLow, -1) AND Close > Ref(High, -1) AND Close > trendEMA;
+Sell = Close < Ref(Low, -1);
+Short = Ref(newHigh, -1) AND Close < Ref(Low, -1) AND Close < trendEMA;
+Cover = Close > Ref(High, -1);
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.5 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

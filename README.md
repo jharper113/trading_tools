@@ -46,6 +46,19 @@ python download_market_data.py \
   --frequencies daily 5min 60min
 ```
 
+To create or replace the saved Schwab tokens without downloading data, run:
+
+```bash
+python download_market_data.py \
+  --provider schwab \
+  --auth-only \
+  --force-reauth
+```
+
+The script opens the Schwab authorization page in the default browser and
+keeps the printed URL available as a fallback. After approval, paste the full
+redirect URL into the waiting terminal.
+
 To request as much Schwab history as the script can ask for, add `--all`:
 
 ```bash
@@ -70,7 +83,18 @@ so the CSV provider is intended for futures-history vendors or broker exports.
 Normalized bars are written under `data/market_data/`.
 Long Schwab runs print per-symbol/frequency progress, elapsed time, and ETA.
 To speed up scheduled jobs, pass a smaller `--symbols` list, omit frequencies
-you do not need, or use `--start` to limit the requested date range.
+you do not need, or use `--start` to limit the requested date range. Add
+`--continue-on-error` to scheduled runs so a provider error for one
+symbol/frequency does not prevent the remaining jobs from running. The command
+still exits nonzero after completing the batch if any jobs failed. Add
+`--notify` to show a desktop notification after a successful run or a final
+error. Desktop notifications are best effort and require the user to be logged
+in to the graphical desktop session.
+
+```cron
+15 17 * * * cd /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools && . /home/jon/.schwab_env && /home/jon/anaconda3/bin/python download_market_data.py --provider schwab --frequencies daily 5min 60min --continue-on-error --notify >> /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/logs/market_data.log 2>&1
+```
+
 Each download/ingest run also writes local quality reports under
 `data/market_data/quality/` before any Yahoo reconciliation review. The quality
 step safely fixes OHLC envelope issues during save, reports remaining OHLC
@@ -107,8 +131,13 @@ also download either a decisions CSV or a selected-bars CSV.
 The validated and repaired bar files stay in
 `data/market_data/<frequency>/<symbol>.csv`, such as
 `data/market_data/daily/ES.csv`, `data/market_data/5min/ES.csv`, and
-`data/market_data/60min/ES.csv`. These normalized CSV files are the ones to
-import into AmiBroker. The validator also writes `auto_review_decisions.csv`,
+`data/market_data/60min/ES.csv`. Run `export_amibroker_market_data.py` or pass
+`--export-amibroker` to the downloader to create combined daily and 5-minute
+files plus instrument-property imports for the Windows importer in
+`amibroker_import/`. The maintained point values, tick sizes, and optional
+dated margin deposits are in `amibroker_import/instrument_settings.csv`. The
+validator also
+writes `auto_review_decisions.csv`,
 `auto_review_applied_decisions.csv`, and `timezone_alignment.csv`.
 Auto-review decisions prefer local data, choose Yahoo only when the Yahoo close
 is closer to the prior or next confirmed close, keep local bars when Yahoo is
@@ -123,7 +152,10 @@ The default futures universe covers liquid roots across equity indexes
 (`/ES`, `/NQ`, `/RTY`, `/YM`), rates (`/ZB`, `/ZN`, `/ZF`, `/ZT`), currencies
 (`/6E`, `/6J`, `/6B`, `/6A`, `/6C`, `/6S`), metals (`/GC`, `/SI`, `/HG`,
 `/PL`), energy (`/CL`, `/NG`, `/RB`, `/HO`), agriculture (`/ZC`, `/ZS`, `/ZM`,
-`/ZL`, `/ZW`, `/LE`, `/HE`), and softs (`/KC`, `/SB`, `/CT`, `/CC`). Pass
-`--symbols` to run a smaller subset.
+`/ZL`, `/ZW`, `/LE`, `/HE`), softs (`/KC`, `/SB`, `/CT`, `/CC`), and crypto
+(`/BTC`, `/ETH`, `/MBT`, `/MET`, `/SOL`, `/MSL`, `/XRP`, `/MXP`, `/MCA`).
+Pass `--symbols` to run a smaller subset.
+The default list is defined in `download_market_data.py`; each run also writes
+the symbols requested for that run to `data/market_data/symbols.csv`.
 
 Generated files are written to `output/`. Raw brokerage exports in `data/` and generated outputs are intentionally ignored by Git.

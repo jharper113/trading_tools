@@ -1,0 +1,36 @@
+// Intraday VWAP Reversion
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(0, 0, 0, 0);
+SetPositionSize(Param("Position % Equity", 4, 1, 100, 1), spsPercentOfEquity);
+
+startTime = Param("Session Start HHMMSS", 90000, 0, 235959, 100);
+exitTime = Param("Exit Time HHMMSS", 153000, 0, 235959, 100);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+devATR = Param("VWAP Deviation ATR", 0.8, 0.2, 3, 0.1);
+maxHold = Param("Max Hold Bars", 5, 1, 12, 1);
+
+tn = TimeNum();
+sessionStart = tn >= startTime AND Ref(tn, -1) < startTime;
+typical = (High + Low + Close) / 3;
+sessionPV = SumSince(sessionStart, typical * Volume);
+sessionVol = SumSince(sessionStart, Volume);
+vwap = sessionPV / Max(sessionVol, 1);
+
+Buy = Close < vwap - devATR * ATR(atrLen) AND Close > Open;
+Sell = Close >= vwap OR tn >= exitTime;
+Short = Close > vwap + devATR * ATR(atrLen) AND Close < Open;
+Cover = Close <= vwap OR tn >= exitTime;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.2 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(vwap, "VWAP", colorBlue, styleLine);

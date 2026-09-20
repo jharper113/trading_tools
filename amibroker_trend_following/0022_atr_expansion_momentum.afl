@@ -1,0 +1,32 @@
+// ATR Expansion Momentum Breakout
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+channelLen = Param("Channel Length", 35, 10, 150, 5);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+atrExpansion = Param("ATR Expansion", 1.15, 0.8, 2.0, 0.05);
+exitLen = Param("Exit EMA", 30, 5, 100, 5);
+
+atrNow = ATR(atrLen);
+atrAvg = MA(atrNow, atrLen);
+upper = Ref(HHV(High, channelLen), -1);
+lower = Ref(LLV(Low, channelLen), -1);
+exitEMA = EMA(Close, exitLen);
+
+Buy = Close > upper AND atrNow > atrExpansion * atrAvg;
+Sell = Close < exitEMA;
+Short = Close < lower AND atrNow > atrExpansion * atrAvg;
+Cover = Close > exitEMA;
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(upper, "Upper Channel", colorGreen, styleLine);
+Plot(lower, "Lower Channel", colorRed, styleLine);

@@ -1,0 +1,38 @@
+// Heikin-Ashi Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+emaLen = Param("Trend EMA", 100, 20, 300, 10);
+confirmBars = Param("Confirm Bars", 3, 1, 10, 1);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+
+haClose = (Open + High + Low + Close) / 4;
+haOpen = (Open + Close) / 2;
+
+for (i = 1; i < BarCount; i++)
+{
+    haOpen[i] = (haOpen[i - 1] + haClose[i - 1]) / 2;
+}
+
+trendEMA = EMA(Close, emaLen);
+haBull = haClose > haOpen;
+haBear = haClose < haOpen;
+
+Buy = Sum(haBull, confirmBars) == confirmBars AND Close > trendEMA;
+Sell = haBear OR Close < trendEMA;
+Short = Sum(haBear, confirmBars) == confirmBars AND Close < trendEMA;
+Cover = haBull OR Close > trendEMA;
+
+ApplyStop(stopTypeTrailing, stopModePoint, 4 * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

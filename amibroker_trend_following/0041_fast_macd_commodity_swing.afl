@@ -1,0 +1,33 @@
+// Fast MACD Commodity Swing
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+fastLen = Param("MACD Fast", 5, 2, 12, 1);
+slowLen = Param("MACD Slow", 13, 6, 30, 1);
+signalLen = Param("Signal", 4, 2, 12, 1);
+maxHold = Param("Max Hold Bars", 4, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+macdLine = EMA(Close, fastLen) - EMA(Close, slowLen);
+signalLine = EMA(macdLine, signalLen);
+
+Buy = Cross(macdLine, signalLine) AND macdLine > 0;
+Sell = Cross(signalLine, macdLine);
+Short = Cross(signalLine, macdLine) AND macdLine < 0;
+Cover = Cross(macdLine, signalLine);
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.5 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(macdLine, "Fast MACD", colorGreen, styleOwnScale);
+Plot(signalLine, "Signal", colorRed, styleOwnScale);

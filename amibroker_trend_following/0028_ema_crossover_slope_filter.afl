@@ -1,0 +1,32 @@
+// EMA Crossover With Slope Filter
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+fastLen = Param("Fast EMA", 30, 5, 150, 5);
+slowLen = Param("Slow EMA", 120, 30, 300, 10);
+slopeLen = Param("Slope Length", 80, 20, 250, 10);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+
+fastEMA = EMA(Close, fastLen);
+slowEMA = EMA(Close, slowLen);
+slope = LinRegSlope(Close, slopeLen);
+
+Buy = Cross(fastEMA, slowEMA) AND slope > 0;
+Sell = Cross(slowEMA, fastEMA) OR slope < 0;
+Short = Cross(slowEMA, fastEMA) AND slope < 0;
+Cover = Cross(fastEMA, slowEMA) OR slope > 0;
+
+ApplyStop(stopTypeTrailing, stopModePoint, 4 * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(fastEMA, "Fast EMA", colorGreen, styleLine);
+Plot(slowEMA, "Slow EMA", colorRed, styleLine);

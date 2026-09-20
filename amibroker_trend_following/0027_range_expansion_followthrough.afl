@@ -1,0 +1,35 @@
+// Range Expansion Follow-Through Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+rangeMult = Param("Range Expansion", 1.5, 0.8, 3, 0.1);
+trendLen = Param("Trend EMA", 100, 20, 300, 10);
+exitLen = Param("Exit EMA", 20, 5, 80, 5);
+
+barRange = High - Low;
+closeLocation = (Close - Low) / Max(barRange, 0.01);
+trendEMA = EMA(Close, trendLen);
+exitEMA = EMA(Close, exitLen);
+
+longThrust = barRange > rangeMult * ATR(atrLen) AND closeLocation > 0.75 AND Close > trendEMA;
+shortThrust = barRange > rangeMult * ATR(atrLen) AND closeLocation < 0.25 AND Close < trendEMA;
+
+Buy = Ref(longThrust, -1) AND High > Ref(High, -1);
+Sell = Close < exitEMA;
+Short = Ref(shortThrust, -1) AND Low < Ref(Low, -1);
+Cover = Close > exitEMA;
+
+ApplyStop(stopTypeTrailing, stopModePoint, 3 * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

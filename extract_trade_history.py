@@ -2,6 +2,7 @@ import argparse
 import os
 import csv
 import json
+import re
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import StringIO
@@ -29,6 +30,8 @@ from src.enrich import (
     is_futures_trade,
     is_multileg_continuation,
     lookup_fees,
+    normalize_root_symbol,
+    parse_price,
     parse_number,
 )
 
@@ -57,6 +60,8 @@ CASH_TRADE_CORRECTION_CANDIDATES_FILE = (
 CASH_RECONCILIATION_REVIEWS_FILE = (
     f"{OUTPUT_DIR}/cash_reconciliation_group_reviews.csv"
 )
+STATEMENT_YTD_SUMMARY_FILE = f"{OUTPUT_DIR}/statement_ytd_summary.csv"
+STATEMENT_YTD_POSITIONS_FILE = f"{OUTPUT_DIR}/statement_ytd_positions.csv"
 CASH_DASHBOARD_FILE_NAME = "cash_balance_reconciliation_dashboard.html"
 
 CALCULATED_COLUMNS = {
@@ -77,7 +82,12 @@ CALCULATED_COLUMNS = {
     "cash_correction_status",
     "cash_correction_source",
     "statement_cash_flow",
+    "synthetic_trade_pnl",
+    "synthetic_fees",
+    "synthetic_net_pnl",
 }
+
+SYNTHETIC_CASH_SETTLEMENT_SOURCE = "cash_ledger_futures_cash_settlement"
 
 CASH_CORRECTION_COLUMNS = [
     "statement_file",
@@ -373,6 +383,367 @@ def parse_cash_ledger(lines):
         )
 
     return pd.DataFrame(rows)
+
+
+def is_futures_mark_to_market_cash_flow(row):
+    if str(row.get("account_bucket", "")).strip() != "futures":
+        return False
+
+    if str(row.get("type", "")).strip().upper() != "ADJ":
+        return False
+
+    description = str(row.get("description", "")).upper()
+
+    return (
+        "MARK TO MARKET" in description
+        and "OFFICIAL SETTLEMENT PRICE" in description
+    )
+
+
+def futures_mark_to_market_symbol(description):
+    match = re.search(
+        r"(/[A-Z0-9]+):",
+        str(description).upper(),
+    )
+
+    return match.group(1) if match else ""
+
+
+def futures_later_close_roots(trades, date):
+    if trades is None or trades.empty:
+        return {}
+
+    working = trades.copy()
+    working["_trade_time"] = pd.to_datetime(
+        working.get("Exec Time"),
+        format="%m/%d/%y %H:%M:%S",
+        errors="coerce",
+    )
+    working = working[working["_trade_time"].notna()].copy()
+    if working.empty:
+        return {}
+
+    working = working[
+        working["_trade_time"].dt.date.astype(str) == str(date)
+    ].copy()
+    if working.empty:
+        return {}
+
+    pos_effect_source = (
+        working["Pos Effect"]
+        if "Pos Effect" in working.columns
+        else pd.Series("", index=working.index)
+    )
+    pos_effect = pos_effect_source.fillna("").astype(str).str.upper()
+    working = working[
+        pos_effect.str.contains("TO CLOSE", na=False)
+    ].copy()
+    if working.empty:
+        return {}
+
+    working = working[
+        working.apply(is_futures_trade, axis=1)
+    ].copy()
+    if working.empty:
+        return {}
+
+    working["_root"] = working.get("Symbol", pd.Series(dtype=object)).apply(
+        normalize_root_symbol,
+    )
+    roots = {}
+
+    for root, rows in working.groupby("_root"):
+        if not root:
+            continue
+
+        roots[str(root).upper()] = rows["_trade_time"].tolist()
+
+    return roots
+
+
+def futures_trade_cash_flow_mask(
+    group,
+    trades=None,
+    include_mark_to_market=True,
+):
+    type_upper = group["type"].astype(str).str.upper()
+    trade_mask = type_upper.eq("TRD").copy()
+
+    if not include_mark_to_market:
+        return trade_mask
+
+    mtm_rows = group[
+        group.apply(is_futures_mark_to_market_cash_flow, axis=1)
+    ]
+    has_trade_context = trades is not None and not trades.empty
+    later_close_roots = futures_later_close_roots(
+        trades,
+        group["date"].iloc[0] if "date" in group.columns and len(group) else "",
+    )
+
+    for index, row in mtm_rows.iterrows():
+        symbol = futures_mark_to_market_symbol(row.get("description", ""))
+
+        if not symbol:
+            continue
+
+        symbol = str(normalize_root_symbol(symbol) or symbol).upper()
+        if has_trade_context:
+            later_closes = [
+                trade_time
+                for trade_time in later_close_roots.get(symbol, [])
+                if trade_time > row.get("timestamp")
+            ]
+
+            if later_closes:
+                trade_mask.loc[index] = True
+
+            continue
+
+        later_trade_mask = (
+            type_upper.eq("TRD")
+            & (group["timestamp"] > row.get("timestamp"))
+            & group["description"]
+            .astype(str)
+            .str.upper()
+            .str.contains(re.escape(f"{symbol}:"), regex=True, na=False)
+        )
+
+        if later_trade_mask.any():
+            trade_mask.loc[index] = True
+
+    return trade_mask
+
+
+def statement_year_from_file(statement_file):
+    if not statement_file:
+        return None
+
+    match = re.search(
+        r"(20\d{2})",
+        Path(statement_file).name,
+    )
+
+    if not match:
+        return None
+
+    return int(match.group(1))
+
+
+def normalize_statement_label(value):
+    return (
+        str(value)
+        .strip()
+        .strip('"')
+        .lstrip("\ufeff")
+    )
+
+
+def statement_value(row, index):
+    if index is None or index >= len(row):
+        return None
+
+    return parse_number(row[index])
+
+
+def statement_summary_fee_labels():
+    return {
+        "Equity Commissions & Fees YTD": "equity_commissions_fees_ytd",
+        "Futures Commissions & Fees YTD": "futures_commissions_fees_ytd",
+        "Forex Commissions YTD": "forex_commissions_ytd",
+        "Crypto Trading Fees YTD": "crypto_trading_fees_ytd",
+        "Total Commissions & Fees YTD": "total_commissions_fees_ytd",
+    }
+
+
+def parse_statement_ytd_summary(lines, statement_file=None):
+    summary = {
+        "statement_file": str(statement_file or ""),
+        "statement_year": statement_year_from_file(statement_file),
+        "statement_gross_ytd_pnl": None,
+        "statement_open_position_pnl": None,
+        "statement_closed_gross_ytd_pnl": None,
+        "equity_commissions_fees_ytd": 0.0,
+        "futures_commissions_fees_ytd": 0.0,
+        "forex_commissions_ytd": 0.0,
+        "crypto_trading_fees_ytd": 0.0,
+        "total_commissions_fees_ytd": 0.0,
+        "statement_total_ytd_commissions_and_fees": 0.0,
+        "statement_closed_net_ytd_pnl": None,
+    }
+    positions = []
+    fee_labels = statement_summary_fee_labels()
+    in_profit_loss_table = False
+    open_index = None
+    ytd_index = None
+    description_index = None
+
+    for row in csv.reader(lines):
+        if not row:
+            if in_profit_loss_table:
+                in_profit_loss_table = False
+            continue
+
+        first_col = normalize_statement_label(row[0])
+
+        if (
+            first_col == "Symbol"
+            and "P/L Open" in row
+            and "P/L YTD" in row
+            and "Description" in row
+        ):
+            in_profit_loss_table = True
+            open_index = row.index("P/L Open")
+            ytd_index = row.index("P/L YTD")
+            description_index = row.index("Description")
+            continue
+
+        if first_col in fee_labels and len(row) > 1:
+            summary[fee_labels[first_col]] = parse_number(row[1]) or 0.0
+            continue
+
+        if not in_profit_loss_table:
+            continue
+
+        description = (
+            normalize_statement_label(row[description_index])
+            if description_index is not None
+            and description_index < len(row)
+            else ""
+        )
+        open_pnl = statement_value(row, open_index) or 0.0
+        ytd_pnl = statement_value(row, ytd_index) or 0.0
+
+        if description == "OVERALL TOTALS":
+            summary["statement_open_position_pnl"] = open_pnl
+            summary["statement_gross_ytd_pnl"] = ytd_pnl
+            continue
+
+        symbol = first_col
+
+        if not symbol:
+            continue
+
+        positions.append({
+            "statement_file": str(statement_file or ""),
+            "statement_year": summary["statement_year"],
+            "Symbol": symbol,
+            "statement_open_pnl": open_pnl,
+            "statement_ytd_pnl": ytd_pnl,
+            "statement_closed_gross_pnl": ytd_pnl - open_pnl,
+            "statement_description": description,
+        })
+
+    total_fees = (
+        summary["total_commissions_fees_ytd"]
+        + summary["forex_commissions_ytd"]
+        + summary["crypto_trading_fees_ytd"]
+    )
+    summary["statement_total_ytd_commissions_and_fees"] = total_fees
+
+    gross_ytd = summary["statement_gross_ytd_pnl"]
+    open_pnl = summary["statement_open_position_pnl"]
+
+    if gross_ytd is not None and open_pnl is not None:
+        summary["statement_closed_gross_ytd_pnl"] = gross_ytd - open_pnl
+        summary["statement_closed_net_ytd_pnl"] = (
+            gross_ytd
+            - open_pnl
+            - total_fees
+        )
+
+    return summary, pd.DataFrame(positions)
+
+
+def dataframe_to_dashboard_html(df, max_rows=20):
+    if df is None or df.empty:
+        return '<div class="subtle">No rows.</div>'
+
+    return df.head(max_rows).to_html(
+        index=False,
+        classes="dashboard-table",
+        border=0,
+        escape=True,
+    )
+
+
+def ytd_dashboard_section(
+    statement_ytd_summary=None,
+    statement_ytd_positions=None,
+):
+    if statement_ytd_summary is None:
+        return ""
+
+    summary_df = pd.DataFrame([statement_ytd_summary])
+    display_columns = [
+        "statement_gross_ytd_pnl",
+        "statement_open_position_pnl",
+        "statement_closed_gross_ytd_pnl",
+        "statement_total_ytd_commissions_and_fees",
+        "statement_closed_net_ytd_pnl",
+        "equity_commissions_fees_ytd",
+        "futures_commissions_fees_ytd",
+        "forex_commissions_ytd",
+        "crypto_trading_fees_ytd",
+    ]
+    display_columns = [
+        column
+        for column in display_columns
+        if column in summary_df.columns
+    ]
+    position_display = statement_ytd_positions
+
+    if position_display is not None and not position_display.empty:
+        position_display = position_display.copy()
+        position_display["statement_open_pnl"] = pd.to_numeric(
+            position_display["statement_open_pnl"],
+            errors="coerce",
+        ).fillna(0.0)
+        position_display = position_display[
+            position_display["statement_open_pnl"].abs() > 0.005
+        ].copy()
+        position_display["_abs_open_pnl"] = (
+            position_display["statement_open_pnl"].abs()
+        )
+        position_display = position_display.sort_values(
+            "_abs_open_pnl",
+            ascending=False,
+        ).drop(
+            columns=["_abs_open_pnl"],
+        )
+        position_display = position_display[
+            [
+                column
+                for column in [
+                    "Symbol",
+                    "statement_open_pnl",
+                    "statement_ytd_pnl",
+                    "statement_closed_gross_pnl",
+                ]
+                if column in position_display.columns
+            ]
+        ]
+
+    return f"""
+    <section class="panel ytd-panel">
+      <div class="panel-head">
+        <h2>Statement Totals</h2>
+        <div class="subtle">Closed net target = gross YTD PnL - open position PnL - all YTD commissions and fees.</div>
+      </div>
+      <div class="ytd-body">
+        {dataframe_to_dashboard_html(summary_df[display_columns], max_rows=1)}
+      </div>
+    </section>
+    <section class="panel ytd-panel">
+      <div class="panel-head">
+        <h2>Open PnL Positions</h2>
+        <div class="subtle">Only statement positions with nonzero open PnL are shown here.</div>
+      </div>
+      <div class="ytd-body">
+        {dataframe_to_dashboard_html(position_display, max_rows=12)}
+      </div>
+    </section>
+    """
 
 
 def parse_filter_date(value, label):
@@ -693,6 +1064,9 @@ def trade_event_rows(trades):
         continuation = is_multileg_continuation(
             row,
             previous_row,
+        ) or is_same_stock_fill_continuation(
+            row,
+            previous_row,
         )
 
         if not continuation or current_event is None:
@@ -722,6 +1096,55 @@ def trade_event_rows(trades):
         )
 
     return events
+
+
+def is_same_stock_fill_continuation(row, previous_row):
+    if previous_row is None:
+        return False
+
+    if str(row.get("Spread", "")).upper() != "STOCK":
+        return False
+
+    if str(previous_row.get("Spread", "")).upper() != "STOCK":
+        return False
+
+    return all(
+        str(row.get(column, "")).strip() == str(previous_row.get(column, "")).strip()
+        for column in [
+            "Exec Time",
+            "Side",
+            "Pos Effect",
+            "Symbol",
+        ]
+    )
+
+
+def is_same_futures_fill_continuation(row, previous_row, tolerance=0.000001):
+    if previous_row is None:
+        return False
+
+    if not is_futures_trade(row) or not is_futures_trade(previous_row):
+        return False
+
+    price = parse_price(row.get("Price"))
+    previous_price = parse_price(previous_row.get("Price"))
+
+    if price is None or previous_price is None:
+        return False
+
+    if abs(price - previous_price) > tolerance:
+        return False
+
+    return all(
+        str(row.get(column, "")).strip()
+        == str(previous_row.get(column, "")).strip()
+        for column in [
+            "Exec Time",
+            "Side",
+            "Pos Effect",
+            "Symbol",
+        ]
+    )
 
 
 def normalized_match_term(value):
@@ -788,6 +1211,86 @@ def event_futures_price_terms(event):
     return sorted(set(terms))
 
 
+def event_futures_price_values(event):
+    prices = []
+
+    for row in event.get("rows", []):
+        spread = normalized_match_term(row.get("Spread", ""))
+
+        if spread != "FUTURE":
+            continue
+
+        price = parse_price(row.get("Price"))
+
+        if price is not None:
+            prices.append(price)
+
+    return sorted(set(prices))
+
+
+def event_futures_quantity_values(event):
+    quantities = []
+
+    for row in event.get("rows", []):
+        if not is_futures_trade(row):
+            continue
+
+        quantity = parse_number(row.get("Qty"))
+
+        if quantity is not None:
+            quantities.append(quantity)
+
+    return sorted(set(quantities))
+
+
+def description_futures_price(description):
+    match = re.search(
+        r"@([0-9]+(?:'[0-9]+)?(?:\.[0-9]+)?)",
+        str(description).upper(),
+    )
+
+    if not match:
+        return None
+
+    return parse_price(match.group(1))
+
+
+def description_has_futures_price(description, prices, tolerance=0.000001):
+    ledger_price = description_futures_price(description)
+
+    if ledger_price is None:
+        return False
+
+    return any(
+        abs(ledger_price - price) <= tolerance
+        for price in prices
+    )
+
+
+def description_futures_quantity(description):
+    match = re.search(
+        r"\b(?:BOT|SOLD)\s+([+-]?\d+(?:\.\d+)?)\s+/",
+        str(description).upper(),
+    )
+
+    if not match:
+        return None
+
+    return parse_number(match.group(1))
+
+
+def description_has_futures_quantity(description, quantities, tolerance=0.000001):
+    ledger_quantity = description_futures_quantity(description)
+
+    if ledger_quantity is None:
+        return False
+
+    return any(
+        abs(ledger_quantity - quantity) <= tolerance
+        for quantity in quantities
+    )
+
+
 def description_has_term(description, term):
 
     if term.startswith("/"):
@@ -814,7 +1317,8 @@ def ledger_matches_event(ledger, event):
     expiration_terms = event_description_terms(event, "Exp")
     type_terms = event_description_terms(event, "Type")
     strike_terms = event_numeric_terms(event, "Strike")
-    futures_price_terms = event_futures_price_terms(event)
+    futures_prices = event_futures_price_values(event)
+    futures_quantities = event_futures_quantity_values(event)
 
     if symbol_terms and not any(
         description_has_term(description, term)
@@ -828,9 +1332,15 @@ def ledger_matches_event(ledger, event):
     ):
         return False
 
-    if futures_price_terms and not any(
-        description_has_term(description, term)
-        for term in futures_price_terms
+    if futures_prices and not description_has_futures_price(
+        description,
+        futures_prices,
+    ):
+        return False
+
+    if futures_quantities and not description_has_futures_quantity(
+        description,
+        futures_quantities,
     ):
         return False
 
@@ -849,7 +1359,7 @@ def ledger_matches_event(ledger, event):
     return bool(
         symbol_terms
         or strike_terms
-        or futures_price_terms
+        or futures_prices
         or expiration_terms
         or type_terms
     )
@@ -884,6 +1394,62 @@ def aggregate_ledger_matches(ledger_rows):
     return ledger
 
 
+def event_trade_pnl(event):
+    return sum(
+        parse_number(row.get("trade_pnl")) or 0.0
+        for row in event.get("rows", [])
+    )
+
+
+def select_ledger_matches_for_event(
+    ledger_trades,
+    matches,
+    event,
+    tolerance=0.01,
+):
+    if len(matches) <= 1:
+        return matches
+
+    event_rows = event.get("rows", [])
+    if len(event_rows) == 1 and is_futures_trade(event_rows[0]):
+        event_quantities = event_futures_quantity_values(event)
+        exact_quantity_matches = []
+
+        for ledger_index in matches:
+            ledger_quantity = description_futures_quantity(
+                ledger_trades.loc[ledger_index].get("description", "")
+            )
+
+            if ledger_quantity is None:
+                continue
+
+            if any(
+                abs(ledger_quantity - quantity) <= tolerance
+                for quantity in event_quantities
+            ):
+                exact_quantity_matches.append(ledger_index)
+
+        if exact_quantity_matches:
+            return [exact_quantity_matches[0]]
+
+    original_trade_pnl = event_trade_pnl(event)
+    single_amount_matches = []
+
+    for ledger_index in matches:
+        ledger_amount = (
+            parse_number(ledger_trades.loc[ledger_index].get("amount"))
+            or 0.0
+        )
+
+        if abs(ledger_amount - original_trade_pnl) <= tolerance:
+            single_amount_matches.append(ledger_index)
+
+    if single_amount_matches:
+        return [single_amount_matches[0]]
+
+    return matches
+
+
 def correction_rows_for_event(
     event,
     ledger,
@@ -897,6 +1463,11 @@ def correction_rows_for_event(
         parse_number(ledger.get("commissions_fees")) or 0.0
     )
     corrected_event_fees = ledger_amount - ledger_cash_flow
+    event_original_trade_pnl = event_trade_pnl(event)
+    preserve_row_trade_pnls = (
+        len(event["rows"]) > 1
+        and abs(event_original_trade_pnl - ledger_amount) <= 0.01
+    )
     rows = []
 
     for leg_sequence, row in enumerate(event["rows"], start=1):
@@ -906,6 +1477,17 @@ def correction_rows_for_event(
         )
         original_fees = parse_number(row.get("fees")) or 0.0
         original_net_pnl = parse_number(row.get("net_pnl")) or 0.0
+        preserve_trade_pnl = (
+            preserve_row_trade_pnls
+            or is_futures_trade(row)
+        )
+        corrected_trade_pnl = (
+            original_trade_pnl
+            if preserve_trade_pnl
+            else ledger_amount if first_leg else 0.0
+        )
+        corrected_fees = corrected_event_fees if first_leg else 0.0
+        corrected_net_pnl = corrected_trade_pnl - corrected_fees
 
         rows.append(
             {
@@ -926,19 +1508,43 @@ def correction_rows_for_event(
                 "original_trade_pnl": original_trade_pnl,
                 "original_fees": original_fees,
                 "original_net_pnl": original_net_pnl,
-                "corrected_trade_pnl": (
-                    ledger_amount if first_leg else 0.0
-                ),
-                "corrected_fees": (
-                    corrected_event_fees if first_leg else 0.0
-                ),
-                "corrected_net_pnl": (
-                    ledger_cash_flow if first_leg else 0.0
-                ),
+                "corrected_trade_pnl": corrected_trade_pnl,
+                "corrected_fees": corrected_fees,
+                "corrected_net_pnl": corrected_net_pnl,
             }
         )
 
     return rows
+
+
+def cash_correction_discrepancy_category(row, tolerance=1.0):
+
+    original_trade_pnl = parse_number(row.get("original_trade_pnl")) or 0.0
+    corrected_trade_pnl = parse_number(row.get("corrected_trade_pnl")) or 0.0
+    original_fees = parse_number(row.get("original_fees")) or 0.0
+    corrected_fees = parse_number(row.get("corrected_fees")) or 0.0
+    original_net_pnl = parse_number(row.get("original_net_pnl")) or 0.0
+    corrected_net_pnl = parse_number(row.get("corrected_net_pnl")) or 0.0
+
+    trade_amount_mismatch = (
+        abs(original_trade_pnl - corrected_trade_pnl) > tolerance
+    )
+    fee_mismatch = abs(original_fees - corrected_fees) > tolerance
+    net_pnl_mismatch = abs(original_net_pnl - corrected_net_pnl) > tolerance
+
+    if trade_amount_mismatch and fee_mismatch:
+        return "trade_amount_and_fee_mismatch"
+
+    if trade_amount_mismatch:
+        return "trade_amount_mismatch"
+
+    if fee_mismatch:
+        return "fee_mismatch"
+
+    if net_pnl_mismatch:
+        return "net_pnl_mismatch"
+
+    return "already_matches_cash_ledger"
 
 
 def build_cash_trade_corrections(
@@ -1004,6 +1610,11 @@ def build_cash_trade_corrections(
         if not matches:
             continue
 
+        matches = select_ledger_matches_for_event(
+            ledger_trades,
+            matches,
+            event_row["event"],
+        )
         ledger = aggregate_ledger_matches(
             ledger_trades.loc[matches]
         )
@@ -1190,11 +1801,15 @@ def correction_key(row):
 
     return "|".join(
         [
+            key_part(row.get("statement_file", "")),
+            key_part(row.get("statement_trade_row", "")),
             key_part(row.get("date", "")),
             key_part(row.get("account_bucket", "")),
+            key_part(row.get("event_sequence", "")),
             key_part(row.get("event_leg_sequence", "")),
             key_part(row.get("ledger_timestamp", "")),
             key_part(row.get("ledger_description", "")),
+            key_part(row.get("ledger_cash_flow", "")),
         ]
     )
 
@@ -1222,6 +1837,47 @@ def filter_corrections_to_keys(corrections, keys):
     )
 
     return working[mask].copy().reindex(columns=CASH_CORRECTION_COLUMNS)
+
+
+def should_preserve_stock_row_trade_pnl(row, correction, tolerance=0.01):
+    if str(row.get("Spread", "")).upper() != "STOCK":
+        return False
+
+    ledger_description = str(correction.get("ledger_description", ""))
+    if " | " not in ledger_description:
+        return False
+
+    current_trade_pnl = parse_number(row.get("trade_pnl")) or 0.0
+    original_trade_pnl = (
+        parse_number(correction.get("original_trade_pnl")) or 0.0
+    )
+    corrected_trade_pnl = (
+        parse_number(correction.get("corrected_trade_pnl")) or 0.0
+    )
+
+    return (
+        abs(current_trade_pnl - original_trade_pnl) <= tolerance
+        and abs(current_trade_pnl - corrected_trade_pnl) > tolerance
+    )
+
+
+def should_preserve_futures_trade_pnl(row, correction, tolerance=0.01):
+    if not is_futures_trade(row):
+        return False
+
+    correction_source = str(correction.get("correction_source", "")).strip()
+    if correction_source in {
+        "cash_ledger_unmatched_futures_close",
+        SYNTHETIC_CASH_SETTLEMENT_SOURCE,
+    }:
+        return False
+
+    current_trade_pnl = parse_number(row.get("trade_pnl")) or 0.0
+    corrected_trade_pnl = (
+        parse_number(correction.get("corrected_trade_pnl")) or 0.0
+    )
+
+    return abs(current_trade_pnl - corrected_trade_pnl) > tolerance
 
 
 def apply_cash_trade_corrections(trades, corrections):
@@ -1270,9 +1926,21 @@ def apply_cash_trade_corrections(trades, corrections):
         if isinstance(correction, pd.DataFrame):
             correction = correction.iloc[-1]
 
-        working.at[index, "trade_pnl"] = correction["corrected_trade_pnl"]
-        working.at[index, "fees"] = correction["corrected_fees"]
-        working.at[index, "net_pnl"] = correction["corrected_net_pnl"]
+        corrected_trade_pnl = correction["corrected_trade_pnl"]
+        corrected_fees = correction["corrected_fees"]
+        corrected_net_pnl = correction["corrected_net_pnl"]
+
+        if (
+            should_preserve_stock_row_trade_pnl(row, correction)
+            or should_preserve_futures_trade_pnl(row, correction)
+        ):
+            corrected_trade_pnl = parse_number(row.get("trade_pnl")) or 0.0
+            corrected_fees = parse_number(corrected_fees) or 0.0
+            corrected_net_pnl = corrected_trade_pnl - corrected_fees
+
+        working.at[index, "trade_pnl"] = corrected_trade_pnl
+        working.at[index, "fees"] = corrected_fees
+        working.at[index, "net_pnl"] = corrected_net_pnl
         working.at[index, "cash_correction_applied"] = True
         working.at[index, "cash_correction_status"] = correction[
             "correction_status"
@@ -1296,7 +1964,11 @@ def apply_cash_trade_corrections(trades, corrections):
     return working
 
 
-def statement_trade_cash_by_day(cash_ledger):
+def statement_trade_cash_by_day(
+    cash_ledger,
+    trades=None,
+    include_futures_mtm_adjustments=True,
+):
 
     columns = [
         "date",
@@ -1319,12 +1991,18 @@ def statement_trade_cash_by_day(cash_ledger):
         ["date", "account_bucket"],
     ):
         group = group.sort_values("timestamp")
-        trade_rows = group[group["type"] == "TRD"]
+        trade_cash_flow_mask = futures_trade_cash_flow_mask(
+            group,
+            trades=trades,
+            include_mark_to_market=include_futures_mtm_adjustments,
+        )
+        trade_rows = group[trade_cash_flow_mask]
         balance_rows = group[group["balance"].notna()]
         statement_trade_cash_flow = float(trade_rows["cash_flow"].sum())
         non_trade_cash_flow = float(
             group.loc[
-                ~group["type"].isin(["BAL", "TRD"]),
+                ~group["type"].astype(str).str.upper().eq("BAL")
+                & ~trade_cash_flow_mask,
                 "cash_flow",
             ].sum()
         )
@@ -1368,6 +2046,7 @@ def reconcile_cash_balances(
     tolerance=1.0,
     start_date=None,
     end_date=None,
+    include_futures_mtm_adjustments=True,
 ):
 
     cash_ledger = parse_cash_ledger(lines)
@@ -1376,7 +2055,11 @@ def reconcile_cash_balances(
         start_date,
         end_date,
     )
-    statement = statement_trade_cash_by_day(cash_ledger)
+    statement = statement_trade_cash_by_day(
+        cash_ledger,
+        trades=trades,
+        include_futures_mtm_adjustments=include_futures_mtm_adjustments,
+    )
     extracted = extracted_trade_cash_by_day(trades)
 
     available_buckets = (
@@ -1806,6 +2489,84 @@ def merge_fee_suggestions_into_trade_rows(trade_rows, suggestions):
     )
 
 
+def merge_cash_corrections_into_trade_rows(trade_rows, corrections):
+
+    if trade_rows is None or trade_rows.empty:
+        return trade_rows
+
+    working = trade_rows.copy()
+
+    if corrections is None or corrections.empty:
+        return working
+
+    correction_columns = [
+        "statement_file",
+        "statement_trade_row",
+        "correction_status",
+        "correction_source",
+        "ledger_timestamp",
+        "ledger_description",
+        "ledger_amount",
+        "ledger_cash_flow",
+        "ledger_misc_fees",
+        "ledger_commissions_fees",
+        "original_trade_pnl",
+        "original_fees",
+        "original_net_pnl",
+        "corrected_trade_pnl",
+        "corrected_fees",
+        "corrected_net_pnl",
+    ]
+    correction_rows = corrections.copy().reindex(columns=correction_columns)
+    correction_rows["statement_trade_row"] = pd.to_numeric(
+        correction_rows["statement_trade_row"],
+        errors="coerce",
+    )
+    working["statement_trade_row"] = pd.to_numeric(
+        working["statement_trade_row"],
+        errors="coerce",
+    )
+    correction_rows["cash_discrepancy_category"] = correction_rows.apply(
+        cash_correction_discrepancy_category,
+        axis=1,
+    )
+    correction_rows["trade_pnl_delta_to_cash_ledger"] = (
+        correction_rows["corrected_trade_pnl"].apply(parse_number).fillna(0.0)
+        - correction_rows["original_trade_pnl"].apply(parse_number).fillna(0.0)
+    )
+    correction_rows["fee_delta_to_cash_ledger"] = (
+        correction_rows["corrected_fees"].apply(parse_number).fillna(0.0)
+        - correction_rows["original_fees"].apply(parse_number).fillna(0.0)
+    )
+    correction_rows["net_pnl_delta_to_cash_ledger"] = (
+        correction_rows["corrected_net_pnl"].apply(parse_number).fillna(0.0)
+        - correction_rows["original_net_pnl"].apply(parse_number).fillna(0.0)
+    )
+    correction_rows = correction_rows.rename(
+        columns={
+            "ledger_timestamp": "matched_ledger_timestamp",
+            "ledger_description": "matched_ledger_description",
+            "ledger_amount": "cash_ledger_trade_amount",
+            "ledger_cash_flow": "cash_ledger_cash_flow",
+            "ledger_misc_fees": "cash_ledger_misc_fees",
+            "ledger_commissions_fees": "cash_ledger_commissions_fees",
+            "original_trade_pnl": "current_trade_pnl",
+            "original_fees": "current_fees",
+            "original_net_pnl": "current_net_pnl",
+            "corrected_trade_pnl": "suggested_trade_pnl",
+            "corrected_fees": "suggested_fees",
+            "corrected_net_pnl": "suggested_cash_net_pnl",
+        }
+    )
+
+    return pd.merge(
+        working,
+        correction_rows,
+        on=["statement_file", "statement_trade_row"],
+        how="left",
+    )
+
+
 def write_cash_reconciliation_dashboard(
     output_file,
     reconciliation,
@@ -1815,6 +2576,8 @@ def write_cash_reconciliation_dashboard(
     correction_candidates=None,
     approved_corrections=None,
     reviewed_groups=None,
+    statement_ytd_summary=None,
+    statement_ytd_positions=None,
     server_enabled=False,
 ):
 
@@ -1866,9 +2629,12 @@ def write_cash_reconciliation_dashboard(
     payload = {
         "groups": json_safe_records(failed),
         "trades": json_safe_records(
-            merge_fee_suggestions_into_trade_rows(
-                cash_review_trade_rows(trades),
-                fee_suggestions,
+            merge_cash_corrections_into_trade_rows(
+                merge_fee_suggestions_into_trade_rows(
+                    cash_review_trade_rows(trades),
+                    fee_suggestions,
+                ),
+                correction_candidates,
             )
         ),
         "ledger": json_safe_records(cash_review_ledger_rows(cash_ledger)),
@@ -1879,6 +2645,10 @@ def write_cash_reconciliation_dashboard(
         "serverEnabled": server_enabled,
     }
     payload_json = json.dumps(payload, allow_nan=False)
+    ytd_section = ytd_dashboard_section(
+        statement_ytd_summary,
+        statement_ytd_positions,
+    )
     html = f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1887,57 +2657,112 @@ def write_cash_reconciliation_dashboard(
   <title>Cash Reconciliation Review</title>
   <style>
     :root {{
-      --bg: #f6f7f8;
+      --bg: #eef3f4;
       --panel: #ffffff;
-      --ink: #202936;
+      --ink: #18212f;
       --muted: #667085;
-      --line: #d8dde4;
+      --line: #d7dfe5;
+      --line-strong: #b9c6d0;
       --bad: #b42318;
+      --bad-bg: #fff1f0;
       --good: #146c43;
-      --accent: #245b73;
+      --good-bg: #ecfdf3;
+      --warn: #a15c07;
+      --warn-bg: #fff7e6;
+      --accent: #175c63;
+      --accent-soft: #e3f1f0;
+      --surface-soft: #f8fafb;
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
-      font-family: Arial, Helvetica, sans-serif;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: var(--ink);
       background: var(--bg);
+      font-size: 14px;
+      line-height: 1.42;
     }}
     header {{
-      padding: 18px 24px;
-      background: #fff;
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      padding: 16px 24px;
+      background: rgba(255, 255, 255, 0.96);
       border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(10px);
     }}
-    h1 {{ margin: 0 0 6px; font-size: 22px; letter-spacing: 0; }}
-    h2 {{ margin: 0 0 10px; font-size: 16px; letter-spacing: 0; }}
-    main {{ padding: 18px 24px 28px; }}
-    .subtle {{ color: var(--muted); font-size: 13px; }}
+    h1 {{ margin: 0 0 4px; font-size: 22px; letter-spacing: 0; }}
+    h2 {{ margin: 0; font-size: 15px; letter-spacing: 0; }}
+    h3 {{ margin: 0 0 8px; font-size: 13px; letter-spacing: 0; }}
+    main {{
+      padding: 18px 24px 32px;
+      max-width: 1840px;
+      margin: 0 auto;
+    }}
+    .subtle {{ color: var(--muted); font-size: 12px; }}
+    .dashboard-summary {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }}
+    .summary-card {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 11px 12px;
+    }}
+    .summary-label {{
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }}
+    .summary-value {{
+      margin-top: 3px;
+      font-size: 20px;
+      font-weight: 800;
+    }}
     .layout {{
       display: grid;
-      grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+      grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
       gap: 16px;
       align-items: start;
     }}
     .panel {{
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 6px;
+      border-radius: 8px;
       overflow: hidden;
+      box-shadow: 0 8px 24px rgba(24, 33, 47, 0.05);
+    }}
+    .detail-panel {{
+      min-width: 0;
     }}
     .panel-head {{
-      padding: 12px;
+      padding: 12px 14px;
       border-bottom: 1px solid var(--line);
-      background: #fbfbfc;
+      background: var(--surface-soft);
+    }}
+    .panel-head-row,
+    .table-title-row,
+    .group-top,
+    .group-meta {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
     }}
     .group-list {{
-      max-height: calc(100vh - 155px);
+      max-height: calc(100vh - 210px);
       overflow: auto;
     }}
     .group-button {{
       display: block;
       width: 100%;
-      padding: 10px 12px;
+      padding: 12px 14px;
       border: 0;
+      border-left: 5px solid transparent;
       border-bottom: 1px solid var(--line);
       background: #fff;
       color: var(--ink);
@@ -1945,89 +2770,234 @@ def write_cash_reconciliation_dashboard(
       cursor: pointer;
       font-size: 13px;
     }}
-    .group-button.active {{ background: #e8f1f4; }}
-    .group-button.approved {{ background: #ecfdf3; border-left: 6px solid var(--good); }}
-    .group-button.partial {{ background: #fff8e6; border-left: 6px solid #b7791f; }}
-    .delta {{ color: var(--bad); font-weight: 700; }}
+    .group-button:hover {{ background: #f7fbfb; }}
+    .group-button.active {{
+      background: var(--accent-soft);
+      border-left-color: var(--accent);
+    }}
+    .group-button.approved {{ background: var(--good-bg); border-left-color: var(--good); }}
+    .group-button.partial {{ background: var(--warn-bg); border-left-color: var(--warn); }}
+    .group-title {{
+      font-weight: 780;
+    }}
+    .delta {{ color: var(--bad); font-weight: 800; }}
+    .delta.positive {{ color: var(--good); }}
     .badge {{
-      display: inline-block;
-      margin-top: 5px;
-      padding: 3px 7px;
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 8px;
       border-radius: 999px;
       font-size: 11px;
-      font-weight: 700;
+      font-weight: 800;
+      background: #edf2f7;
+      color: #354052;
+      white-space: nowrap;
     }}
     .badge.approved {{ background: #d1fadf; color: var(--good); }}
     .badge.partial {{ background: #fef0c7; color: #8a4b00; }}
+    .badge.problem {{ background: #fee4e2; color: var(--bad); }}
     .split {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 16px;
+      grid-template-columns: 1fr;
+      gap: 14px;
+      padding: 0 12px 12px;
+    }}
+    .table-card {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #fff;
+    }}
+    .table-title-row {{
+      min-height: 46px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-soft);
     }}
     .metrics {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+      gap: 9px;
       padding: 12px;
       border-bottom: 1px solid var(--line);
     }}
     .metric {{
       border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 9px;
+      border-radius: 8px;
+      padding: 9px 10px;
       background: #fff;
     }}
-    .metric-label {{ color: var(--muted); font-size: 12px; }}
-    .metric-value {{ margin-top: 4px; font-size: 17px; font-weight: 700; }}
-    .toolbar {{ padding: 12px; display: flex; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }}
-    button {{ border: 1px solid var(--accent); border-radius: 6px; padding: 8px 10px; background: var(--accent); color: #fff; cursor: pointer; }}
-    button.secondary {{ background: #fff; color: var(--ink); border-color: var(--line); }}
+    .metric-label {{
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }}
+    .metric-value {{
+      margin-top: 4px;
+      font-size: 18px;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }}
+    .metric-value.bad {{ color: var(--bad); }}
+    .metric-value.good {{ color: var(--good); }}
+    .toolbar {{
+      padding: 12px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }}
+    button {{
+      border: 1px solid var(--accent);
+      border-radius: 7px;
+      padding: 8px 10px;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 12px;
+    }}
+    button.secondary,
+    button.mode-button {{
+      background: #fff;
+      color: var(--ink);
+      border-color: var(--line-strong);
+    }}
+    button.mode-button.active {{
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }}
     button:disabled {{
       cursor: not-allowed;
       opacity: 0.55;
     }}
-    .approval-status {{
-      margin: 0 12px 12px;
-      padding: 10px 12px;
+    .segmented {{
+      display: inline-flex;
+      gap: 4px;
+      padding: 3px;
       border: 1px solid var(--line);
-      border-radius: 6px;
+      border-radius: 9px;
       background: #fff;
+    }}
+    .segmented button {{
+      border-radius: 6px;
+      min-width: 96px;
+    }}
+    .approval-status {{
+      margin: 0;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-soft);
       font-size: 13px;
       color: var(--muted);
     }}
     .approval-status.saved {{
       border-color: #75c98b;
-      background: #ecfdf3;
+      background: var(--good-bg);
       color: var(--good);
       font-weight: 700;
     }}
     .approval-status.error {{
       border-color: #f2a19a;
-      background: #fff1f0;
+      background: var(--bad-bg);
       color: var(--bad);
       font-weight: 700;
     }}
-    .table-wrap {{ overflow: auto; max-height: 60vh; }}
-    table {{ border-collapse: collapse; width: 100%; min-width: 760px; }}
+    .table-wrap {{
+      overflow: auto;
+      max-height: 54vh;
+      background: #fff;
+    }}
+    .ytd-panel {{
+      margin-bottom: 16px;
+    }}
+    .ytd-body {{
+      padding: 12px;
+    }}
+    .ytd-grid {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+      padding: 12px;
+    }}
+    .dashboard-table {{
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 12px;
+    }}
+    table {{
+      border-collapse: separate;
+      border-spacing: 0;
+      width: 100%;
+      min-width: 1040px;
+    }}
     th, td {{
       border-bottom: 1px solid var(--line);
-      padding: 7px 8px;
+      padding: 8px 9px;
       text-align: right;
       white-space: nowrap;
       font-size: 12px;
+      vertical-align: top;
     }}
     th {{
       position: sticky;
       top: 0;
-      background: #eef1f4;
-      z-index: 1;
+      background: #edf3f5;
+      z-index: 4;
+      color: #465564;
+      font-size: 11px;
+      font-weight: 850;
+      text-transform: uppercase;
     }}
-    td:first-child, th:first-child, td:nth-child(2), th:nth-child(2) {{
+    tbody tr:hover td {{
+      background: #f8fbfc;
+    }}
+    td.text-cell,
+    th.text-cell,
+    td:first-child,
+    th:first-child,
+    td:nth-child(2),
+    th:nth-child(2) {{
       text-align: left;
     }}
-    @media (max-width: 980px) {{
-      .layout, .split {{ grid-template-columns: 1fr; }}
-      .group-list {{ max-height: 300px; }}
+    td.wide-cell {{
+      max-width: 420px;
+      min-width: 260px;
+      white-space: normal;
+      line-height: 1.35;
+    }}
+    .money-cell {{
+      font-variant-numeric: tabular-nums;
+    }}
+    .money-positive {{ color: var(--good); font-weight: 750; }}
+    .money-negative {{ color: var(--bad); font-weight: 750; }}
+    .delta-cell {{
+      background: #fff7ed;
+      font-weight: 800;
+    }}
+    .category-pill {{
+      display: inline-flex;
+      max-width: 230px;
+      white-space: normal;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #eef2f7;
+      color: #354052;
+      font-weight: 750;
+      line-height: 1.3;
+    }}
+    .category-pill.problem {{
+      background: #fee4e2;
+      color: var(--bad);
+    }}
+    @media (max-width: 1100px) {{
+      .layout, .ytd-grid {{ grid-template-columns: 1fr; }}
+      .group-list {{ max-height: 320px; }}
+      main, header {{ padding-left: 14px; padding-right: 14px; }}
     }}
   </style>
 </head>
@@ -2037,6 +3007,8 @@ def write_cash_reconciliation_dashboard(
     <div class="subtle">Manual review of extracted trade history against statement cash ledger rows. No corrections are applied from this dashboard.</div>
   </header>
   <main>
+    {ytd_section}
+    <div class="dashboard-summary" id="dashboard-summary"></div>
     <div class="layout">
       <aside class="panel">
         <div class="panel-head">
@@ -2045,9 +3017,12 @@ def write_cash_reconciliation_dashboard(
         </div>
         <div class="group-list" id="groups"></div>
       </aside>
-      <section class="panel">
+      <section class="panel detail-panel">
         <div class="panel-head">
-          <h2 id="selected-title">Select a group</h2>
+          <div class="panel-head-row">
+            <h2 id="selected-title">Select a group</h2>
+            <span class="badge problem" id="selected-delta"></span>
+          </div>
           <div class="subtle" id="selected-subtitle"></div>
         </div>
         <div class="metrics" id="metrics"></div>
@@ -2059,12 +3034,18 @@ def write_cash_reconciliation_dashboard(
         </div>
         <div class="approval-status" id="approval-status">Approval changes have not been saved in this dashboard session.</div>
         <div class="split">
-          <div>
-            <div class="panel-head"><h2>Extracted Trade History</h2></div>
+          <div class="table-card">
+            <div class="table-title-row">
+              <h2>Extracted Trade History + Suggested Cash Adjustment</h2>
+              <div class="segmented" aria-label="Trade history columns">
+                <button class="mode-button active" id="compact-columns" type="button">Review columns</button>
+                <button class="mode-button" id="all-columns" type="button">All columns</button>
+              </div>
+            </div>
             <div class="table-wrap"><table id="trades-table"></table></div>
           </div>
-          <div>
-            <div class="panel-head"><h2>Statement Cash Ledger</h2></div>
+          <div class="table-card">
+            <div class="table-title-row"><h2>Statement Cash Ledger</h2></div>
             <div class="table-wrap"><table id="ledger-table"></table></div>
           </div>
         </div>
@@ -2078,6 +3059,41 @@ def write_cash_reconciliation_dashboard(
     const saved = new Set(DATA.approvedCorrectionKeys || []);
     const reviewedGroups = new Set(DATA.reviewedGroupKeys || []);
     const savedReviewedGroups = new Set(DATA.reviewedGroupKeys || []);
+    let tradeColumnMode = 'review';
+    const reviewTradeColumns = [
+      'review_sequence',
+      'statement_trade_row',
+      'Exec Time',
+      'Symbol',
+      'Side',
+      'Qty',
+      'Pos Effect',
+      'cash_discrepancy_category',
+      'current_trade_pnl',
+      'current_fees',
+      'current_net_pnl',
+      'cash_ledger_cash_flow',
+      'suggested_trade_pnl',
+      'suggested_fees',
+      'suggested_cash_net_pnl',
+      'trade_pnl_delta_to_cash_ledger',
+      'fee_delta_to_cash_ledger',
+      'net_pnl_delta_to_cash_ledger',
+      'matched_ledger_description',
+    ];
+    const allTradeColumns = [
+      'review_sequence','statement_trade_row','Exec Time','Spread','Side','Qty','Pos Effect','Symbol','Type','Price','Net Price','cash_discrepancy_category','current_trade_pnl','current_fees','current_net_pnl','cash_ledger_trade_amount','cash_ledger_cash_flow','cash_ledger_misc_fees','cash_ledger_commissions_fees','suggested_trade_pnl','suggested_fees','suggested_cash_net_pnl','trade_pnl_delta_to_cash_ledger','fee_delta_to_cash_ledger','net_pnl_delta_to_cash_ledger','matched_ledger_timestamp','matched_ledger_description','fees','trade_pnl','net_pnl','broker_implied_fees','fee_adjustment','suggested_net_pnl','net_pnl_adjustment','suggestion_status','cash_correction_applied','Order ID'
+    ];
+    const ledgerColumns = [
+      'timestamp',
+      'type',
+      'description',
+      'amount',
+      'misc_fees',
+      'commissions_fees',
+      'cash_flow',
+      'balance',
+    ];
 
     function money(value) {{
       const number = Number(value || 0);
@@ -2090,12 +3106,15 @@ def write_cash_reconciliation_dashboard(
     }}
     function correctionKey(row) {{
       return [
+        row.statement_file,
+        row.statement_trade_row,
         row.date,
         row.account_bucket,
         row.event_sequence,
         row.event_leg_sequence,
         row.ledger_timestamp,
         row.ledger_description,
+        row.ledger_cash_flow,
       ].map(value => {{
         if (value === null || value === undefined) return '';
         const number = Number(value);
@@ -2152,15 +3171,155 @@ def write_cash_reconciliation_dashboard(
       }}
       return {{ klass: 'partial', label: 'Partial', approvedCount, total: rows.length }};
     }}
+    const columnLabels = {{
+      cash_discrepancy_category: 'Discrepancy',
+      current_trade_pnl: 'Current Trade PnL',
+      current_fees: 'Current Fees',
+      current_net_pnl: 'Current Net PnL',
+      cash_ledger_trade_amount: 'Cash Ledger Amount',
+      cash_ledger_cash_flow: 'Cash Ledger Cash Flow',
+      cash_ledger_misc_fees: 'Ledger Misc Fees',
+      cash_ledger_commissions_fees: 'Ledger Commissions',
+      suggested_trade_pnl: 'Suggested Trade PnL',
+      suggested_fees: 'Suggested Fees',
+      suggested_cash_net_pnl: 'Suggested Net PnL',
+      trade_pnl_delta_to_cash_ledger: 'Trade PnL Delta',
+      fee_delta_to_cash_ledger: 'Fee Delta',
+      net_pnl_delta_to_cash_ledger: 'Net PnL Delta',
+      matched_ledger_timestamp: 'Matched Ledger Time',
+      matched_ledger_description: 'Matched Ledger Description',
+      review_sequence: '#',
+      statement_trade_row: 'Ledger Row',
+      'Exec Time': 'Exec Time',
+      'Pos Effect': 'Position',
+      amount: 'Amount',
+      misc_fees: 'Misc Fees',
+      commissions_fees: 'Commissions',
+      cash_flow: 'Cash Flow',
+    }};
+    const moneyColumns = new Set([
+      'fees',
+      'broker_implied_fees',
+      'fee_adjustment',
+      'trade_pnl',
+      'net_pnl',
+      'suggested_net_pnl',
+      'net_pnl_adjustment',
+      'current_trade_pnl',
+      'current_fees',
+      'current_net_pnl',
+      'cash_ledger_trade_amount',
+      'cash_ledger_cash_flow',
+      'cash_ledger_misc_fees',
+      'cash_ledger_commissions_fees',
+      'suggested_trade_pnl',
+      'suggested_fees',
+      'suggested_cash_net_pnl',
+      'trade_pnl_delta_to_cash_ledger',
+      'fee_delta_to_cash_ledger',
+      'net_pnl_delta_to_cash_ledger',
+      'amount',
+      'misc_fees',
+      'commissions_fees',
+      'cash_flow',
+      'balance',
+    ]);
+    const textColumns = new Set([
+      'Exec Time',
+      'Symbol',
+      'Spread',
+      'Side',
+      'Pos Effect',
+      'Type',
+      'cash_discrepancy_category',
+      'matched_ledger_timestamp',
+      'matched_ledger_description',
+      'timestamp',
+      'type',
+      'description',
+      'suggestion_status',
+      'cash_correction_applied',
+      'Order ID',
+    ]);
+    const wideColumns = new Set([
+      'matched_ledger_description',
+      'description',
+    ]);
+    const deltaColumns = new Set([
+      'trade_pnl_delta_to_cash_ledger',
+      'fee_delta_to_cash_ledger',
+      'net_pnl_delta_to_cash_ledger',
+    ]);
+    function columnLabel(column) {{ return columnLabels[column] || column; }}
+    function escapeHtml(value) {{
+      const text = value === null || value === undefined ? '' : String(value);
+      const escapeMap = {{
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      }};
+      return text.replace(/[&<>"']/g, char => escapeMap[char]);
+    }}
+    function headerClass(column) {{
+      const classes = [];
+      if (textColumns.has(column)) classes.push('text-cell');
+      if (wideColumns.has(column)) classes.push('wide-cell');
+      return classes.length ? ` class="${{classes.join(' ')}}"` : '';
+    }}
+    function cellClass(row, column) {{
+      const classes = [];
+      const value = row[column];
+      if (textColumns.has(column)) classes.push('text-cell');
+      if (wideColumns.has(column)) classes.push('wide-cell');
+      if (moneyColumns.has(column)) {{
+        classes.push('money-cell');
+        const number = Number(value);
+        if (Number.isFinite(number) && number > 0) classes.push('money-positive');
+        if (Number.isFinite(number) && number < 0) classes.push('money-negative');
+      }}
+      if (deltaColumns.has(column)) classes.push('delta-cell');
+      return classes.length ? ` class="${{classes.join(' ')}}"` : '';
+    }}
+    function cellValue(row, column) {{
+      const value = row[column];
+      if (value === null || value === undefined || value === '') return '';
+      if (column === 'cash_discrepancy_category') {{
+        const text = String(value);
+        const problem = text && text !== 'already_matches_cash_ledger';
+        return `<span class="category-pill ${{problem ? 'problem' : ''}}">${{escapeHtml(text.replaceAll('_', ' '))}}</span>`;
+      }}
+      if (column === 'cash_correction_applied') return value ? 'Yes' : 'No';
+      if (moneyColumns.has(column)) return money(value);
+      return escapeHtml(value);
+    }}
     function renderTable(id, rows, columns) {{
       const table = document.getElementById(id);
       if (!rows.length) {{
         table.innerHTML = '<tbody><tr><td>No rows.</td></tr></tbody>';
         return;
       }}
-      table.innerHTML = `<thead><tr>${{columns.map(col => `<th>${{col}}</th>`).join('')}}</tr></thead><tbody>` +
-        rows.map(row => `<tr>${{columns.map(col => `<td>${{row[col] ?? ''}}</td>`).join('')}}</tr>`).join('') +
+      table.innerHTML = `<thead><tr>${{columns.map(col => `<th${{headerClass(col)}}>${{escapeHtml(columnLabel(col))}}</th>`).join('')}}</tr></thead><tbody>` +
+        rows.map(row => `<tr>${{columns.map(col => `<td${{cellClass(row, col)}}>${{cellValue(row, col)}}</td>`).join('')}}</tr>`).join('') +
         '</tbody>';
+    }}
+    function renderDashboardSummary() {{
+      const groups = DATA.groups || [];
+      const totalAbsDelta = groups.reduce((sum, group) => sum + Math.abs(Number(group.unreconciled_delta || 0)), 0);
+      const candidateCount = (DATA.correctionCandidates || []).length;
+      const approvedCount = approvedRows().length;
+      const reviewedCount = reviewedGroupRows().length;
+      const cards = [
+        ['Groups to review', groups.length],
+        ['Total abs delta', money(totalAbsDelta)],
+        ['Correction candidates', candidateCount],
+        ['Approved rows', approvedCount],
+        ['Reviewed groups', reviewedCount],
+      ];
+      document.getElementById('dashboard-summary').innerHTML = cards.map(([label, value]) =>
+        `<div class="summary-card"><div class="summary-label">${{escapeHtml(label)}}</div><div class="summary-value">${{escapeHtml(value)}}</div></div>`
+      ).join('');
     }}
     function renderGroups() {{
       document.getElementById('group-count').textContent = `${{DATA.groups.length}} groups need review`;
@@ -2168,11 +3327,17 @@ def write_cash_reconciliation_dashboard(
         const active = index === selectedIndex ? 'active' : '';
         const approval = groupApprovalState(group);
         const badge = approval.klass ? `<span class="badge ${{approval.klass}}">${{approval.label}} · ${{approval.approvedCount}}/${{approval.total}}</span>` : `<span class="badge partial">${{approval.label}}</span>`;
+        const deltaNumber = Number(group.unreconciled_delta || 0);
+        const deltaClass = deltaNumber >= 0 ? 'delta positive' : 'delta';
         return `<button class="group-button ${{active}} ${{approval.klass}}" data-index="${{index}}">
-          <strong>${{group.date}} · ${{group.account_bucket}}</strong><br>
-          <span class="delta">Delta ${{money(group.unreconciled_delta)}}</span><br>
-          <span class="subtle">${{group.extracted_trade_count}} extracted trades · ${{group.statement_trade_rows}} ledger trades</span><br>
-          ${{badge}}
+          <span class="group-top">
+            <span class="group-title">${{escapeHtml(group.date)}} · ${{escapeHtml(group.account_bucket)}}</span>
+            ${{badge}}
+          </span>
+          <span class="group-meta">
+            <span class="${{deltaClass}}">${{money(group.unreconciled_delta)}}</span>
+            <span class="subtle">${{group.extracted_trade_count}} trades · ${{group.statement_trade_rows}} ledger</span>
+          </span>
         </button>`;
       }}).join('');
       document.querySelectorAll('.group-button').forEach(button => {{
@@ -2189,11 +3354,12 @@ def write_cash_reconciliation_dashboard(
       if (!group) {{
         document.getElementById('selected-title').textContent = 'No unreconciled groups';
         document.getElementById('selected-subtitle').textContent = '';
+        document.getElementById('selected-delta').textContent = '';
         document.getElementById('metrics').innerHTML = '';
         approveButton.disabled = true;
         clearButton.disabled = true;
-        renderTable('trades-table', [], []);
-        renderTable('ledger-table', [], []);
+        renderTable('trades-table', [], reviewTradeColumns);
+        renderTable('ledger-table', [], ledgerColumns);
         return;
       }}
       const candidateRows = groupCandidateRows(group);
@@ -2203,6 +3369,9 @@ def write_cash_reconciliation_dashboard(
       approveButton.textContent = hasCandidates ? 'Approve group corrections' : 'Mark group reviewed';
       clearButton.textContent = hasCandidates ? 'Clear group approvals' : 'Clear reviewed mark';
       document.getElementById('selected-title').textContent = `${{group.date}} · ${{group.account_bucket}}`;
+      const selectedDelta = document.getElementById('selected-delta');
+      selectedDelta.textContent = money(group.unreconciled_delta);
+      selectedDelta.className = 'badge problem';
       document.getElementById('selected-subtitle').textContent = hasCandidates
         ? 'Review whether extracted trade rows should be changed to match broker cash flow.'
         : 'No automatic correction candidates are available for this group. This usually means the number of extracted trade events does not match the number of statement ledger trade rows, so manual review is needed.';
@@ -2219,18 +3388,21 @@ def write_cash_reconciliation_dashboard(
       document.getElementById('metrics').innerHTML = metrics.map(([label, value]) =>
         `<div class="metric"><div class="metric-label">${{label}}</div><div class="metric-value">${{value}}</div></div>`
       ).join('');
+      document.getElementById('compact-columns').classList.toggle('active', tradeColumnMode === 'review');
+      document.getElementById('all-columns').classList.toggle('active', tradeColumnMode === 'all');
       renderTable(
         'trades-table',
         rowsFor(DATA.trades, group),
-        ['review_sequence','statement_trade_row','Exec Time','Spread','Side','Qty','Pos Effect','Symbol','Type','Price','Net Price','fees','broker_implied_fees','fee_adjustment','trade_pnl','net_pnl','suggested_net_pnl','net_pnl_adjustment','suggestion_status','cash_correction_applied','Order ID']
+        tradeColumnMode === 'all' ? allTradeColumns : reviewTradeColumns
       );
       renderTable(
         'ledger-table',
         rowsFor(DATA.ledger, group).filter(row => row.type === 'TRD'),
-        ['timestamp','type','description','amount','misc_fees','commissions_fees','cash_flow','balance']
+        ledgerColumns
       );
     }}
     function render() {{
+      renderDashboardSummary();
       renderGroups();
       renderSelected();
     }}
@@ -2313,6 +3485,14 @@ def write_cash_reconciliation_dashboard(
     }}
     document.getElementById('approve-group').addEventListener('click', approveCurrentGroup);
     document.getElementById('clear-group').addEventListener('click', clearCurrentGroup);
+    document.getElementById('compact-columns').addEventListener('click', () => {{
+      tradeColumnMode = 'review';
+      renderSelected();
+    }});
+    document.getElementById('all-columns').addEventListener('click', () => {{
+      tradeColumnMode = 'all';
+      renderSelected();
+    }});
     document.getElementById('download-approvals').addEventListener('click', downloadApprovals);
     document.getElementById('save-approvals').addEventListener('click', saveApprovals);
     render();
@@ -2696,6 +3876,12 @@ def preserve_existing_strategy_names(existing_trades, new_trades, dedupe_columns
     new = new_trades.copy()
     if "Strategy_Name" not in new.columns:
         new["Strategy_Name"] = ""
+    else:
+        new["Strategy_Name"] = (
+            new["Strategy_Name"]
+            .astype("object")
+            .where(new["Strategy_Name"].notna(), "")
+        )
     existing["_dedupe_key"] = build_dedupe_key(
         existing,
         dedupe_columns,
@@ -2906,6 +4092,150 @@ def drop_invalid_strategy_duplicates(df):
     )
 
 
+def drop_cross_statement_stock_subset_duplicates(
+    df,
+    seconds_tolerance=2,
+    price_tolerance=0.01,
+):
+
+    required_columns = {
+        "statement_file",
+        "Exec Time",
+        "Strategy_Name",
+        "Spread",
+        "Side",
+        "Qty",
+        "Pos Effect",
+        "Symbol",
+        "Price",
+    }
+
+    if not required_columns.issubset(df.columns):
+        return df
+
+    stock_rows = df[
+        df["Spread"].astype(str).str.upper() == "STOCK"
+    ].copy()
+
+    if stock_rows.empty:
+        return df
+
+    stock_rows["_stock_time"] = pd.to_datetime(
+        stock_rows["Exec Time"],
+        format="%m/%d/%y %H:%M:%S",
+        errors="coerce",
+    )
+    stock_rows["_stock_price"] = stock_rows["Price"].apply(parse_number)
+    stock_rows["_stock_qty_abs"] = (
+        stock_rows["Qty"]
+        .apply(parse_number)
+        .abs()
+    )
+    stock_rows["_stock_duplicate_key"] = stock_rows.apply(
+        lambda row: "|".join(
+            str(row.get(column, "")).strip()
+            for column in [
+                "Symbol",
+                "Spread",
+                "Side",
+                "Pos Effect",
+            ]
+        ),
+        axis=1,
+    )
+    drop_indices = set()
+
+    for _, group in stock_rows.groupby(
+        "_stock_duplicate_key",
+        sort=False,
+    ):
+        if len(group) < 2:
+            continue
+
+        group = group.sort_values(
+            ["_stock_time", "_stock_qty_abs"],
+            ascending=[True, False],
+            na_position="last",
+        )
+        records = list(group.iterrows())
+
+        protected_indices = set()
+
+        for left_position, (left_index, left) in enumerate(records):
+            if pd.isna(left["_stock_time"]):
+                continue
+
+            for right_index, right in records[left_position + 1:]:
+                if pd.isna(right["_stock_time"]):
+                    continue
+
+                if str(left["statement_file"]) != str(right["statement_file"]):
+                    continue
+
+                seconds_apart = abs(
+                    (
+                        right["_stock_time"] - left["_stock_time"]
+                    ).total_seconds()
+                )
+
+                if seconds_apart <= seconds_tolerance:
+                    protected_indices.update([left_index, right_index])
+
+        for left_position, (left_index, left) in enumerate(records):
+            if left_index in drop_indices or pd.isna(left["_stock_time"]):
+                continue
+
+            for right_index, right in records[left_position + 1:]:
+                if (
+                    right_index in drop_indices
+                    or pd.isna(right["_stock_time"])
+                ):
+                    continue
+
+                if str(left["statement_file"]) == str(right["statement_file"]):
+                    continue
+
+                seconds_apart = abs(
+                    (
+                        right["_stock_time"] - left["_stock_time"]
+                    ).total_seconds()
+                )
+
+                if seconds_apart > seconds_tolerance:
+                    continue
+
+                if (
+                    pd.isna(left["_stock_price"])
+                    or pd.isna(right["_stock_price"])
+                    or abs(
+                        left["_stock_price"] - right["_stock_price"]
+                    ) > price_tolerance
+                ):
+                    continue
+
+                left_qty = left["_stock_qty_abs"]
+                right_qty = right["_stock_qty_abs"]
+
+                if pd.isna(left_qty) or pd.isna(right_qty):
+                    continue
+
+                if left_qty >= right_qty:
+                    if right_index in protected_indices:
+                        continue
+                    drop_indices.add(right_index)
+                else:
+                    if left_index in protected_indices:
+                        continue
+                    drop_indices.add(left_index)
+
+    if not drop_indices:
+        return df
+
+    return df.loc[
+        ~df.index.isin(drop_indices)
+    ].copy()
+
+
 def sort_cleaned_trades(df):
 
     df = df.copy()
@@ -2945,6 +4275,73 @@ def reset_cash_correction_columns(df):
     return df
 
 
+def synthetic_cash_settlement_mask(df):
+    if "synthetic_cash_settlement" not in df.columns:
+        return pd.Series(False, index=df.index)
+
+    values = df["synthetic_cash_settlement"]
+
+    if values.dtype == bool:
+        return values.fillna(False)
+
+    return values.fillna("").astype(str).str.strip().str.lower().isin({
+        "1",
+        "true",
+        "yes",
+        "y",
+    })
+
+
+def restore_synthetic_cash_settlement_values(df):
+    if df is None or df.empty:
+        return df
+
+    working = df.copy()
+    mask = synthetic_cash_settlement_mask(working)
+
+    if not mask.any():
+        return working
+
+    source_columns = {
+        "trade_pnl": "synthetic_trade_pnl",
+        "fees": "synthetic_fees",
+        "net_pnl": "synthetic_net_pnl",
+    }
+
+    for target_column, source_column in source_columns.items():
+        if source_column not in working.columns:
+            continue
+
+        working.loc[mask, target_column] = (
+            working.loc[mask, source_column]
+            .apply(parse_number)
+            .fillna(0.0)
+        )
+
+    working.loc[mask, "cash_correction_applied"] = True
+    working.loc[mask, "cash_correction_status"] = "cash_ledger_applied"
+    working.loc[mask, "cash_correction_source"] = (
+        SYNTHETIC_CASH_SETTLEMENT_SOURCE
+    )
+
+    if "synthetic_net_pnl" in working.columns:
+        working.loc[mask, "statement_cash_flow"] = (
+            working.loc[mask, "synthetic_net_pnl"]
+            .apply(parse_number)
+            .fillna(0.0)
+        )
+
+    if "net_pnl" in working.columns:
+        working["cumulative_pnl"] = (
+            working["net_pnl"]
+            .apply(parse_number)
+            .fillna(0.0)
+            .cumsum()
+        )
+
+    return working
+
+
 def recalculate_cleaned_trade_columns(
     df,
     starting_equity,
@@ -2960,6 +4357,7 @@ def recalculate_cleaned_trade_columns(
     df["margin_requirement"] = calculate_margin_requirements(df)
     df = add_pnl_columns(df)
     df = reset_cash_correction_columns(df)
+    df = restore_synthetic_cash_settlement_values(df)
     df = apply_cash_trade_corrections(
         df,
         cash_trade_corrections,
@@ -3041,6 +4439,7 @@ def update_master_cleaned_trades(
         new_trades,
     )
     combined = drop_invalid_strategy_duplicates(combined)
+    combined = drop_cross_statement_stock_subset_duplicates(combined)
     combined = filter_by_exec_date(
         combined,
         start_date,
@@ -3095,6 +4494,12 @@ def output_paths(output_dir):
         ),
         "cash_reconciliation_reviews": (
             f"{output_dir}/cash_reconciliation_group_reviews.csv"
+        ),
+        "statement_ytd_summary": (
+            f"{output_dir}/statement_ytd_summary.csv"
+        ),
+        "statement_ytd_positions": (
+            f"{output_dir}/statement_ytd_positions.csv"
         ),
     }
 
@@ -3237,6 +4642,13 @@ def main(
     #
     with open(input_file, "r") as f:
         lines = f.readlines()
+
+    statement_ytd_summary, statement_ytd_positions = (
+        parse_statement_ytd_summary(
+            lines,
+            input_file,
+        )
+    )
 
     #
     # Find trade history section
@@ -3514,6 +4926,16 @@ def main(
         index=False,
     )
 
+    pd.DataFrame([statement_ytd_summary]).to_csv(
+        paths["statement_ytd_summary"],
+        index=False,
+    )
+
+    statement_ytd_positions.to_csv(
+        paths["statement_ytd_positions"],
+        index=False,
+    )
+
     if validate_cash_balances:
         cash_reconciliation.to_csv(
             paths["cash_reconciliation"],
@@ -3545,6 +4967,8 @@ def main(
                 cash_trade_correction_candidates,
                 saved_cash_trade_corrections,
                 saved_cash_reconciliation_reviews,
+                statement_ytd_summary,
+                statement_ytd_positions,
                 server_enabled=serve_cash_dashboard_enabled,
             )
             if open_cash_dashboard:
@@ -3570,6 +4994,16 @@ def main(
 
     print(
         f"Saved summary statistics to {paths['summary_stats']}"
+    )
+
+    print(
+        f"Saved statement YTD summary to "
+        f"{paths['statement_ytd_summary']}"
+    )
+
+    print(
+        f"Saved statement YTD positions to "
+        f"{paths['statement_ytd_positions']}"
     )
 
     if validate_cash_balances:
@@ -3678,6 +5112,8 @@ def main(
         "cash_trade_corrections": cash_trade_corrections,
         "cash_trade_correction_candidates": cash_trade_correction_candidates,
         "cash_reconciliation_reviews": saved_cash_reconciliation_reviews,
+        "statement_ytd_summary": statement_ytd_summary,
+        "statement_ytd_positions": statement_ytd_positions,
     }
 
 

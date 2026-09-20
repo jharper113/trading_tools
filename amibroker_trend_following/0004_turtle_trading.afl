@@ -1,0 +1,38 @@
+// Turtle-Style Breakout Trend Following
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 10, 1, 100, 1), spsPercentOfEquity);
+
+entryLen = Param("Entry Channel", 20, 10, 100, 5);
+failSafeLen = Param("Fail-Safe Channel", 55, 20, 200, 5);
+exitLen = Param("Exit Channel", 10, 5, 80, 5);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+initialStopN = Param("Initial Stop ATR", 2, 0.5, 6, 0.25);
+
+upperEntry = Ref(HHV(High, entryLen), -1);
+lowerEntry = Ref(LLV(Low, entryLen), -1);
+upperFailSafe = Ref(HHV(High, failSafeLen), -1);
+lowerFailSafe = Ref(LLV(Low, failSafeLen), -1);
+upperExit = Ref(HHV(High, exitLen), -1);
+lowerExit = Ref(LLV(Low, exitLen), -1);
+
+Buy = Close > upperEntry OR Close > upperFailSafe;
+Sell = Close < lowerExit;
+Short = Close < lowerEntry OR Close < lowerFailSafe;
+Cover = Close > upperExit;
+
+ApplyStop(stopTypeLoss, stopModePoint, initialStopN * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(upperEntry, "Entry High", colorGreen, styleLine);
+Plot(lowerEntry, "Entry Low", colorRed, styleLine);
+Plot(upperFailSafe, "Fail-Safe High", colorBrightGreen, styleDashed);
+Plot(lowerFailSafe, "Fail-Safe Low", colorOrange, styleDashed);

@@ -1,6 +1,9 @@
 import pandas as pd
 
-from extract_trade_history import update_master_cleaned_trades
+from extract_trade_history import (
+    drop_cross_statement_stock_subset_duplicates,
+    update_master_cleaned_trades,
+)
 
 
 def make_trade(exec_time, side, price, order_id):
@@ -485,4 +488,61 @@ def test_update_master_cleaned_trades_preserves_strategy_when_statement_row_adde
     ]
     assert updated["statement_trade_row"].tolist() == [
         4992,
+    ]
+
+
+def test_drop_cross_statement_stock_subset_duplicates_removes_smaller_overlap():
+    trades = pd.DataFrame([
+        {
+            **make_trade(
+                "6/4/26 10:17:05",
+                "SELL",
+                4.98467742,
+                "",
+            ),
+            "Qty": -403,
+            "Spread": "STOCK",
+            "Pos Effect": "TO OPEN",
+            "Symbol": "SPCE",
+            "Strategy_Name": "Discretionary",
+            "statement_file": "2026-06-07-AccountStatement.csv",
+            "statement_trade_row": 42,
+        },
+        {
+            **make_trade(
+                "6/4/26 10:17:04",
+                "SELL",
+                4.985,
+                "",
+            ),
+            "Qty": -103,
+            "Spread": "STOCK",
+            "Pos Effect": "TO OPEN",
+            "Symbol": "SPCE",
+            "Strategy_Name": "",
+            "statement_file": "2026-06-13-AccountStatement.csv",
+            "statement_trade_row": 5,
+        },
+        {
+            **make_trade(
+                "6/4/26 10:17:05",
+                "SELL",
+                4.98467742,
+                "",
+            ),
+            "Qty": -25,
+            "Spread": "STOCK",
+            "Pos Effect": "TO OPEN",
+            "Symbol": "SPCE",
+            "Strategy_Name": "Discretionary",
+            "statement_file": "2026-06-07-AccountStatement.csv",
+            "statement_trade_row": 43,
+        },
+    ])
+
+    cleaned = drop_cross_statement_stock_subset_duplicates(trades)
+
+    assert cleaned["statement_trade_row"].tolist() == [
+        42,
+        43,
     ]

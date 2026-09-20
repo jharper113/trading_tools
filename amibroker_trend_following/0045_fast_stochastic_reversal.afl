@@ -1,0 +1,31 @@
+// Fast Stochastic Short-Term Reversal
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+kLen = Param("Stoch K", 5, 3, 20, 1);
+trendLen = Param("Trend EMA", 40, 10, 120, 5);
+maxHold = Param("Max Hold Bars", 3, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+k = StochK(kLen);
+trendEMA = EMA(Close, trendLen);
+
+Buy = Close > trendEMA AND Cross(k, 20);
+Sell = k > 80 OR Close < Ref(Low, -1);
+Short = Close < trendEMA AND Cross(80, k);
+Cover = k < 20 OR Close > Ref(High, -1);
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.25 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

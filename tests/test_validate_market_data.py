@@ -36,6 +36,15 @@ def test_yahoo_symbol_mapping_for_default_futures_roots():
     assert yahoo_symbol_for("/NQ") == "NQ=F"
     assert yahoo_symbol_for("/ZB") == "ZB=F"
     assert yahoo_symbol_for("/KC") == "KC=F"
+    assert yahoo_symbol_for("/BTC") == "BTC=F"
+    assert yahoo_symbol_for("eth") == "ETH=F"
+    assert yahoo_symbol_for("/MBT") == "MBT=F"
+    assert yahoo_symbol_for("/MET") == "MET=F"
+    assert yahoo_symbol_for("/SOL") == "SOL=F"
+    assert yahoo_symbol_for("/MSL") == "MSL=F"
+    assert yahoo_symbol_for("/XRP") == "XRP=F"
+    assert yahoo_symbol_for("/MXP") == "MXP=F"
+    assert yahoo_symbol_for("/MCA") == "MCA=F"
     assert yahoo_symbol_for("SPY") == "SPY"
 
 

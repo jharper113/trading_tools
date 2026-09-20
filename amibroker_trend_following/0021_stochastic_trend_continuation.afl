@@ -1,0 +1,31 @@
+// Stochastic Trend Continuation
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 8, 1, 100, 1), spsPercentOfEquity);
+
+trendLen = Param("Trend EMA", 150, 40, 400, 10);
+kLen = Param("Stoch K", 14, 5, 40, 1);
+dLen = Param("Stoch D", 3, 1, 15, 1);
+atrLen = Param("ATR Length", 20, 5, 100, 1);
+
+trendEMA = EMA(Close, trendLen);
+k = StochK(kLen);
+d = MA(k, dLen);
+
+Buy = Close > trendEMA AND k < 55 AND Cross(k, d);
+Sell = Close < trendEMA OR Cross(d, k) AND k > 75;
+Short = Close < trendEMA AND k > 45 AND Cross(d, k);
+Cover = Close > trendEMA OR Cross(k, d) AND k < 25;
+
+ApplyStop(stopTypeTrailing, stopModePoint, 3 * ATR(atrLen), True, True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(trendEMA, "Trend EMA", colorBlue, styleLine);

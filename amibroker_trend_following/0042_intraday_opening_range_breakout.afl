@@ -1,0 +1,42 @@
+// Intraday Opening Range Breakout
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(0, 0, 0, 0);
+SetPositionSize(Param("Position % Equity", 4, 1, 100, 1), spsPercentOfEquity);
+
+startTime = Param("Session Start HHMMSS", 90000, 0, 235959, 100);
+rangeMinutes = Param("Opening Range Minutes", 60, 15, 120, 15);
+exitTime = Param("Exit Time HHMMSS", 153000, 0, 235959, 100);
+maxHold = Param("Max Hold Bars", 4, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+tn = TimeNum();
+sessionStart = tn >= startTime AND Ref(tn, -1) < startTime;
+barsFromOpen = BarsSince(sessionStart);
+rangeBars = Max(1, rangeMinutes * 60 / Interval());
+inRange = barsFromOpen >= 0 AND barsFromOpen < rangeBars;
+afterRange = barsFromOpen >= rangeBars;
+
+rangeHigh = HighestSince(sessionStart, High);
+rangeLow = LowestSince(sessionStart, Low);
+orHigh = ValueWhen(barsFromOpen == rangeBars - 1, rangeHigh);
+orLow = ValueWhen(barsFromOpen == rangeBars - 1, rangeLow);
+
+Buy = afterRange AND Cross(Close, orHigh);
+Sell = tn >= exitTime OR Close < orLow;
+Short = afterRange AND Cross(orLow, Close);
+Cover = tn >= exitTime OR Close > orHigh;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.2 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(orHigh, "Opening Range High", colorGreen, styleLine);
+Plot(orLow, "Opening Range Low", colorRed, styleLine);

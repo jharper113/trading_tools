@@ -1,0 +1,35 @@
+// Bollinger Squeeze Pop
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(1, 1, 1, 1);
+SetPositionSize(Param("Position % Equity", 6, 1, 100, 1), spsPercentOfEquity);
+
+bbLen = Param("Band Length", 20, 5, 80, 5);
+bbWidth = Param("Band Width", 2, 1, 4, 0.25);
+squeezeLen = Param("Squeeze Lookback", 20, 5, 80, 5);
+maxHold = Param("Max Hold Bars", 4, 1, 5, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+upper = BBandTop(Close, bbLen, bbWidth);
+lower = BBandBot(Close, bbLen, bbWidth);
+width = 100 * (upper - lower) / Close;
+squeeze = width <= LLV(width, squeezeLen);
+
+Buy = Ref(squeeze, -1) AND Cross(Close, upper);
+Sell = Close < MA(Close, bbLen);
+Short = Ref(squeeze, -1) AND Cross(lower, Close);
+Cover = Close > MA(Close, bbLen);
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.5 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(upper, "Upper Band", colorGreen, styleLine);
+Plot(lower, "Lower Band", colorRed, styleLine);

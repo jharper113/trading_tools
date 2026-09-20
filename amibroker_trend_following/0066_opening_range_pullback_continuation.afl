@@ -1,0 +1,47 @@
+// Opening Range Pullback Continuation
+
+SetOption("InitialEquity", Param("Initial Equity", 100000, 10000, 1000000, 10000));
+SetOption("MaxOpenPositions", Param("Max Open Positions", 10, 1, 50, 1));
+SetOption("AllowSameBarExit", False);
+SetTradeDelays(0, 0, 0, 0);
+SetPositionSize(Param("Position % Equity", 4, 1, 100, 1), spsPercentOfEquity);
+
+startTime = Param("Session Start HHMMSS", 90000, 0, 235959, 100);
+rangeMinutes = Param("Opening Range Minutes", 60, 15, 120, 15);
+exitTime = Param("Exit Time HHMMSS", 153000, 0, 235959, 100);
+maxHold = Param("Max Hold Bars", 5, 1, 10, 1);
+atrLen = Param("ATR Length", 14, 5, 50, 1);
+
+tn = TimeNum();
+sessionStart = tn >= startTime AND Ref(tn, -1) < startTime;
+barsFromOpen = BarsSince(sessionStart);
+rangeBars = Max(1, rangeMinutes * 60 / Interval());
+afterRange = barsFromOpen >= rangeBars;
+
+rangeHigh = HighestSince(sessionStart, High);
+rangeLow = LowestSince(sessionStart, Low);
+orHigh = ValueWhen(barsFromOpen == rangeBars - 1, rangeHigh);
+orLow = ValueWhen(barsFromOpen == rangeBars - 1, rangeLow);
+
+brokeUp = HighestSince(sessionStart, High > orHigh);
+brokeDown = HighestSince(sessionStart, Low < orLow);
+pullbackToHigh = brokeUp AND Low <= orHigh AND Close > orHigh;
+pullbackToLow = brokeDown AND High >= orLow AND Close < orLow;
+
+Buy = afterRange AND pullbackToHigh;
+Sell = Close < orLow OR tn >= exitTime;
+Short = afterRange AND pullbackToLow;
+Cover = Close > orHigh OR tn >= exitTime;
+
+ApplyStop(stopTypeNBar, stopModeBars, maxHold, True);
+ApplyStop(stopTypeLoss, stopModePoint, 1.2 * ATR(atrLen), True);
+ApplyStop(stopTypeProfit, stopModePoint, 2.4 * ATR(atrLen), True);
+
+Buy = ExRem(Buy, Sell);
+Sell = ExRem(Sell, Buy);
+Short = ExRem(Short, Cover);
+Cover = ExRem(Cover, Short);
+
+Plot(Close, "Close", colorDefault, styleCandle);
+Plot(orHigh, "Opening Range High", colorGreen, styleLine);
+Plot(orLow, "Opening Range Low", colorRed, styleLine);

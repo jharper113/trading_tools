@@ -1,0 +1,54 @@
+{
+  "profile_name": "Daily",
+  "initial_equity": 100000,
+  "futures_mode": true,
+  "min_shares": 1,
+  "allow_same_bar_exit": true,
+  "reverse_signal_forces_exit": false,
+  "positions": "Long and short",
+  "commission_mode": 3,
+  "commission_per_contract_side": 3.76,
+  "use_previous_bar_equity": true,
+  "fitness": "CAR/MDD",
+  "periodicity": {
+    "label": "Daily",
+    "apx_code": 0,
+    "seconds": 86400
+  },
+  "optimization_window": {
+    "start": "2009-09-28",
+    "end": "2019-04-10"
+  },
+  "wfa": {
+    "mode": "Rolling",
+    "in_sample_start": "2009-09-28",
+    "in_sample_end": "2014-09-27",
+    "in_sample_last": "2023-09-27",
+    "out_sample_start": "2014-09-28",
+    "out_sample_end": "2015-09-27",
+    "out_sample_last": "2024-09-27",
+    "step_months": 12,
+    "manual_preseal_start": "2024-09-28",
+    "manual_preseal_end": "2025-06-12"
+  },
+  "last_research_date": "2025-06-12",
+  "sealed_start": "2025-06-13",
+  "sealed_end": "2026-06-12",
+  "thresholds": {
+    "core": {
+      "profitable_paramsets_pct": 70,
+      "median_profit_factor": 1.10,
+      "median_trades": 60
+    },
+    "family": {
+      "profitable_paramsets_pct": 60,
+      "median_profit_factor": 1.05,
+      "median_trades": 45
+    },
+    "broad": {
+      "profitable_paramsets_pct": 50,
+      "median_profit_factor": 1.00,
+      "median_trades": 30
+    }
+  }
+}

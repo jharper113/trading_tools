@@ -1,9 +1,17 @@
-import pandas as pd
+import gzip
+import io
+from types import SimpleNamespace
+from urllib.error import HTTPError
 
+import pandas as pd
+import pytest
+
+import download_market_data as market_data_module
 from download_market_data import (
     DEFAULT_SYMBOLS,
     EQUITY_PRODUCTS,
     FUTURES_PRODUCTS,
+    LEGACY_PRODUCTS,
     SchwabProvider,
     aggregate_bars_to_60min,
     append_market_data,
@@ -12,17 +20,24 @@ from download_market_data import (
     build_daily_intraday_fix_candidates,
     build_daily_intraday_quality_report,
     build_integrity_report,
+    create_provider,
     elapsed_text,
     extract_authorization_code,
     load_schwab_token_file,
+    main,
     normalize_bar_frame,
     normalize_frequency,
     normalize_symbol,
     output_file_for,
     parse_args,
+    prompt_for_schwab_token_payload,
     repair_saved_integrity,
+    request_schwab_token,
     save_schwab_token_file,
     save_market_data,
+    schwab_provider_symbol,
+    schwab_access_token_expires_at,
+    schwab_access_token_is_current,
     schwab_authorization_url,
     schwab_client_credentials,
     schwab_price_history_params,
@@ -38,6 +53,58 @@ def test_normalize_symbol_adds_futures_slash():
     assert normalize_symbol("SPY") == "SPY"
 
 
+@pytest.mark.parametrize(
+    ("stored_symbol", "provider_symbol"),
+    [
+        ("AUDUSD", "AUD/USD"),
+        ("EURJPY", "EUR/JPY"),
+        ("EURUSD", "EUR/USD"),
+        ("GBPUSD", "GBP/USD"),
+        ("LB___CCB", "/LBS"),
+        ("NZDUSD", "NZD/USD"),
+        ("RF___CCB", "/RF"),
+        ("USDCAD", "USD/CAD"),
+        ("USDCHF", "USD/CHF"),
+        ("USDJPY", "USD/JPY"),
+    ],
+)
+def test_schwab_provider_symbol_maps_stored_legacy_names(
+    stored_symbol,
+    provider_symbol,
+):
+    assert normalize_symbol(stored_symbol) == stored_symbol
+    assert schwab_provider_symbol(stored_symbol) == provider_symbol
+    assert schwab_price_history_params(stored_symbol, "daily")["symbol"] == (
+        provider_symbol
+    )
+
+
+@pytest.mark.parametrize(
+    "symbol",
+    [
+        "BZ",
+        "EMD",
+        "GF",
+        "KE",
+        "6M",
+        "6N",
+        "NKD",
+        "ZO",
+        "PA",
+        "UB",
+        "VX",
+        "GE",
+    ],
+)
+def test_validated_mappings_are_canonical_futures_products(symbol):
+    canonical_symbol = f"/{symbol}"
+
+    assert normalize_symbol(symbol) == canonical_symbol
+    assert canonical_symbol in FUTURES_PRODUCTS
+    assert symbol not in LEGACY_PRODUCTS
+    assert schwab_provider_symbol(symbol) == canonical_symbol
+
+
 def test_normalize_frequency_aliases():
     assert normalize_frequency("1d") == "daily"
     assert normalize_frequency("5-minute") == "5min"
@@ -51,26 +118,402 @@ def test_elapsed_text_formats_seconds_minutes_and_hours():
     assert elapsed_text(3661) == "1h 1m 1s"
 
 
+def test_send_desktop_notification_supplies_cron_desktop_environment(
+    monkeypatch,
+):
+    calls = []
+
+    class SuccessfulNotification:
+        returncode = 0
+
+    def fake_runner(command, **kwargs):
+        calls.append((command, kwargs))
+        return SuccessfulNotification()
+
+    monkeypatch.setattr("download_market_data.os.getuid", lambda: 1000)
+
+    delivered = market_data_module.send_desktop_notification(
+        title="Market data update succeeded",
+        message="All jobs completed.",
+        urgency="normal",
+        notifier_path="/usr/bin/notify-send",
+        runner=fake_runner,
+        environment={},
+    )
+
+    command, options = calls[0]
+    assert delivered
+    assert command == [
+        "/usr/bin/notify-send",
+        "--urgency=normal",
+        "Market data update succeeded",
+        "All jobs completed.",
+    ]
+    assert options["env"]["DISPLAY"] == ":0"
+    assert options["env"]["XDG_RUNTIME_DIR"] == "/run/user/1000"
+    assert options["env"]["DBUS_SESSION_BUS_ADDRESS"] == (
+        "unix:path=/run/user/1000/bus"
+    )
+
+
+def test_send_desktop_notification_is_best_effort():
+    def unavailable_notifier(command, **kwargs):
+        raise OSError("desktop session is unavailable")
+
+    delivered = market_data_module.send_desktop_notification(
+        title="Market data update failed",
+        message="Provider request failed.",
+        urgency="critical",
+        notifier_path="/usr/bin/notify-send",
+        runner=unavailable_notifier,
+        environment={},
+    )
+
+    assert not delivered
+
+
+def test_run_cli_sends_success_notification_when_requested():
+    notifications = []
+
+    market_data_module.run_cli(
+        args=SimpleNamespace(notify=True),
+        run_main=lambda args: None,
+        notifier=lambda **kwargs: notifications.append(kwargs),
+    )
+
+    assert notifications == [
+        {
+            "title": "Market data update succeeded",
+            "message": "download_market_data.py completed successfully.",
+            "urgency": "normal",
+        }
+    ]
+
+
+def test_run_cli_sends_failure_notification_and_preserves_cli_error():
+    notifications = []
+
+    def fail_market_data_run(args):
+        raise RuntimeError("2 of 21 market data jobs failed")
+
+    with pytest.raises(
+        SystemExit,
+        match="error: 2 of 21 market data jobs failed",
+    ):
+        market_data_module.run_cli(
+            args=SimpleNamespace(notify=True),
+            run_main=fail_market_data_run,
+            notifier=lambda **kwargs: notifications.append(kwargs),
+        )
+
+    assert notifications == [
+        {
+            "title": "Market data update failed",
+            "message": "2 of 21 market data jobs failed",
+            "urgency": "critical",
+        }
+    ]
+
+
+def test_run_cli_notifier_error_does_not_turn_success_into_failure():
+    def fail_notification(**kwargs):
+        raise RuntimeError("notification service failed")
+
+    market_data_module.run_cli(
+        args=SimpleNamespace(notify=True),
+        run_main=lambda args: None,
+        notifier=fail_notification,
+    )
+
+
+def test_run_cli_notifier_error_does_not_mask_market_data_error():
+    def fail_market_data_run(args):
+        raise ValueError("invalid market data settings")
+
+    def fail_notification(**kwargs):
+        raise RuntimeError("notification service failed")
+
+    with pytest.raises(SystemExit, match="error: invalid market data settings"):
+        market_data_module.run_cli(
+            args=SimpleNamespace(notify=True),
+            run_main=fail_market_data_run,
+            notifier=fail_notification,
+        )
+
+
+def test_run_cli_notifies_and_reraises_unexpected_error():
+    notifications = []
+    unexpected_error = LookupError("unexpected provider response")
+
+    def fail_market_data_run(args):
+        raise unexpected_error
+
+    with pytest.raises(LookupError) as caught:
+        market_data_module.run_cli(
+            args=SimpleNamespace(notify=True),
+            run_main=fail_market_data_run,
+            notifier=lambda **kwargs: notifications.append(kwargs),
+        )
+
+    assert caught.value is unexpected_error
+    assert notifications == [
+        {
+            "title": "Market data update failed",
+            "message": "unexpected provider response",
+            "urgency": "critical",
+        }
+    ]
+
+
 def test_parse_args_prefers_long_all_flag_but_accepts_legacy_alias(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
-        ["download_market_data.py", "--all"],
+        ["download_market_data.py", "--provider", "schwab", "--all"],
     )
 
     assert parse_args().all
 
     monkeypatch.setattr(
         "sys.argv",
-        ["download_market_data.py", "-all"],
+        ["download_market_data.py", "--provider", "schwab", "-all"],
     )
 
     assert parse_args().all
+
+
+def test_parse_args_requires_input_dir_for_csv_provider(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["download_market_data.py", "--provider", "csv"],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
+def test_parse_args_allows_quality_only_without_input_dir(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["download_market_data.py", "--quality-only"],
+    )
+
+    assert parse_args().quality_only
+
+
+def test_parse_args_accepts_schwab_authorization_and_batch_flags(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "download_market_data.py",
+            "--provider",
+            "schwab",
+            "--auth-only",
+            "--force-reauth",
+            "--continue-on-error",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.auth_only
+    assert args.force_reauth
+    assert args.continue_on_error
+
+
+def test_parse_args_accepts_desktop_notification_flag(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["download_market_data.py", "--provider", "schwab", "--notify"],
+    )
+
+    assert parse_args().notify
+
+
+def test_parse_args_accepts_amibroker_export_options(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "download_market_data.py",
+            "--quality-only",
+            "--export-amibroker",
+            "--amibroker-timezone",
+            "America/Detroit",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.export_amibroker
+    assert args.amibroker_timezone == "America/Detroit"
+
+
+def test_quality_only_can_refresh_amibroker_exports(monkeypatch, tmp_path):
+    output_dir = tmp_path / "market-data"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "download_market_data.py",
+            "--quality-only",
+            "--symbols",
+            "/ES",
+            "--frequencies",
+            "daily",
+            "5min",
+            "--output-dir",
+            str(output_dir),
+            "--export-amibroker",
+        ],
+    )
+
+    main()
+
+    assert (output_dir / "amibroker" / "daily.csv").exists()
+    assert (output_dir / "amibroker" / "5min.csv").exists()
+    assert (output_dir / "amibroker" / "export_complete.json").exists()
+
+
+def test_parse_args_rejects_schwab_authorization_flags_for_csv(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "download_market_data.py",
+            "--provider",
+            "csv",
+            "--input-dir",
+            "vendor-data",
+            "--auth-only",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
+@pytest.mark.parametrize("authorization_flag", ["--auth-only", "--force-reauth"])
+def test_parse_args_rejects_authorization_flags_with_quality_only(
+    monkeypatch,
+    authorization_flag,
+):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "download_market_data.py",
+            "--provider",
+            "schwab",
+            "--quality-only",
+            authorization_flag,
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
+def test_main_auth_only_prepares_provider_without_downloading(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    token_path = tmp_path / "tokens.json"
+
+    class ReadyProvider:
+        def __init__(self):
+            self.token_file = token_path
+
+        def fetch_bars(self, *args, **kwargs):
+            raise AssertionError("auth-only must not download bars")
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "download_market_data.py",
+            "--provider",
+            "schwab",
+            "--auth-only",
+            "--force-reauth",
+            "--output-dir",
+            str(tmp_path / "market-data"),
+        ],
+    )
+    monkeypatch.setattr(
+        "download_market_data.create_provider",
+        lambda args: ReadyProvider(),
+    )
+
+    main()
+
+    assert not (tmp_path / "market-data" / "symbols.csv").exists()
+    assert "Schwab authorization is ready" in capsys.readouterr().out
+
+
+def test_main_continue_on_error_processes_remaining_jobs(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+    output_dir = tmp_path / "market-data"
+    spy_bars = normalize_bar_frame(
+        pd.DataFrame(
+            [
+                {
+                    "timestamp": "2026-08-27T20:00:00Z",
+                    "open": 650,
+                    "high": 652,
+                    "low": 649,
+                    "close": 651,
+                    "volume": 100,
+                }
+            ]
+        ),
+        symbol="SPY",
+        frequency="daily",
+        source="test",
+    )
+
+    class PartiallyFailingProvider:
+        token_file = tmp_path / "tokens.json"
+
+        def fetch_bars(self, symbol, frequency, start=None, end=None):
+            calls.append((symbol, frequency))
+
+            if symbol == "/ES":
+                raise RuntimeError("unsupported symbol")
+
+            return spy_bars
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "download_market_data.py",
+            "--provider",
+            "schwab",
+            "--symbols",
+            "/ES",
+            "SPY",
+            "--frequencies",
+            "daily",
+            "--continue-on-error",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+    monkeypatch.setattr(
+        "download_market_data.create_provider",
+        lambda args: PartiallyFailingProvider(),
+    )
+
+    with pytest.raises(RuntimeError, match="1 of 2 market data jobs failed"):
+        main()
+
+    assert calls == [("/ES", "daily"), ("SPY", "daily")]
+    assert output_file_for(output_dir, "SPY", "daily").exists()
 
 
 def test_default_symbols_cover_liquid_futures_categories():
     categories = {
         FUTURES_PRODUCTS[symbol]["category"]
         for symbol in DEFAULT_SYMBOLS
+        if symbol in FUTURES_PRODUCTS
     }
 
     assert categories >= {
@@ -78,6 +521,7 @@ def test_default_symbols_cover_liquid_futures_categories():
         "currency",
         "energy",
         "equity_index",
+        "crypto",
         "metal",
         "rates",
         "soft",
@@ -86,6 +530,22 @@ def test_default_symbols_cover_liquid_futures_categories():
     assert "/NQ" in DEFAULT_SYMBOLS
     assert "/ZB" in DEFAULT_SYMBOLS
     assert "/KC" in DEFAULT_SYMBOLS
+    assert "/BTC" in DEFAULT_SYMBOLS
+    assert "/ETH" in DEFAULT_SYMBOLS
+    assert "/MBT" in DEFAULT_SYMBOLS
+    assert "/MET" in DEFAULT_SYMBOLS
+    assert "/SOL" in DEFAULT_SYMBOLS
+    assert "/MSL" in DEFAULT_SYMBOLS
+    assert "/XRP" in DEFAULT_SYMBOLS
+    assert "/MXP" in DEFAULT_SYMBOLS
+    assert "/MCA" in DEFAULT_SYMBOLS
+    assert "SPY" in DEFAULT_SYMBOLS
+
+
+def test_default_symbols_include_all_configured_products():
+    assert set(FUTURES_PRODUCTS).issubset(DEFAULT_SYMBOLS)
+    assert set(EQUITY_PRODUCTS).issubset(DEFAULT_SYMBOLS)
+    assert set(LEGACY_PRODUCTS).issubset(DEFAULT_SYMBOLS)
 
 
 def test_normalize_bar_frame_accepts_epoch_milliseconds():
@@ -718,6 +1178,39 @@ def test_extract_authorization_code_accepts_raw_code():
     assert extract_authorization_code("AUTH_CODE_123") == "AUTH_CODE_123"
 
 
+def test_prompt_for_schwab_token_payload_opens_authorization_url(
+    monkeypatch,
+):
+    opened_urls = []
+    redirect_uri = "https://developer.schwab.com/oauth2-redirect.html"
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt: f"{redirect_uri}?code=AUTH_CODE_123&state=abc",
+    )
+    monkeypatch.setattr(
+        "download_market_data.exchange_schwab_authorization_code",
+        lambda **kwargs: {
+            "access_token": "ACCESS",
+            "refresh_token": "REFRESH",
+            "expires_in": 1800,
+        },
+    )
+
+    token_payload = prompt_for_schwab_token_payload(
+        client_id="client-id",
+        client_secret="client-secret",
+        redirect_uri=redirect_uri,
+        browser_opener=opened_urls.append,
+    )
+
+    assert token_payload["access_token"] == "ACCESS"
+    assert len(opened_urls) == 1
+    assert opened_urls[0].startswith(
+        "https://api.schwabapi.com/v1/oauth/authorize?"
+    )
+    assert "client_id=client-id" in opened_urls[0]
+
+
 def test_schwab_token_file_round_trips_and_sets_private_permissions(tmp_path):
     token_path = tmp_path / "tokens.json"
 
@@ -756,6 +1249,124 @@ def test_schwab_client_credentials_can_read_environment(monkeypatch):
     )
 
 
+def test_schwab_access_token_expiry_uses_retrieved_at_and_expires_in():
+    token_payload = {
+        "access_token": "ACCESS",
+        "retrieved_at": "2999-01-01T00:00:00Z",
+        "expires_in": 1800,
+    }
+
+    assert schwab_access_token_expires_at(token_payload).isoformat() == (
+        "2999-01-01T00:30:00+00:00"
+    )
+    assert schwab_access_token_is_current(token_payload)
+    assert not schwab_access_token_is_current(
+        {
+            **token_payload,
+            "retrieved_at": "2000-01-01T00:00:00Z",
+        }
+    )
+
+
+def test_schwab_provider_uses_current_saved_access_token_without_refresh(
+    monkeypatch,
+    tmp_path,
+):
+    token_path = tmp_path / "tokens.json"
+    save_schwab_token_file(
+        token_path,
+        {
+            "access_token": "CURRENT_ACCESS",
+            "refresh_token": "REFRESH",
+            "expires_in": 1800,
+        },
+    )
+
+    def fake_refresh(client_id, client_secret, refresh_token):
+        raise AssertionError("Refresh should not be called for current token")
+
+    monkeypatch.setattr(
+        "download_market_data.exchange_schwab_refresh_token",
+        fake_refresh,
+    )
+
+    provider = SchwabProvider(token_file=token_path)
+
+    assert provider.access_token == "CURRENT_ACCESS"
+
+
+def test_schwab_provider_force_reauth_replaces_current_saved_tokens(
+    monkeypatch,
+    tmp_path,
+):
+    token_path = tmp_path / "tokens.json"
+    save_schwab_token_file(
+        token_path,
+        {
+            "access_token": "CURRENT_ACCESS",
+            "refresh_token": "CURRENT_REFRESH",
+            "expires_in": 1800,
+        },
+    )
+
+    def fake_prompt(client_id, client_secret, redirect_uri):
+        assert client_id == "client-id"
+        assert client_secret == "client-secret"
+        return {
+            "access_token": "REAUTHORIZED_ACCESS",
+            "refresh_token": "REAUTHORIZED_REFRESH",
+            "expires_in": 1800,
+        }
+
+    monkeypatch.setattr(
+        "download_market_data.prompt_for_schwab_token_payload",
+        fake_prompt,
+    )
+    monkeypatch.setattr(
+        "download_market_data.exchange_schwab_refresh_token",
+        lambda *args, **kwargs: pytest.fail("refresh must be bypassed"),
+    )
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "download_market_data.py",
+            "--provider",
+            "schwab",
+            "--token-file",
+            str(token_path),
+            "--client-id",
+            "client-id",
+            "--client-secret",
+            "client-secret",
+            "--force-reauth",
+        ],
+    )
+    provider = create_provider(parse_args())
+    saved = load_schwab_token_file(token_path)
+
+    assert provider.access_token == "REAUTHORIZED_ACCESS"
+    assert saved["access_token"] == "REAUTHORIZED_ACCESS"
+    assert saved["refresh_token"] == "REAUTHORIZED_REFRESH"
+
+
+def test_schwab_provider_reports_expired_saved_token_missing_credentials(
+    tmp_path,
+):
+    token_path = tmp_path / "tokens.json"
+    save_schwab_token_file(
+        token_path,
+        {
+            "access_token": "OLD_ACCESS",
+            "refresh_token": "REFRESH",
+            "expires_in": 0,
+        },
+    )
+
+    with pytest.raises(ValueError, match="Saved Schwab access token is expired"):
+        SchwabProvider(token_file=token_path)
+
+
 def test_schwab_provider_refreshes_saved_refresh_token(monkeypatch, tmp_path):
     token_path = tmp_path / "tokens.json"
     save_schwab_token_file(
@@ -787,3 +1398,31 @@ def test_schwab_provider_refreshes_saved_refresh_token(monkeypatch, tmp_path):
 
     assert provider.access_token == "NEW_ACCESS"
     assert saved["refresh_token"] == "NEW_REFRESH"
+
+
+def test_request_schwab_token_decodes_gzip_error_body(monkeypatch):
+    def fake_urlopen(request, timeout):
+        body = gzip.compress(
+            b'{"error":"invalid_grant","error_description":"bad refresh"}'
+        )
+        raise HTTPError(
+            request.full_url,
+            400,
+            "Bad Request",
+            {"Content-Encoding": "gzip"},
+            io.BytesIO(body),
+        )
+
+    monkeypatch.setattr("download_market_data.urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError, match="invalid_grant") as error:
+        request_schwab_token(
+            client_id="client-id",
+            client_secret="client-secret",
+            token_fields={
+                "grant_type": "refresh_token",
+                "refresh_token": "REFRESH",
+            },
+        )
+
+    assert "bad refresh" in str(error.value)
