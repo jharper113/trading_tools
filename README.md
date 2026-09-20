@@ -131,8 +131,13 @@ also download either a decisions CSV or a selected-bars CSV.
 The validated and repaired bar files stay in
 `data/market_data/<frequency>/<symbol>.csv`, such as
 `data/market_data/daily/ES.csv`, `data/market_data/5min/ES.csv`, and
-`data/market_data/60min/ES.csv`. These normalized CSV files are the ones to
-import into AmiBroker. The validator also writes `auto_review_decisions.csv`,
+`data/market_data/60min/ES.csv`. Run `export_amibroker_market_data.py` or pass
+`--export-amibroker` to the downloader to create combined daily and 5-minute
+files plus instrument-property imports for the Windows importer in
+`amibroker_import/`. The maintained point values, tick sizes, and optional
+dated margin deposits are in `amibroker_import/instrument_settings.csv`. The
+validator also
+writes `auto_review_decisions.csv`,
 `auto_review_applied_decisions.csv`, and `timezone_alignment.csv`.
 Auto-review decisions prefer local data, choose Yahoo only when the Yahoo close
 is closer to the prior or next confirmed close, keep local bars when Yahoo is

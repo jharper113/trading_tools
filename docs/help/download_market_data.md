@@ -74,6 +74,25 @@ history depth and is not required to select all symbols.
 
 Normalized bars are written to `data/market_data/<frequency>/<symbol>.csv` by default.
 
+Pass `--export-amibroker` to also create combined AmiBroker import files after
+the quality checks finish:
+
+- `data/market_data/amibroker/daily.csv`
+- `data/market_data/amibroker/5min.csv`
+- `data/market_data/amibroker/instrument_details.csv`
+- `data/market_data/amibroker/point_values.csv`
+- `data/market_data/amibroker/tick_sizes.csv`
+- `data/market_data/amibroker/margins.csv`
+- `data/market_data/amibroker/export_complete.json`
+
+The daily file preserves the supplied trading date. The 5-minute file converts
+UTC timestamps to `America/Detroit` by default. The Windows importer and setup
+instructions are in `amibroker_import/README.md`.
+The export validates and uses the maintained contract-property table at
+`amibroker_import/instrument_settings.csv`. The Windows importer applies the
+available full names, currencies, round-lot sizes, point values, tick sizes,
+and dated margin deposits to both AmiBroker databases.
+
 Quality reports are written under `data/market_data/quality/`:
 
 - `quality_summary.csv`
@@ -83,8 +102,14 @@ Quality reports are written under `data/market_data/quality/`:
 
 The generated symbol manifest is written to `data/market_data/symbols.csv`.
 It records the symbols requested for the latest run; the authoritative default
-list is defined by `FUTURES_PRODUCTS` and `EQUITY_PRODUCTS` in
+list is defined by `FUTURES_PRODUCTS`, `EQUITY_PRODUCTS`, and
+`LEGACY_PRODUCTS` in
 `download_market_data.py`.
+
+`LEGACY_PRODUCTS` keeps the existing filenames for imported historical
+series that do not have a validated Schwab price-history mapping. Validated
+futures use their canonical Schwab symbols. The mapping and live validation
+results are in `data/market_data/daily/etc/schwab_symbol_mapping.csv`.
 
 ## Flags
 
@@ -144,6 +169,14 @@ list is defined by `FUTURES_PRODUCTS` and `EQUITY_PRODUCTS` in
 
 `--all`
 : Request as much Schwab price history as the script can ask for. This controls history depth, not symbol selection.
+
+`--export-amibroker`
+: Create combined daily and 5-minute AmiBroker import files after the normal
+quality checks.
+
+`--amibroker-timezone AMIBROKER_TIMEZONE`
+: IANA timezone used for the AmiBroker 5-minute export. Default:
+`America/Detroit`.
 
 `--quality-threshold-pct QUALITY_THRESHOLD_PCT`
 : Maximum allowed OHLC percentage difference when comparing daily bars to daily bars aggregated from 5-minute data. Default: `0.25`.

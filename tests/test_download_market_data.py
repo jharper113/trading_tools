@@ -11,6 +11,7 @@ from download_market_data import (
     DEFAULT_SYMBOLS,
     EQUITY_PRODUCTS,
     FUTURES_PRODUCTS,
+    LEGACY_PRODUCTS,
     SchwabProvider,
     aggregate_bars_to_60min,
     append_market_data,
@@ -34,6 +35,7 @@ from download_market_data import (
     request_schwab_token,
     save_schwab_token_file,
     save_market_data,
+    schwab_provider_symbol,
     schwab_access_token_expires_at,
     schwab_access_token_is_current,
     schwab_authorization_url,
@@ -49,6 +51,58 @@ def test_normalize_symbol_adds_futures_slash():
     assert normalize_symbol("es") == "/ES"
     assert normalize_symbol("/6e") == "/6E"
     assert normalize_symbol("SPY") == "SPY"
+
+
+@pytest.mark.parametrize(
+    ("stored_symbol", "provider_symbol"),
+    [
+        ("AUDUSD", "AUD/USD"),
+        ("EURJPY", "EUR/JPY"),
+        ("EURUSD", "EUR/USD"),
+        ("GBPUSD", "GBP/USD"),
+        ("LB___CCB", "/LBS"),
+        ("NZDUSD", "NZD/USD"),
+        ("RF___CCB", "/RF"),
+        ("USDCAD", "USD/CAD"),
+        ("USDCHF", "USD/CHF"),
+        ("USDJPY", "USD/JPY"),
+    ],
+)
+def test_schwab_provider_symbol_maps_stored_legacy_names(
+    stored_symbol,
+    provider_symbol,
+):
+    assert normalize_symbol(stored_symbol) == stored_symbol
+    assert schwab_provider_symbol(stored_symbol) == provider_symbol
+    assert schwab_price_history_params(stored_symbol, "daily")["symbol"] == (
+        provider_symbol
+    )
+
+
+@pytest.mark.parametrize(
+    "symbol",
+    [
+        "BZ",
+        "EMD",
+        "GF",
+        "KE",
+        "6M",
+        "6N",
+        "NKD",
+        "ZO",
+        "PA",
+        "UB",
+        "VX",
+        "GE",
+    ],
+)
+def test_validated_mappings_are_canonical_futures_products(symbol):
+    canonical_symbol = f"/{symbol}"
+
+    assert normalize_symbol(symbol) == canonical_symbol
+    assert canonical_symbol in FUTURES_PRODUCTS
+    assert symbol not in LEGACY_PRODUCTS
+    assert schwab_provider_symbol(symbol) == canonical_symbol
 
 
 def test_normalize_frequency_aliases():
@@ -275,6 +329,49 @@ def test_parse_args_accepts_desktop_notification_flag(monkeypatch):
     assert parse_args().notify
 
 
+def test_parse_args_accepts_amibroker_export_options(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "download_market_data.py",
+            "--quality-only",
+            "--export-amibroker",
+            "--amibroker-timezone",
+            "America/Detroit",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.export_amibroker
+    assert args.amibroker_timezone == "America/Detroit"
+
+
+def test_quality_only_can_refresh_amibroker_exports(monkeypatch, tmp_path):
+    output_dir = tmp_path / "market-data"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "download_market_data.py",
+            "--quality-only",
+            "--symbols",
+            "/ES",
+            "--frequencies",
+            "daily",
+            "5min",
+            "--output-dir",
+            str(output_dir),
+            "--export-amibroker",
+        ],
+    )
+
+    main()
+
+    assert (output_dir / "amibroker" / "daily.csv").exists()
+    assert (output_dir / "amibroker" / "5min.csv").exists()
+    assert (output_dir / "amibroker" / "export_complete.json").exists()
+
+
 def test_parse_args_rejects_schwab_authorization_flags_for_csv(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
@@ -448,6 +545,7 @@ def test_default_symbols_cover_liquid_futures_categories():
 def test_default_symbols_include_all_configured_products():
     assert set(FUTURES_PRODUCTS).issubset(DEFAULT_SYMBOLS)
     assert set(EQUITY_PRODUCTS).issubset(DEFAULT_SYMBOLS)
+    assert set(LEGACY_PRODUCTS).issubset(DEFAULT_SYMBOLS)
 
 
 def test_normalize_bar_frame_accepts_epoch_milliseconds():

@@ -1,0 +1,66 @@
+ticker,full_name,point_value,tick_size,margin_deposit,margin_as_of,round_lot_size,currency,notes
+6A,Australian Dollar,100000,0.00005,,,1,USD,
+6B,British Pound,62500,0.0001,,,1,USD,
+6C,Canadian Dollar,100000,0.00005,,,1,USD,
+6E,Euro FX,125000,0.00005,,,1,USD,
+6J,Japanese Yen,,,,,1,USD,Point value and tick size omitted because the stored series changes price scale at the Norgate-to-Schwab boundary.
+6M,Mexican Peso,500000,0.00001,,,1,USD,
+6N,New Zealand Dollar,100000,0.00005,,,1,USD,
+6S,Swiss Franc,125000,0.00005,,,1,USD,
+AUDUSD,Australian Dollar / U.S. Dollar spot FX,100000,0.00001,,,1,USD,Point value assumes one 100000-unit standard lot.
+BTC,CME Bitcoin,5,5,,,1,USD,
+BZ,Brent Crude Oil,1000,0.01,,,1,USD,
+CC,ICE Cocoa,10,1,,,1,USD,
+CL,WTI Crude Oil,1000,0.01,,,1,USD,
+CT,ICE Cotton No. 2,500,0.01,,,1,USD,
+EMD,E-mini S&P MidCap 400,100,0.1,,,1,USD,
+ES,E-mini S&P 500,50,0.25,,,1,USD,
+ETH,CME Ether,50,0.5,,,1,USD,
+EURJPY,Euro / Japanese Yen spot FX,,0.001,,,1,JPY,Point value omitted because USD value requires a contemporaneous JPY conversion rate.
+EURUSD,Euro / U.S. Dollar spot FX,100000,0.00001,,,1,USD,Point value assumes one 100000-unit standard lot.
+GE,Three-Month Eurodollar (retired),2500,0.0025,,,1,USD,Retired contract retained for historical analysis.
+GF,Feeder Cattle,500,0.025,,,1,USD,
+GBPUSD,British Pound / U.S. Dollar spot FX,100000,0.00001,,,1,USD,Point value assumes one 100000-unit standard lot.
+GC,Gold,100,0.1,,,1,USD,
+HE,Lean Hogs,400,0.025,,,1,USD,
+HG,Copper,,,,,1,USD,Point value and tick size omitted because the stored series changes price scale at the Norgate-to-Schwab boundary.
+HO,NY Harbor ULSD,42000,0.0001,,,1,USD,
+KC,ICE Coffee,375,0.05,,,1,USD,
+KE,KC Hard Red Winter Wheat,50,0.25,,,1,USD,
+LB___CCB,Random Length Lumber (retired),110,0.1,,,1,USD,Legacy 110000-board-foot contract; do not substitute current LBR specifications.
+LE,Live Cattle,400,0.025,,,1,USD,
+MBT,CME Micro Bitcoin,0.1,5,,,1,USD,
+MCA,CME Micro ADA,10000,0.000125,,,1,USD,
+MET,CME Micro Ether,0.1,0.5,,,1,USD,
+MSL,CME Micro Solana,25,0.05,,,1,USD,
+MXP,CME Micro XRP,2500,0.0005,,,1,USD,
+NG,Henry Hub Natural Gas,10000,0.001,,,1,USD,
+NKD,Nikkei 225 (USD),5,5,,,1,USD,
+NQ,E-mini Nasdaq-100,20,0.25,,,1,USD,
+NZDUSD,New Zealand Dollar / U.S. Dollar spot FX,100000,0.00001,,,1,USD,Point value assumes one 100000-unit standard lot.
+PA,Palladium,100,0.5,,,1,USD,
+PL,Platinum,50,0.1,,,1,USD,
+RB,RBOB Gasoline,42000,0.0001,,,1,USD,
+RF___CCB,Mini Russell 1000 (legacy ICE contract),,0.1,,,1,USD,Point value omitted because it changed from 100 to 50 effective 2016-12-05.
+RTY,E-mini Russell 2000,50,0.1,,,1,USD,
+SB,ICE Sugar No. 11,1120,0.01,,,1,USD,
+SI,Silver,,,,,1,USD,Point value and tick size omitted because the stored series changes price scale at the Norgate-to-Schwab boundary.
+SOL,CME Solana,500,0.05,,,1,USD,
+SPY,SPDR S&P 500 ETF,1,0.01,,,1,USD,Point value is per share.
+UB,Ultra U.S. Treasury Bond,1000,0.03125,,,1,USD,
+USDCAD,U.S. Dollar / Canadian Dollar spot FX,,0.00001,,,1,CAD,Point value omitted because USD value requires a contemporaneous CAD conversion rate.
+USDCHF,U.S. Dollar / Swiss Franc spot FX,,0.00001,,,1,CHF,Point value omitted because USD value requires a contemporaneous CHF conversion rate.
+USDJPY,U.S. Dollar / Japanese Yen spot FX,,0.001,,,1,JPY,Point value omitted because USD value requires a contemporaneous JPY conversion rate.
+VX,CBOE Volatility Index futures,1000,0.05,,,1,USD,
+XRP,CME XRP,50000,0.0005,,,1,USD,
+YM,E-mini Dow,5,1,,,1,USD,
+ZB,30-Year U.S. Treasury Bond,1000,0.03125,,,1,USD,
+ZC,Corn,50,0.25,,,1,USD,
+ZF,5-Year U.S. Treasury Note,1000,0.0078125,,,1,USD,
+ZL,Soybean Oil,600,0.01,,,1,USD,
+ZM,Soybean Meal,100,0.1,,,1,USD,
+ZN,10-Year U.S. Treasury Note,1000,0.015625,,,1,USD,
+ZO,Oats,50,0.25,,,1,USD,
+ZS,Soybeans,50,0.25,,,1,USD,
+ZT,2-Year U.S. Treasury Note,2000,0.00390625,,,1,USD,
+ZW,Chicago SRW Wheat,50,0.25,,,1,USD,

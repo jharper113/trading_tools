@@ -58,6 +58,21 @@ FUTURES_PRODUCTS = {
         "exchange": "CBOT",
         "category": "equity_index",
     },
+    "/EMD": {
+        "name": "E-mini S&P MidCap 400",
+        "exchange": "CME",
+        "category": "equity_index",
+    },
+    "/NKD": {
+        "name": "Nikkei 225 (USD)",
+        "exchange": "CME",
+        "category": "equity_index",
+    },
+    "/VX": {
+        "name": "CBOE Volatility Index futures",
+        "exchange": "CFE",
+        "category": "equity_index",
+    },
     "/ZB": {
         "name": "30-Year U.S. Treasury Bond",
         "exchange": "CBOT",
@@ -76,6 +91,16 @@ FUTURES_PRODUCTS = {
     "/ZT": {
         "name": "2-Year T-Note",
         "exchange": "CBOT",
+        "category": "rates",
+    },
+    "/UB": {
+        "name": "Ultra U.S. Treasury Bond",
+        "exchange": "CBOT",
+        "category": "rates",
+    },
+    "/GE": {
+        "name": "Three-Month Eurodollar (retired)",
+        "exchange": "CME",
         "category": "rates",
     },
     "/6E": {
@@ -108,6 +133,16 @@ FUTURES_PRODUCTS = {
         "exchange": "CME",
         "category": "currency",
     },
+    "/6M": {
+        "name": "Mexican Peso",
+        "exchange": "CME",
+        "category": "currency",
+    },
+    "/6N": {
+        "name": "New Zealand Dollar",
+        "exchange": "CME",
+        "category": "currency",
+    },
     "/GC": {
         "name": "Gold",
         "exchange": "COMEX",
@@ -128,6 +163,11 @@ FUTURES_PRODUCTS = {
         "exchange": "NYMEX",
         "category": "metal",
     },
+    "/PA": {
+        "name": "Palladium",
+        "exchange": "NYMEX",
+        "category": "metal",
+    },
     "/CL": {
         "name": "WTI Crude Oil",
         "exchange": "NYMEX",
@@ -145,6 +185,11 @@ FUTURES_PRODUCTS = {
     },
     "/HO": {
         "name": "NY Harbor ULSD",
+        "exchange": "NYMEX",
+        "category": "energy",
+    },
+    "/BZ": {
+        "name": "Brent Crude Oil",
         "exchange": "NYMEX",
         "category": "energy",
     },
@@ -228,6 +273,21 @@ FUTURES_PRODUCTS = {
         "exchange": "CME",
         "category": "agriculture",
     },
+    "/GF": {
+        "name": "Feeder Cattle",
+        "exchange": "CME",
+        "category": "agriculture",
+    },
+    "/KE": {
+        "name": "KC Hard Red Winter Wheat",
+        "exchange": "CBOT",
+        "category": "agriculture",
+    },
+    "/ZO": {
+        "name": "Oats",
+        "exchange": "CBOT",
+        "category": "agriculture",
+    },
     "/KC": {
         "name": "Coffee",
         "exchange": "ICE",
@@ -256,9 +316,62 @@ EQUITY_PRODUCTS = {
         "category": "equity_index",
     },
 }
+LEGACY_PRODUCTS = {
+    "AUDUSD": {
+        "name": "Australian Dollar / U.S. Dollar spot FX",
+        "category": "forex",
+        "schwab_symbol": "AUD/USD",
+    },
+    "EURJPY": {
+        "name": "Euro / Japanese Yen spot FX",
+        "category": "forex",
+        "schwab_symbol": "EUR/JPY",
+    },
+    "EURUSD": {
+        "name": "Euro / U.S. Dollar spot FX",
+        "category": "forex",
+        "schwab_symbol": "EUR/USD",
+    },
+    "GBPUSD": {
+        "name": "British Pound / U.S. Dollar spot FX",
+        "category": "forex",
+        "schwab_symbol": "GBP/USD",
+    },
+    "LB___CCB": {
+        "name": "Random Length Lumber (retired)",
+        "category": "agriculture",
+        "schwab_symbol": "/LBS",
+    },
+    "NZDUSD": {
+        "name": "New Zealand Dollar / U.S. Dollar spot FX",
+        "category": "forex",
+        "schwab_symbol": "NZD/USD",
+    },
+    "RF___CCB": {
+        "name": "Mini Russell 1000 (legacy ICE contract)",
+        "category": "equity_index",
+        "schwab_symbol": "/RF",
+    },
+    "USDCAD": {
+        "name": "U.S. Dollar / Canadian Dollar spot FX",
+        "category": "forex",
+        "schwab_symbol": "USD/CAD",
+    },
+    "USDCHF": {
+        "name": "U.S. Dollar / Swiss Franc spot FX",
+        "category": "forex",
+        "schwab_symbol": "USD/CHF",
+    },
+    "USDJPY": {
+        "name": "U.S. Dollar / Japanese Yen spot FX",
+        "category": "forex",
+        "schwab_symbol": "USD/JPY",
+    },
+}
 DEFAULT_SYMBOLS = [
     *FUTURES_PRODUCTS.keys(),
     *EQUITY_PRODUCTS.keys(),
+    *LEGACY_PRODUCTS.keys(),
 ]
 
 
@@ -409,6 +522,16 @@ def normalize_symbol(symbol):
 
 def safe_symbol_filename(symbol):
     return normalize_symbol(symbol).replace("/", "").replace(" ", "_")
+
+
+def schwab_provider_symbol(symbol):
+    symbol = normalize_symbol(symbol)
+    product = LEGACY_PRODUCTS.get(symbol)
+
+    if product is not None:
+        return product["schwab_symbol"]
+
+    return symbol
 
 
 def normalize_frequency(frequency):
@@ -1411,7 +1534,7 @@ def schwab_price_history_params(
 
     if frequency == "daily":
         params = {
-            "symbol": normalize_symbol(symbol),
+            "symbol": schwab_provider_symbol(symbol),
             "periodType": "year",
             "period": SCHWAB_MAX_DAILY_YEARS if max_history else 1,
             "frequencyType": "daily",
@@ -1419,7 +1542,7 @@ def schwab_price_history_params(
         }
     elif frequency == "5min":
         params = {
-            "symbol": normalize_symbol(symbol),
+            "symbol": schwab_provider_symbol(symbol),
             "periodType": "day",
             "period": SCHWAB_MAX_INTRADAY_DAYS if max_history else 1,
             "frequencyType": "minute",
@@ -1428,7 +1551,7 @@ def schwab_price_history_params(
         }
     else:
         params = {
-            "symbol": normalize_symbol(symbol),
+            "symbol": schwab_provider_symbol(symbol),
             "periodType": "day",
             "period": SCHWAB_MAX_INTRADAY_DAYS if max_history else 1,
             "frequencyType": "minute",
@@ -1948,6 +2071,22 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--export-amibroker",
+        action="store_true",
+        help=(
+            "After quality checks, create combined daily and 5-minute "
+            "AmiBroker import files under <output-dir>/amibroker."
+        ),
+    )
+    parser.add_argument(
+        "--amibroker-timezone",
+        default="America/Detroit",
+        help=(
+            "IANA timezone used for AmiBroker intraday exports. "
+            "Default: America/Detroit."
+        ),
+    )
+    parser.add_argument(
         "-all",
         action="store_true",
         dest="all",
@@ -2125,6 +2264,23 @@ def main(args=None):
             f"{quality['apply_result'].get('updated_files', 0)} files."
         )
     print(f"Quality checks found {quality_issues} issue rows.")
+
+    if getattr(args, "export_amibroker", False):
+        from export_amibroker_market_data import export_amibroker_market_data
+
+        export_result = export_amibroker_market_data(
+            market_data_dir=output_dir,
+            timezone_name=args.amibroker_timezone,
+        )
+        export_manifest = export_result["manifest"]
+        print(
+            "Wrote AmiBroker exports: "
+            f"{export_manifest['daily']['exported_rows']:,} daily rows -> "
+            f"{export_result['daily_path']}; "
+            f"{export_manifest['intraday']['exported_rows']:,} 5-minute "
+            f"rows -> {export_result['intraday_path']}."
+        )
+
     print(
         "Finished market data run in "
         f"{elapsed_text(time.monotonic() - run_start)} "
