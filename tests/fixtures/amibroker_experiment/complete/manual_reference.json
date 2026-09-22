@@ -1,0 +1,12 @@
+{
+  "automated_job_id": "fixture-native",
+  "apx_path": "tests/fixtures/amibroker_experiment/complete/reference/project.apx",
+  "apx_sha256": "cc2f873d6aa854ba5b8637157e8678a19066400423b5d8d1a0663f357caf86fd",
+  "formula_path": "tests/fixtures/amibroker_experiment/complete/reference/formula.afl",
+  "formula_sha256": "e050a69ccdbae644cb38d4a9bd6f0c97ba4f5a7dab1bad7b197858c83f6f29a7",
+  "exports": {
+    "ES": {"path": "tests/fixtures/amibroker_experiment/complete/reference/ES.csv", "sha256": "f8a27bcf412d1eda7ae7dcb71d436882598778cce9ddf8ef9143777a85a2dc05"},
+    "NQ": {"path": "tests/fixtures/amibroker_experiment/complete/reference/NQ.csv", "sha256": "33ccf9d59648366c9da341dc4b284e5ca055385108889f09244a0387d644b64d"},
+    "YM": {"path": "tests/fixtures/amibroker_experiment/complete/reference/YM.csv", "sha256": "81f9c3f2b64521c239bc4543a80d3c17c20540459521498e22b7e38cdaade930"}
+  }
+}

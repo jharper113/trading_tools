@@ -1,0 +1,1845 @@
+<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+    <title>Cross-Sector Optimization Review</title><style>
+    body{font-family:Inter,system-ui,sans-serif;margin:0;background:#f5f7fb;color:#182033}main{max-width:1180px;margin:auto;padding:32px}h1{margin-bottom:4px}.note{background:#fff4d6;border-left:5px solid #d69400;padding:14px;margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}.card{background:white;border:1px solid #dfe4ee;border-radius:14px;padding:20px;box-shadow:0 3px 12px #15203a12}.verdict{font-weight:800;font-size:1.35rem}.pass{color:#087a44}.fail{color:#b42318}dl{display:grid;grid-template-columns:1fr auto;gap:8px}dt,dd{margin:0}table{width:100%;border-collapse:collapse;background:white;margin-top:20px;font-size:.9rem}th,td{padding:9px;border-bottom:1px solid #e4e8f0;text-align:right}th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}th{position:sticky;top:0;background:#23395d;color:white}.scroll{overflow:auto;max-height:620px;border-radius:12px}code{background:#e9edf5;padding:2px 5px;border-radius:4px}
+    </style></head><body><main><p>AMI BROKER RESEARCH WORKFLOW</p><h1>Intraday_15m optimization review</h1><p style='font-size:1.15rem;overflow-wrap:anywhere'><strong>Strategy: formula</strong></p><p><b>Decision: CORE SYMBOL REQUIRED</b> · 3 input files · Core: </p>
+    <style>
+    .wfa-overview{background:white;border:1px solid #c9d8e8;border-radius:12px;padding:24px;margin:20px 0}
+    .wfa-overview h2{margin:0 0 10px}.wfa-priorities{font-size:2rem;font-weight:750;color:#155b46;margin:8px 0}
+    .wfa-overview p{line-height:1.45;margin:10px 0}.overview-warning{background:#fff1d1;border-left:4px solid #bc861a;padding:12px;color:#704c0a}
+    .overview-gates{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:12px 0}
+    .overview-gates div{background:#edf3fb;padding:12px;border-radius:8px}.overview-gates span{display:block;font-size:.9rem;color:#465469}
+    .overview-gates strong{display:block;font-size:1.4rem;margin-top:6px}.wfa-overview td,.wfa-overview th{text-align:left;position:static}
+    .report-details{background:white;border:1px solid #dbe2ed;border-radius:9px;margin:12px 0;padding:14px}
+    .report-details>summary{cursor:pointer;color:#284b7b;font-weight:650}.overview-table{overflow-x:auto}
+    @media(max-width:600px){.overview-gates{grid-template-columns:1fr}.wfa-overview{padding:16px}}
+    </style><section class="wfa-overview"><h2>WFA priorities</h2><div class="wfa-priorities">None yet</div>
+    <p>Test these first; qualifying alternatives stay available. Final trading choices come after WFA.</p><p class="overview-warning"><b>Core gate not passed.</b> Review the individual checks below.</p>
+    <div class="overview-table"><table><thead><tr><th>Group</th><th>Test first</th><th>Qualifying alternatives</th><th>Evidence</th></tr></thead><tbody><tr><td colspan="4">No candidates clear the current research gate.</td></tr></tbody></table></div>
+    <h3>Gate criteria</h3><div class="overview-gates"><div><span>Profitable parameter sets</span><strong>≥ 70%</strong></div><div><span>Median profit factor</span><strong>≥ 1.1</strong></div><div><span>Median trades</span><strong>≥ 120</strong></div></div>
+    <p>All three individual checks must pass. Sector must pass: at least 3 individual passes and 50% of tested symbols. One WFA representative by median CAR/MDD; 10% near-ties use execution quality, liquidity, then lower-quartile CAR/MDD. Isolated instruments need separate supporting evidence.</p>
+    </section><details class="report-details"><summary>Symbol checks, group support and exclusions</summary><style>
+    .gate-summary{background:#fff;border:2px solid #c9d8e8;border-radius:14px;padding:24px;margin:24px 0}
+    .gate-summary h2{margin:0 0 12px}.gate-summary p{line-height:1.5}
+    .gate-checks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+    .gate-check{padding:16px;background:#f1f5fa;border-radius:10px}.gate-check h3{font-size:1rem;margin:0 0 10px}
+    .gate-required{font-size:1.6rem;font-weight:700}.gate-check p{margin:10px 0}
+    .wfa-list{background:#e9f4ef;padding:20px;border-radius:10px;margin-top:20px}
+    .wfa-symbol{display:inline-block;background:#126445;color:#fff;padding:8px 18px;margin:4px 8px 4px 0;border-radius:8px;font-weight:700;font-size:1.25rem}
+    .gate-summary .gate-scroll{overflow-x:auto}.gate-summary th{position:static}
+    .gate-summary td{vertical-align:top}.gate-summary .group-table td{text-align:left}
+    .gate-summary summary{cursor:pointer;font-weight:600;margin-top:20px}
+    .gate-summary small{display:inline-block;margin-top:8px;color:#526174}
+    @media(max-width:700px){.gate-checks{grid-template-columns:1fr}.gate-summary{padding:16px}}
+    </style><section class="gate-summary" aria-label="Optimization to walk-forward gate">
+    <h2>1. What must pass to advance?</h2><p><b>All three checks must pass</b> on the configured strategy core: <b>Not declared</b>.
+    When multiple core symbols are configured, their eligible rows are pooled. Family and broad-universe results are diagnostics, not vetoes.</p>
+    <div class="gate-checks"><div class="gate-check"><h3>Profitable parameter sets</h3>
+        <div class="gate-required">≥ 70.0%</div>
+        <p>Observed: <b>No data</b></p>
+        <b class="fail">NO DATA</b></div><div class="gate-check"><h3>Median profit factor</h3>
+        <div class="gate-required">≥ 1.10</div>
+        <p>Observed: <b>No data</b></p>
+        <b class="fail">NO DATA</b></div><div class="gate-check"><h3>Median trades</h3>
+        <div class="gate-required">≥ 120</div>
+        <p>Observed: <b>No data</b></p>
+        <b class="fail">NO DATA</b></div></div>
+    <p>0 eligible parameter-set rows; 0 rows excluded for no positive trade count.
+    Profitable means net profit &gt; 0. Passing this optimization gate advances research to WFA; it is not a deployment pass.</p>
+    <div class="wfa-list"><h2>2. Walk-forward symbols</h2><strong>None — the strategy gate has not cleared.</strong><p>Individually qualifying candidates, held until the strategy gate clears: <b>ES, NQ, YM</b>.</p></div>
+    <p><b>All individually passing peers are retained as research candidates.</b> There is no fixed ES, CL, or 6E preference. When a focused selection plan is present, its role-based shortlist advances first and other passing peers remain reserves.
+    Each symbol must pass the same three core thresholds; a passing family cannot rescue a failing symbol.
+    This shortlist covers standard futures roots in the seven groups below; ETFs, spot FX, retired contracts and micro variants are excluded.</p>
+    <div class="gate-scroll"><table class="group-table"><thead><tr><th>Core group</th><th>Passing / tested symbols</th><th>Passing candidates</th><th>Highest volume</th><th>Robustness leader</th></tr></thead><tbody><tr><td>Crypto</td><td>No eligible data</td><td><b>None</b></td><td>None</td><td>None</td></tr><tr><td>Equity indexes</td><td>3 / 3</td><td><b>ES, NQ, YM</b></td><td>ES</td><td>NQ</td></tr><tr><td>Rates</td><td>No eligible data</td><td><b>None</b></td><td>None</td><td>None</td></tr><tr><td>Metals</td><td>No eligible data</td><td><b>None</b></td><td>None</td><td>None</td></tr><tr><td>Energy</td><td>No eligible data</td><td><b>None</b></td><td>None</td><td>None</td></tr><tr><td>Agricultural</td><td>No eligible data</td><td><b>None</b></td><td>None</td><td>None</td></tr><tr><td>Currencies</td><td>No eligible data</td><td><b>None</b></td><td>None</td><td>None</td></tr></tbody></table></div>
+    <p>Family breadth counts each supplied symbol with eligible results once, regardless of how many parameter sets it has.
+    It shows transferability across the tested instruments, not proof that every instrument in that sector works.
+    Individual passes do not prove that the same parameter combination works across the family; inspect shared profitable regions before freezing the rule for WFA.
+    Robustness leader is ranked by profitable parameter-set percentage, then median profit factor, then median trades.</p>
+    <h3>Passing candidates: liquidity and robustness side by side</h3>
+    <div class="gate-scroll"><table><thead><tr><th>Symbol</th><th>Group</th><th>Median daily volume<br>(contracts)</th><th>Profitable sets</th><th>Median PF</th><th>Median trades</th></tr></thead><tbody><tr><td><b>ES</b></td><td>Equity indexes</td><td>1,293,730<br><small>60 sessions · through 2026-09-18</small></td><td>100.0%</td><td>1.32</td><td>145</td></tr><tr><td><b>NQ</b></td><td>Equity indexes</td><td>524,751<br><small>60 sessions · through 2026-09-18</small></td><td>100.0%</td><td>1.36</td><td>150</td></tr><tr><td><b>YM</b></td><td>Equity indexes</td><td>72,924<br><small>60 sessions · through 2026-09-18</small></td><td>100.0%</td><td>1.24</td><td>140</td></tr></tbody></table></div>
+    <p>Within each group, available recent volume sorts first, highest to lowest. Missing volume never removes a passing symbol.
+    Current liquidity snapshot: 2026-09-21; median of up to 60 daily sessions, at least 20 required, latest session no older than 7 calendar days.
+    No minimum volume cutoff is applied. This is a volume proxy, not an execution-liquidity pass. Check spreads, depth, trading-session volume, and slippage for the actual contract and order size.
+    It is separate from the historical optimization gate; volume counts are not risk-adjusted across different contract sizes.</p>
+    <h3>Distinctiveness: not measured by optimization summaries</h3>
+    <p>NG and other passing peers remain eligible for research even when another instrument leads the group; the frozen plan distinguishes nominees from reserves.
+    To decide which add distinct strategy behavior, compare aligned, risk-normalized OOS daily strategy returns, rolling correlations,
+    overlapping drawdowns and incremental portfolio results after costs. Underlying-price correlation alone is insufficient.
+    Similar instruments can remain redundant; sector membership alone does not prove diversification.</p>
+    <details><summary>Inspect all candidate checks and alternatives</summary><div class="gate-scroll"><table><thead><tr><th>Symbol</th><th>Result</th><th>Profitable sets</th><th>Median PF</th><th>Median trades</th><th>Reason</th></tr></thead><tbody><tr><td>BTC</td><td>NO DATA</td><td>—</td><td>—</td><td>—</td><td>No export data</td></tr><tr><td>ES</td><td>PASS</td><td>100.0%</td><td>1.32</td><td>145</td><td>All three checks pass</td></tr><tr><td>NQ</td><td>PASS</td><td>100.0%</td><td>1.36</td><td>150</td><td>All three checks pass</td></tr><tr><td>YM</td><td>PASS</td><td>100.0%</td><td>1.24</td><td>140</td><td>All three checks pass</td></tr><tr><td>ZN</td><td>NO DATA</td><td>—</td><td>—</td><td>—</td><td>No export data</td></tr><tr><td>GC</td><td>NO DATA</td><td>—</td><td>—</td><td>—</td><td>No export data</td></tr><tr><td>CL</td><td>NO DATA</td><td>—</td><td>—</td><td>—</td><td>No export data</td></tr><tr><td>ZC</td><td>NO DATA</td><td>—</td><td>—</td><td>—</td><td>No export data</td></tr><tr><td>6E</td><td>NO DATA</td><td>—</td><td>—</td><td>—</td><td>No export data</td></tr></tbody></table></div></details>
+    <p>Freeze the rules and intended symbols before reviewing OOS results. Inspect the heat maps below for isolated profitable combinations; neighborhood continuity is not an automated gate.</p>
+    </section><section class="peer-evidence"><h3>Peer robustness: two routes to WFA</h3><p><b>Sector-first: at least 3 individual passes and 50% of tested instruments. No pair or distinctness bypass. Select one representative by median CAR/MDD; within 10% use execution quality and liquidity, then lower-quartile CAR/MDD.</b></p>
+    <p><b>Research period:</b> 2009-01-01 through 2019-01-01 (inclusive).
+    3 group-supported · 0 conditional · 6 held.</p>
+    <p><b>Strict shared-region diagnostic:</b> at least 3 adequately sampled, behaviorally similar symbols, with at least 67%
+    passing together in a connected parameter region covering at least 50% of the grid.
+    <b>Conditional:</b> persistent distinct underlying behavior, a robust own parameter neighborhood, and at least 3 research subperiods supporting the same region.
+    Missing strict or exception evidence holds those routes; the practical economic-group route can qualify without price data. An isolated profitable symbol is not automatically distinct.</p>
+    <p>Peers are candidate-centered: each listed peer resembles that candidate in research-period daily price returns; this does not imply every pair in the list resembles one another.
+    Strict diagnostic similarity requires correlation ≥ 0.60 overall and in at least 75% of 126-session windows.
+    Practical pairs use rolling similarity; their full-period correlation is advisory. Distinctness requires absolute correlation ≤ 0.35 against every configured economic comparator (missing comparator data holds the exception), with at least 3 comparators;
+    inverse twins do not qualify. At least 90% of weekdays in the declared research span must have returns, and pairwise matched-date coverage must also meet that threshold. No grouping uses strategy profits or later OOS prices.</p>
+    <details><summary>Inspect individual gates, behavioral peers, exceptions and reasons</summary><div class="selection-scroll"><table><thead><tr>
+    <th>Symbol</th><th>Individual gate</th><th>Economic pool</th><th>Behavioral peers</th><th>Peer robustness</th><th>Shared region</th><th>Distinct exception</th><th>WFA route</th><th>Support basis</th><th>Reason</th>
+    </tr></thead><tbody><tr><td>BTC</td><td>NO DATA</td><td>Crypto</td><td>BTC</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>ES</td><td>PASS</td><td>Equity indexes</td><td>ES, NQ, YM</td><td>FAIL</td><td>0 / 2 connected settings</td><td>UNPROVEN</td><td>GROUP-SUPPORTED</td><td>Sector gate</td><td>Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>NQ</td><td>PASS</td><td>Equity indexes</td><td>ES, NQ, YM</td><td>FAIL</td><td>0 / 2 connected settings</td><td>UNPROVEN</td><td>GROUP-SUPPORTED</td><td>Sector gate</td><td>Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>YM</td><td>PASS</td><td>Equity indexes</td><td>ES, NQ, YM</td><td>FAIL</td><td>0 / 2 connected settings</td><td>UNPROVEN</td><td>GROUP-SUPPORTED</td><td>Sector gate</td><td>Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>ZN</td><td>NO DATA</td><td>Rates</td><td>ZN</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>GC</td><td>NO DATA</td><td>Metals</td><td>GC</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>CL</td><td>NO DATA</td><td>Energy</td><td>CL</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>ZC</td><td>NO DATA</td><td>Grains and oilseeds</td><td>ZC</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>6E</td><td>NO DATA</td><td>Currencies</td><td>6E</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr></tbody></table></div></details>
+    <details><summary>Peer thresholds and frozen evidence</summary><pre>{
+  &quot;schema_version&quot;: 1,
+  &quot;research_start&quot;: &quot;2009-01-01&quot;,
+  &quot;research_end&quot;: &quot;2019-01-01&quot;,
+  &quot;policy&quot;: {
+    &quot;schema_version&quot;: 2,
+    &quot;economic_groups&quot;: {
+      &quot;Crypto&quot;: [
+        &quot;BTC&quot;,
+        &quot;ETH&quot;,
+        &quot;SOL&quot;,
+        &quot;XRP&quot;
+      ],
+      &quot;Equity indexes&quot;: [
+        &quot;ES&quot;,
+        &quot;NQ&quot;,
+        &quot;YM&quot;,
+        &quot;RTY&quot;,
+        &quot;EMD&quot;,
+        &quot;NKD&quot;
+      ],
+      &quot;Rates&quot;: [
+        &quot;ZT&quot;,
+        &quot;ZF&quot;,
+        &quot;ZN&quot;,
+        &quot;ZB&quot;,
+        &quot;UB&quot;
+      ],
+      &quot;Energy&quot;: [
+        &quot;CL&quot;,
+        &quot;BZ&quot;,
+        &quot;RB&quot;,
+        &quot;HO&quot;,
+        &quot;NG&quot;
+      ],
+      &quot;Metals&quot;: [
+        &quot;GC&quot;,
+        &quot;SI&quot;,
+        &quot;HG&quot;,
+        &quot;PL&quot;,
+        &quot;PA&quot;
+      ],
+      &quot;Grains and oilseeds&quot;: [
+        &quot;ZC&quot;,
+        &quot;ZW&quot;,
+        &quot;ZS&quot;,
+        &quot;ZM&quot;,
+        &quot;ZL&quot;,
+        &quot;ZO&quot;,
+        &quot;KE&quot;
+      ],
+      &quot;Livestock&quot;: [
+        &quot;HE&quot;,
+        &quot;LE&quot;,
+        &quot;GF&quot;
+      ],
+      &quot;Currencies&quot;: [
+        &quot;6E&quot;,
+        &quot;6A&quot;,
+        &quot;6B&quot;,
+        &quot;6C&quot;,
+        &quot;6J&quot;,
+        &quot;6M&quot;,
+        &quot;6N&quot;,
+        &quot;6S&quot;,
+        &quot;DX&quot;
+      ]
+    },
+    &quot;correlation_window&quot;: 126,
+    &quot;correlation_step&quot;: 63,
+    &quot;min_windows&quot;: 4,
+    &quot;min_return_observations&quot;: 504,
+    &quot;min_calendar_coverage&quot;: 0.9,
+    &quot;similar_correlation&quot;: 0.6,
+    &quot;distinct_abs_correlation&quot;: 0.35,
+    &quot;min_window_fraction&quot;: 0.75,
+    &quot;min_peers&quot;: 3,
+    &quot;min_peer_pass_fraction&quot;: 0.6666666666666666,
+    &quot;min_grid_coverage&quot;: 1.0,
+    &quot;min_region_fraction&quot;: 0.5,
+    &quot;min_connected_points&quot;: 3,
+    &quot;min_neighbor_fraction&quot;: 0.6666666666666666,
+    &quot;min_neighbors&quot;: 2,
+    &quot;min_distinct_references&quot;: 3,
+    &quot;min_subperiods&quot;: 3,
+    &quot;min_subperiod_trades&quot;: 20,
+    &quot;research_periods&quot;: {
+      &quot;Daily&quot;: {
+        &quot;start&quot;: &quot;2009-01-01&quot;,
+        &quot;end&quot;: &quot;2019-01-01&quot;
+      }
+    },
+    &quot;research_gate_mode&quot;: &quot;sector_first&quot;,
+    &quot;min_group_passes&quot;: 3,
+    &quot;min_group_pass_fraction&quot;: 0.5
+  },
+  &quot;market_sources&quot;: {
+    &quot;6A&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6A.csv&quot;,
+      &quot;sha256&quot;: &quot;055ffa4930c2bb05ba0148a838315a85f95cb17c9e1f808564859bdbcdcee64a&quot;,
+      &quot;observations&quot;: 2547,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9762361057876581
+    },
+    &quot;6B&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6B.csv&quot;,
+      &quot;sha256&quot;: &quot;1d17b15d2b2b5223c24773221300665373ef471e34c3b1260ca1d03228f32449&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;6C&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6C.csv&quot;,
+      &quot;sha256&quot;: &quot;a67b14e809465c7b9e2a016678526cf91b2693ff13f32d3929a2ac06be340451&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;6E&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6E.csv&quot;,
+      &quot;sha256&quot;: &quot;5ec0c7835f34a95dd765eb5a3c6a84cdd263b757511649f02b726766472adcc8&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;6J&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6J.csv&quot;,
+      &quot;sha256&quot;: &quot;d37f42f045f3c83694ffc88cbdc93dbfe98a5b6a2a784f98c320ad5b0252af36&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;6M&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6M.csv&quot;,
+      &quot;sha256&quot;: &quot;d9ea662b6f96d14c126223765e61df92db6faaa4afa047eae6db1aee49b30f8f&quot;,
+      &quot;observations&quot;: 2187,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.8% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8382522039095439
+    },
+    &quot;6N&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6N.csv&quot;,
+      &quot;sha256&quot;: &quot;541ec9392069ae1844ed38d4029672ee8163fc67d51774f29607c99c508ebdfb&quot;,
+      &quot;observations&quot;: 2187,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.8% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8382522039095439
+    },
+    &quot;6S&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6S.csv&quot;,
+      &quot;sha256&quot;: &quot;cbc919ce0e8cf06b938cf8913392c367dae0318086774fc88c20fdaadf06e6ea&quot;,
+      &quot;observations&quot;: 2545,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9754695285550019
+    },
+    &quot;BTC&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/BTC.csv&quot;,
+      &quot;sha256&quot;: &quot;58f5c6f8178b3385943b62455f1b1c1f19014d2892958b753f05a18f22d22f85&quot;,
+      &quot;observations&quot;: 260,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 10.0% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.09965504024530472
+    },
+    &quot;BZ&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/BZ.csv&quot;,
+      &quot;sha256&quot;: &quot;fc769ea22ed56555cb597eef054aa8abd9997bf29e694581a56a780b72c59b7d&quot;,
+      &quot;observations&quot;: 2237,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 85.7% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8574166347259486
+    },
+    &quot;CL&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/CL.csv&quot;,
+      &quot;sha256&quot;: &quot;264dfbc223500197cb2fe5756a465eb0c29df1efa2ca6830a6b715c8bc151aa9&quot;,
+      &quot;observations&quot;: 2547,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9762361057876581
+    },
+    &quot;DX&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/DX.csv&quot;,
+      &quot;sha256&quot;: null,
+      &quot;issue&quot;: &quot;No daily price file&quot;
+    },
+    &quot;EMD&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/EMD.csv&quot;,
+      &quot;sha256&quot;: &quot;d1988b94bb015855a838fe10f01a789bf8006bf11123b3df3a498c98982f831d&quot;,
+      &quot;observations&quot;: 2187,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.8% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8382522039095439
+    },
+    &quot;ES&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ES.csv&quot;,
+      &quot;sha256&quot;: &quot;4d2dc8c092865f14ce38700358412adf2cb08aed2b953e18e42a305b99493546&quot;,
+      &quot;observations&quot;: 2522,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9666538903794557
+    },
+    &quot;ETH&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ETH.csv&quot;,
+      &quot;sha256&quot;: &quot;603b0b3e764bc9d5bf8b41a8684fb59cbf9b3dff226c9fecba897c10e56e59f5&quot;,
+      &quot;observations&quot;: 0,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 0.0% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.0
+    },
+    &quot;GC&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/GC.csv&quot;,
+      &quot;sha256&quot;: &quot;466b742746c7cd02831fadf74a1523942a89e8e5b039ec2b324741c67dd6039a&quot;,
+      &quot;observations&quot;: 2540,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9735530854733614
+    },
+    &quot;GF&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/GF.csv&quot;,
+      &quot;sha256&quot;: &quot;cc2c4cf7c92090e248b65696ccba32c437f12dfea4aaf1b616f1b0956242993a&quot;,
+      &quot;observations&quot;: 2184,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.7% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8371023380605596
+    },
+    &quot;HE&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/HE.csv&quot;,
+      &quot;sha256&quot;: &quot;5e3b96fbd160dcd41ce6514c86d81e1cdaac1ec0d3fa9fe7fb0ea97abe3ab42f&quot;,
+      &quot;observations&quot;: 2520,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9658873131467995
+    },
+    &quot;HG&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/HG.csv&quot;,
+      &quot;sha256&quot;: &quot;383bfab975d73ce3809d41150de443afdfbec8c4b76841440ad38730d6a064f7&quot;,
+      &quot;observations&quot;: 2540,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9735530854733614
+    },
+    &quot;HO&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/HO.csv&quot;,
+      &quot;sha256&quot;: &quot;5561b3bef6ba3ffb75aedeba600b6d507f6c250628d1fe1a9cf9c76b3cd34647&quot;,
+      &quot;observations&quot;: 2546,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.97585281717133
+    },
+    &quot;KE&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/KE.csv&quot;,
+      &quot;sha256&quot;: &quot;8ce0e5902e237bbbe44716c690922932f918c1583a216b687436af310d512083&quot;,
+      &quot;observations&quot;: 2184,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.7% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8371023380605596
+    },
+    &quot;LE&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/LE.csv&quot;,
+      &quot;sha256&quot;: &quot;74deeaa95ff0cf0246514e82b70b00d0f40b9deaa8aeda7286e57414c3741983&quot;,
+      &quot;observations&quot;: 2520,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9658873131467995
+    },
+    &quot;NG&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/NG.csv&quot;,
+      &quot;sha256&quot;: &quot;122b3836d878469437179dbbbd78d0e7477d8fce3d0c6345dfebc1fec283ddcb&quot;,
+      &quot;observations&quot;: 2547,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9762361057876581
+    },
+    &quot;NKD&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/NKD.csv&quot;,
+      &quot;sha256&quot;: &quot;5ab15c24d52d1371a0867ce1e5eca75d7af8f28f402bc6dea69f7228e84cfe4e&quot;,
+      &quot;observations&quot;: 2187,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.8% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8382522039095439
+    },
+    &quot;NQ&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/NQ.csv&quot;,
+      &quot;sha256&quot;: &quot;0f910ce30f196e50edf48c22e2db5c9c05584c03317aed22fed61e6f2f22d038&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;PA&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/PA.csv&quot;,
+      &quot;sha256&quot;: &quot;57c9b32991a4234ed5fc0faf929e5eaa8d712ff7b6b7c199d078d1714947d487&quot;,
+      &quot;observations&quot;: 2184,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.7% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8371023380605596
+    },
+    &quot;PL&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/PL.csv&quot;,
+      &quot;sha256&quot;: &quot;9b15b1a5e872ef02a5d0e69e077b0c9d2442eb184ea0804a20d63828866cad9f&quot;,
+      &quot;observations&quot;: 2540,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9735530854733614
+    },
+    &quot;RB&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/RB.csv&quot;,
+      &quot;sha256&quot;: &quot;99fa00a54963df7f1ae00a6960db9d19dd5c17b5e0da4d913f9abc3f3563f76f&quot;,
+      &quot;observations&quot;: 2546,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.97585281717133
+    },
+    &quot;RTY&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/RTY.csv&quot;,
+      &quot;sha256&quot;: &quot;f95baa77dea50c701d3ecb2111c46f74605fcb6295a88b475f93e755d3d5aeee&quot;,
+      &quot;observations&quot;: 373,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 14.3% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.14296665389037946
+    },
+    &quot;SI&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/SI.csv&quot;,
+      &quot;sha256&quot;: &quot;5e7063c51db6734e974e0260bd4feffcd45b4b94bcaa02e0d8761391d9dccd30&quot;,
+      &quot;observations&quot;: 2541,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9739363740896896
+    },
+    &quot;SOL&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/SOL.csv&quot;,
+      &quot;sha256&quot;: &quot;35e819d1dcb236f3cc6449ff1ca43c33a70b9976b9299cc446eb03d73b05627f&quot;,
+      &quot;observations&quot;: 0,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 0.0% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.0
+    },
+    &quot;UB&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/UB.csv&quot;,
+      &quot;sha256&quot;: &quot;e5f81d727069955a2b776ba1a19630fd1e7e3184915f491460d34095ae50175b&quot;,
+      &quot;observations&quot;: 1930,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 74.0% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.7397470295132235
+    },
+    &quot;XRP&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/XRP.csv&quot;,
+      &quot;sha256&quot;: &quot;3e713fb1a3b06d1185334ebb6d4c89285b85ca4821913be7f40ec532d092ce03&quot;,
+      &quot;observations&quot;: 0,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 0.0% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.0
+    },
+    &quot;YM&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/YM.csv&quot;,
+      &quot;sha256&quot;: &quot;e09c0d55818936fc768fbcd156a301236c7ae5ed262341850504a4f276fc4b53&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;ZB&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZB.csv&quot;,
+      &quot;sha256&quot;: &quot;a7c94e8c33f83861917f00da61947b6d51b89d61f74909f3f4a4b4b9ed6b9e1b&quot;,
+      &quot;observations&quot;: 2544,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9750862399386738
+    },
+    &quot;ZC&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZC.csv&quot;,
+      &quot;sha256&quot;: &quot;bf58fd5182e85382b8aade7d4b392c278909a72718edb353d5d4febcf8bbfa29&quot;,
+      &quot;observations&quot;: 2519,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9655040245304715
+    },
+    &quot;ZF&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZF.csv&quot;,
+      &quot;sha256&quot;: &quot;e76b6a669acf0ad8545b4951834eddfa54ceed6aeaea769ed8e4bd14a0063117&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;ZL&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZL.csv&quot;,
+      &quot;sha256&quot;: &quot;bcf79954f8609e0ce1902243cca8bb527f071d8a91a792531ad607ea7943c98f&quot;,
+      &quot;observations&quot;: 2519,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9655040245304715
+    },
+    &quot;ZM&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZM.csv&quot;,
+      &quot;sha256&quot;: &quot;57c99cb69c993b39926de13f1f126d097f0a81b0505cfe6fcc157293b84e62f2&quot;,
+      &quot;observations&quot;: 2517,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9647374472978153
+    },
+    &quot;ZN&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZN.csv&quot;,
+      &quot;sha256&quot;: &quot;f22957f920aec15184d652fc68c64ae049dd307b6f59d8287699f483eefeb1c0&quot;,
+      &quot;observations&quot;: 2546,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.97585281717133
+    },
+    &quot;ZO&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZO.csv&quot;,
+      &quot;sha256&quot;: &quot;a60d3eec1710387b8cc45b56e93d31a5d63a1ef67ec277607681f42366c50ddf&quot;,
+      &quot;observations&quot;: 2184,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.7% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8371023380605596
+    },
+    &quot;ZS&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZS.csv&quot;,
+      &quot;sha256&quot;: &quot;4e7e521b5b4a5d743b680932e241fb7804371bdcce35d32d8640245bb3a34720&quot;,
+      &quot;observations&quot;: 2519,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9655040245304715
+    },
+    &quot;ZT&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZT.csv&quot;,
+      &quot;sha256&quot;: &quot;8937c8fbca4bfc57f7cf8ed921bd702b5b7709d23b4d8510f3f71dbc2f87b069&quot;,
+      &quot;observations&quot;: 2546,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.97585281717133
+    },
+    &quot;ZW&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZW.csv&quot;,
+      &quot;sha256&quot;: &quot;709b1e9757f20f3c1236d995f3e7bce9c5b1035b0238e2d3f18a79db62ecd275&quot;,
+      &quot;observations&quot;: 2519,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9655040245304715
+    }
+  },
+  &quot;candidates&quot;: {
+    &quot;BTC&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Crypto&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;BTC&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    },
+    &quot;ES&quot;: {
+      &quot;individual_gate&quot;: &quot;PASS&quot;,
+      &quot;economic_group&quot;: &quot;Equity indexes&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;ES&quot;,
+        &quot;NQ&quot;,
+        &quot;YM&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;FAIL&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;GROUP-SUPPORTED&quot;,
+      &quot;reason&quot;: &quot;Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {
+        &quot;NQ&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8133928918656687,
+          &quot;windows&quot;: 38,
+          &quot;similar_window_fraction&quot;: 0.9210526315789473,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2496,
+          &quot;calendar_coverage&quot;: 0.9795918367346939,
+          &quot;rolling_range&quot;: [
+            0.40038180245213073,
+            0.9584402571941945
+          ]
+        },
+        &quot;YM&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8548697535755769,
+          &quot;windows&quot;: 38,
+          &quot;similar_window_fraction&quot;: 0.9210526315789473,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2496,
+          &quot;calendar_coverage&quot;: 0.9795918367346939,
+          &quot;rolling_range&quot;: [
+            0.3814022504627091,
+            0.9868103218997443
+          ]
+        },
+        &quot;RTY&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;EMD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;NKD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        }
+      },
+      &quot;shared_region&quot;: {
+        &quot;status&quot;: &quot;FAIL&quot;,
+        &quot;connected_points&quot;: 0,
+        &quot;region_fraction&quot;: 0.0,
+        &quot;reason&quot;: &quot;No sufficiently broad, neighbor-supported profitable region&quot;,
+        &quot;points&quot;: [],
+        &quot;grid_points&quot;: 2
+      },
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [
+          &quot;ES&quot;,
+          &quot;NQ&quot;,
+          &quot;YM&quot;
+        ],
+        &quot;passing_count&quot;: 3,
+        &quot;tested_count&quot;: 3,
+        &quot;pass_fraction&quot;: 1.0,
+        &quot;passed&quot;: true
+      },
+      &quot;related_passing_peers&quot;: [
+        &quot;NQ&quot;,
+        &quot;YM&quot;
+      ],
+      &quot;support_basis&quot;: &quot;Sector gate&quot;
+    },
+    &quot;NQ&quot;: {
+      &quot;individual_gate&quot;: &quot;PASS&quot;,
+      &quot;economic_group&quot;: &quot;Equity indexes&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;ES&quot;,
+        &quot;NQ&quot;,
+        &quot;YM&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;FAIL&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;GROUP-SUPPORTED&quot;,
+      &quot;reason&quot;: &quot;Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {
+        &quot;ES&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8133928918656687,
+          &quot;windows&quot;: 38,
+          &quot;similar_window_fraction&quot;: 0.9210526315789473,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2496,
+          &quot;calendar_coverage&quot;: 0.9795918367346939,
+          &quot;rolling_range&quot;: [
+            0.40038180245213073,
+            0.9584402571941945
+          ]
+        },
+        &quot;YM&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8751457307101347,
+          &quot;windows&quot;: 39,
+          &quot;similar_window_fraction&quot;: 0.9743589743589743,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2548,
+          &quot;calendar_coverage&quot;: 1.0,
+          &quot;rolling_range&quot;: [
+            0.5942899190781952,
+            0.9562308125047331
+          ]
+        },
+        &quot;RTY&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;EMD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;NKD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        }
+      },
+      &quot;shared_region&quot;: {
+        &quot;status&quot;: &quot;FAIL&quot;,
+        &quot;connected_points&quot;: 0,
+        &quot;region_fraction&quot;: 0.0,
+        &quot;reason&quot;: &quot;No sufficiently broad, neighbor-supported profitable region&quot;,
+        &quot;points&quot;: [],
+        &quot;grid_points&quot;: 2
+      },
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [
+          &quot;ES&quot;,
+          &quot;NQ&quot;,
+          &quot;YM&quot;
+        ],
+        &quot;passing_count&quot;: 3,
+        &quot;tested_count&quot;: 3,
+        &quot;pass_fraction&quot;: 1.0,
+        &quot;passed&quot;: true
+      },
+      &quot;related_passing_peers&quot;: [
+        &quot;ES&quot;,
+        &quot;YM&quot;
+      ],
+      &quot;support_basis&quot;: &quot;Sector gate&quot;
+    },
+    &quot;YM&quot;: {
+      &quot;individual_gate&quot;: &quot;PASS&quot;,
+      &quot;economic_group&quot;: &quot;Equity indexes&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;ES&quot;,
+        &quot;NQ&quot;,
+        &quot;YM&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;FAIL&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;GROUP-SUPPORTED&quot;,
+      &quot;reason&quot;: &quot;Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {
+        &quot;ES&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8548697535755769,
+          &quot;windows&quot;: 38,
+          &quot;similar_window_fraction&quot;: 0.9210526315789473,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2496,
+          &quot;calendar_coverage&quot;: 0.9795918367346939,
+          &quot;rolling_range&quot;: [
+            0.3814022504627091,
+            0.9868103218997443
+          ]
+        },
+        &quot;NQ&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8751457307101347,
+          &quot;windows&quot;: 39,
+          &quot;similar_window_fraction&quot;: 0.9743589743589743,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2548,
+          &quot;calendar_coverage&quot;: 1.0,
+          &quot;rolling_range&quot;: [
+            0.5942899190781952,
+            0.9562308125047331
+          ]
+        },
+        &quot;RTY&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;EMD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;NKD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        }
+      },
+      &quot;shared_region&quot;: {
+        &quot;status&quot;: &quot;FAIL&quot;,
+        &quot;connected_points&quot;: 0,
+        &quot;region_fraction&quot;: 0.0,
+        &quot;reason&quot;: &quot;No sufficiently broad, neighbor-supported profitable region&quot;,
+        &quot;points&quot;: [],
+        &quot;grid_points&quot;: 2
+      },
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [
+          &quot;ES&quot;,
+          &quot;NQ&quot;,
+          &quot;YM&quot;
+        ],
+        &quot;passing_count&quot;: 3,
+        &quot;tested_count&quot;: 3,
+        &quot;pass_fraction&quot;: 1.0,
+        &quot;passed&quot;: true
+      },
+      &quot;related_passing_peers&quot;: [
+        &quot;ES&quot;,
+        &quot;NQ&quot;
+      ],
+      &quot;support_basis&quot;: &quot;Sector gate&quot;
+    },
+    &quot;ZN&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Rates&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;ZN&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    },
+    &quot;GC&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Metals&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;GC&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    },
+    &quot;CL&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Energy&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;CL&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    },
+    &quot;ZC&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Grains and oilseeds&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;ZC&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    },
+    &quot;6E&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Currencies&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;6E&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    }
+  },
+  &quot;period_issue&quot;: null,
+  &quot;subperiod_source&quot;: null
+}</pre></details></section></details><details class="report-details"><summary>Profitability charts and parameter heat maps</summary><style>
+.report-charts{margin:32px 0}.report-charts *{box-sizing:border-box}
+.report-charts .chart-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px}
+.report-charts .chart-panel{background:#fff;padding:22px;border-radius:12px;min-width:0}
+.report-charts h2{font-size:1.3rem;margin:0 0 10px}.report-charts h3{font-size:1rem}
+.report-charts p{color:#526174;line-height:1.5}.report-charts .axis{display:flex;justify-content:space-between;font-size:.8rem;color:#526174;margin:16px 0 10px}
+.report-charts .bar-item{margin:14px 0}.report-charts .bar-label{display:flex;justify-content:space-between;gap:12px;font-size:.95rem}
+.report-charts .bar-track{height:14px;background:#edf1f7;margin:6px 0;border-radius:3px;overflow:hidden}
+.report-charts .bar-fill{height:100%;background:#137c8b}.report-charts .core-bars .bar-fill{background:#7556b8}
+.report-charts .bar-meta{font-size:.8rem;color:#526174}
+.report-charts details{background:#fff;margin:12px 0;padding:16px;border-radius:10px}
+.report-charts summary{cursor:pointer;font-weight:600;padding:4px}
+.report-charts .heat-scroll{overflow-x:auto;margin:16px 0 24px}
+.report-charts .heat-table{width:100%;border-collapse:collapse;margin:0;font-size:.85rem}
+.report-charts .heat-table caption{text-align:left;padding:12px 0;line-height:1.6;color:#334155}
+.report-charts .heat-table th{position:static;background:#edf1f7;color:#243248;text-align:center;min-width:88px;white-space:nowrap}
+.report-charts .heat-table td{text-align:center;padding:12px 8px;border:2px solid #fff;min-width:100px}
+.report-charts .heat-table small{display:block;margin-top:5px;font-size:.75rem}
+.report-charts .legend{display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:.85rem;margin:12px 0}
+.report-charts .swatch{display:inline-block;width:14px;height:14px;vertical-align:middle;margin-right:5px}
+@media(max-width:700px){.report-charts .chart-grid{grid-template-columns:1fr}.report-charts .chart-panel{padding:16px}main{padding:16px!important}}
+</style><section class="report-charts">
+    <div class="chart-grid"><section class="chart-panel "><h2>Profitability by instrument family</h2><p>Profitable parameter sets (%)</p>
+    <div class="axis"><span>0%</span><span>50%</span><span>100%</span></div><div class="bar-item"><div class="bar-label"><span>Equity indexes</span><b>100.0%</b></div>
+        <div class="bar-track" role="img" aria-label="Equity indexes: 100.0% profitable parameter sets"><div class="bar-fill" style="width:100.0000%"></div></div>
+        <div class="bar-meta">6 eligible · 0 excluded · median net profit +925</div></div></section><section class="chart-panel core-bars"><h2>Core-symbol profitability</h2><p>Profitable parameter sets (%)</p>
+    <div class="axis"><span>0%</span><span>50%</span><span>100%</span></div><div class="bar-item"><div class="bar-label"><span>ZN</span><b>No eligible data</b></div>
+        <div class="bar-track" role="img" aria-label="ZN: No eligible data profitable parameter sets"><div class="bar-fill" style="width:0.0000%"></div></div>
+        <div class="bar-meta">0 eligible · 0 excluded</div></div><div class="bar-item"><div class="bar-label"><span>ES</span><b>100.0%</b></div>
+        <div class="bar-track" role="img" aria-label="ES: 100.0% profitable parameter sets"><div class="bar-fill" style="width:100.0000%"></div></div>
+        <div class="bar-meta">2 eligible · 0 excluded · median net profit +950</div></div><div class="bar-item"><div class="bar-label"><span>6E</span><b>No eligible data</b></div>
+        <div class="bar-track" role="img" aria-label="6E: No eligible data profitable parameter sets"><div class="bar-fill" style="width:0.0000%"></div></div>
+        <div class="bar-meta">0 eligible · 0 excluded</div></div><div class="bar-item"><div class="bar-label"><span>GC</span><b>No eligible data</b></div>
+        <div class="bar-track" role="img" aria-label="GC: No eligible data profitable parameter sets"><div class="bar-fill" style="width:0.0000%"></div></div>
+        <div class="bar-meta">0 eligible · 0 excluded</div></div><div class="bar-item"><div class="bar-label"><span>BTC</span><b>No eligible data</b></div>
+        <div class="bar-track" role="img" aria-label="BTC: No eligible data profitable parameter sets"><div class="bar-fill" style="width:0.0000%"></div></div>
+        <div class="bar-meta">0 eligible · 0 excluded</div></div><div class="bar-item"><div class="bar-label"><span>ZC</span><b>No eligible data</b></div>
+        <div class="bar-track" role="img" aria-label="ZC: No eligible data profitable parameter sets"><div class="bar-fill" style="width:0.0000%"></div></div>
+        <div class="bar-meta">0 eligible · 0 excluded</div></div><div class="bar-item"><div class="bar-label"><span>CL</span><b>No eligible data</b></div>
+        <div class="bar-track" role="img" aria-label="CL: No eligible data profitable parameter sets"><div class="bar-fill" style="width:0.0000%"></div></div>
+        <div class="bar-meta">0 eligible · 0 excluded</div></div></section></div>
+    <p>Profitable means net profit &gt; 0. Zero-trade rows and invalid profit values are excluded.
+    Families pool eligible rows across their instruments; instruments with more rows contribute more.
+    Median net profit uses the export currency. The seven-symbol comparison does not change the configured decision core.</p>
+    <h2>Parameter-space profitability</h2><p>Each cell shows median net profit in the export currency, the profitable share, and eligible row count (n).
+        Other parameters are aggregated, so check individual combinations before selecting settings. Color scales are symmetric around zero and shared across pairs within each symbol.</p>
+        <div class="legend"><span><i class="swatch" style="background:#b42318"></i>Loss</span><span><i class="swatch" style="background:#f7fafb"></i>Zero</span><span><i class="swatch" style="background:#117a4f"></i>Profit</span><span><i class="swatch" style="background:#edf2f5"></i>No eligible data</span></div><details open><summary>ES · 0 parameter pairs</summary><p>At least two varying parameters are required for a heat map.</p></details><details><summary>NQ · 0 parameter pairs</summary><p>At least two varying parameters are required for a heat map.</p></details><details><summary>YM · 0 parameter pairs</summary><p>At least two varying parameters are required for a heat map.</p></details></section></details><details class="report-details"><summary>Production selection, execution and OOS requirements</summary><style>
+    .symbol-selection{margin:24px 0;padding:24px;background:#fff;border:2px solid #94a9d9;border-radius:14px}
+    .symbol-selection h2{margin-top:0}.symbol-selection p,.symbol-selection li{line-height:1.55}
+    .selection-flow{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:20px 0}
+    .selection-flow div{padding:14px;border-radius:8px;background:#e0edff;color:#183d79;font-weight:650}
+    .selection-flow div:nth-child(2){background:#e9e2fb;color:#583684}.selection-flow div:nth-child(3){background:#fff0d5;color:#734b0c}.selection-flow div:nth-child(4){background:#dff4e7;color:#1a5837}
+    .selection-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+    .selection-card{border:1px solid #d9dfeb;border-top:4px solid #5677ba;border-radius:9px;padding:18px;min-width:0}
+    .selection-card h3{margin-top:0}.selection-stage{display:inline-block;background:#fff0cd;color:#674507;padding:6px 10px;border-radius:6px;font-weight:650}
+    .peer-evidence{background:#f2f4fc;border-left:4px solid #7860aa;padding:16px;margin-top:18px;border-radius:8px}.peer-evidence td:last-child{white-space:normal;min-width:220px}
+    .selection-stage.selected{background:#dff4e7;color:#1a5837}.selection-muted{color:#566074}
+    .selection-blockers{padding-left:18px;color:#714519}.selection-scroll{overflow-x:auto}
+    .symbol-selection summary{cursor:pointer;font-weight:650}.symbol-selection pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
+    .selection-headline{padding:16px;background:#edf3fc;border-radius:9px}.symbol-selection td{white-space:nowrap}
+    @media(max-width:700px){.selection-grid,.selection-flow{grid-template-columns:1fr}.symbol-selection{padding:14px}}
+    </style><section class="symbol-selection" aria-label="Symbol selection workflow">
+    <h2>One production symbol per group</h2>
+    <div class="selection-headline"><b>Focused WFA shortlist:</b> None<br>
+    <b>Production selection:</b> None — evidence gates remain open</div>
+    <section class="peer-evidence"><h3>Peer robustness: two routes to WFA</h3><p><b>Sector-first: at least 3 individual passes and 50% of tested instruments. No pair or distinctness bypass. Select one representative by median CAR/MDD; within 10% use execution quality and liquidity, then lower-quartile CAR/MDD.</b></p>
+    <p><b>Research period:</b> 2009-01-01 through 2019-01-01 (inclusive).
+    3 group-supported · 0 conditional · 6 held.</p>
+    <p><b>Strict shared-region diagnostic:</b> at least 3 adequately sampled, behaviorally similar symbols, with at least 67%
+    passing together in a connected parameter region covering at least 50% of the grid.
+    <b>Conditional:</b> persistent distinct underlying behavior, a robust own parameter neighborhood, and at least 3 research subperiods supporting the same region.
+    Missing strict or exception evidence holds those routes; the practical economic-group route can qualify without price data. An isolated profitable symbol is not automatically distinct.</p>
+    <p>Peers are candidate-centered: each listed peer resembles that candidate in research-period daily price returns; this does not imply every pair in the list resembles one another.
+    Strict diagnostic similarity requires correlation ≥ 0.60 overall and in at least 75% of 126-session windows.
+    Practical pairs use rolling similarity; their full-period correlation is advisory. Distinctness requires absolute correlation ≤ 0.35 against every configured economic comparator (missing comparator data holds the exception), with at least 3 comparators;
+    inverse twins do not qualify. At least 90% of weekdays in the declared research span must have returns, and pairwise matched-date coverage must also meet that threshold. No grouping uses strategy profits or later OOS prices.</p>
+    <details><summary>Inspect individual gates, behavioral peers, exceptions and reasons</summary><div class="selection-scroll"><table><thead><tr>
+    <th>Symbol</th><th>Individual gate</th><th>Economic pool</th><th>Behavioral peers</th><th>Peer robustness</th><th>Shared region</th><th>Distinct exception</th><th>WFA route</th><th>Support basis</th><th>Reason</th>
+    </tr></thead><tbody><tr><td>BTC</td><td>NO DATA</td><td>Crypto</td><td>BTC</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>ES</td><td>PASS</td><td>Equity indexes</td><td>ES, NQ, YM</td><td>FAIL</td><td>0 / 2 connected settings</td><td>UNPROVEN</td><td>GROUP-SUPPORTED</td><td>Sector gate</td><td>Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>NQ</td><td>PASS</td><td>Equity indexes</td><td>ES, NQ, YM</td><td>FAIL</td><td>0 / 2 connected settings</td><td>UNPROVEN</td><td>GROUP-SUPPORTED</td><td>Sector gate</td><td>Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>YM</td><td>PASS</td><td>Equity indexes</td><td>ES, NQ, YM</td><td>FAIL</td><td>0 / 2 connected settings</td><td>UNPROVEN</td><td>GROUP-SUPPORTED</td><td>Sector gate</td><td>Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>ZN</td><td>NO DATA</td><td>Rates</td><td>ZN</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>GC</td><td>NO DATA</td><td>Metals</td><td>GC</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>CL</td><td>NO DATA</td><td>Energy</td><td>CL</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>ZC</td><td>NO DATA</td><td>Grains and oilseeds</td><td>ZC</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr><tr><td>6E</td><td>NO DATA</td><td>Currencies</td><td>6E</td><td>INSUFFICIENT DATA</td><td>Not established</td><td>UNPROVEN</td><td>HOLD</td><td>None</td><td>Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.</td></tr></tbody></table></div></details>
+    <details><summary>Peer thresholds and frozen evidence</summary><pre>{
+  &quot;schema_version&quot;: 1,
+  &quot;research_start&quot;: &quot;2009-01-01&quot;,
+  &quot;research_end&quot;: &quot;2019-01-01&quot;,
+  &quot;policy&quot;: {
+    &quot;schema_version&quot;: 2,
+    &quot;economic_groups&quot;: {
+      &quot;Crypto&quot;: [
+        &quot;BTC&quot;,
+        &quot;ETH&quot;,
+        &quot;SOL&quot;,
+        &quot;XRP&quot;
+      ],
+      &quot;Equity indexes&quot;: [
+        &quot;ES&quot;,
+        &quot;NQ&quot;,
+        &quot;YM&quot;,
+        &quot;RTY&quot;,
+        &quot;EMD&quot;,
+        &quot;NKD&quot;
+      ],
+      &quot;Rates&quot;: [
+        &quot;ZT&quot;,
+        &quot;ZF&quot;,
+        &quot;ZN&quot;,
+        &quot;ZB&quot;,
+        &quot;UB&quot;
+      ],
+      &quot;Energy&quot;: [
+        &quot;CL&quot;,
+        &quot;BZ&quot;,
+        &quot;RB&quot;,
+        &quot;HO&quot;,
+        &quot;NG&quot;
+      ],
+      &quot;Metals&quot;: [
+        &quot;GC&quot;,
+        &quot;SI&quot;,
+        &quot;HG&quot;,
+        &quot;PL&quot;,
+        &quot;PA&quot;
+      ],
+      &quot;Grains and oilseeds&quot;: [
+        &quot;ZC&quot;,
+        &quot;ZW&quot;,
+        &quot;ZS&quot;,
+        &quot;ZM&quot;,
+        &quot;ZL&quot;,
+        &quot;ZO&quot;,
+        &quot;KE&quot;
+      ],
+      &quot;Livestock&quot;: [
+        &quot;HE&quot;,
+        &quot;LE&quot;,
+        &quot;GF&quot;
+      ],
+      &quot;Currencies&quot;: [
+        &quot;6E&quot;,
+        &quot;6A&quot;,
+        &quot;6B&quot;,
+        &quot;6C&quot;,
+        &quot;6J&quot;,
+        &quot;6M&quot;,
+        &quot;6N&quot;,
+        &quot;6S&quot;,
+        &quot;DX&quot;
+      ]
+    },
+    &quot;correlation_window&quot;: 126,
+    &quot;correlation_step&quot;: 63,
+    &quot;min_windows&quot;: 4,
+    &quot;min_return_observations&quot;: 504,
+    &quot;min_calendar_coverage&quot;: 0.9,
+    &quot;similar_correlation&quot;: 0.6,
+    &quot;distinct_abs_correlation&quot;: 0.35,
+    &quot;min_window_fraction&quot;: 0.75,
+    &quot;min_peers&quot;: 3,
+    &quot;min_peer_pass_fraction&quot;: 0.6666666666666666,
+    &quot;min_grid_coverage&quot;: 1.0,
+    &quot;min_region_fraction&quot;: 0.5,
+    &quot;min_connected_points&quot;: 3,
+    &quot;min_neighbor_fraction&quot;: 0.6666666666666666,
+    &quot;min_neighbors&quot;: 2,
+    &quot;min_distinct_references&quot;: 3,
+    &quot;min_subperiods&quot;: 3,
+    &quot;min_subperiod_trades&quot;: 20,
+    &quot;research_periods&quot;: {
+      &quot;Daily&quot;: {
+        &quot;start&quot;: &quot;2009-01-01&quot;,
+        &quot;end&quot;: &quot;2019-01-01&quot;
+      }
+    },
+    &quot;research_gate_mode&quot;: &quot;sector_first&quot;,
+    &quot;min_group_passes&quot;: 3,
+    &quot;min_group_pass_fraction&quot;: 0.5
+  },
+  &quot;market_sources&quot;: {
+    &quot;6A&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6A.csv&quot;,
+      &quot;sha256&quot;: &quot;055ffa4930c2bb05ba0148a838315a85f95cb17c9e1f808564859bdbcdcee64a&quot;,
+      &quot;observations&quot;: 2547,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9762361057876581
+    },
+    &quot;6B&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6B.csv&quot;,
+      &quot;sha256&quot;: &quot;1d17b15d2b2b5223c24773221300665373ef471e34c3b1260ca1d03228f32449&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;6C&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6C.csv&quot;,
+      &quot;sha256&quot;: &quot;a67b14e809465c7b9e2a016678526cf91b2693ff13f32d3929a2ac06be340451&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;6E&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6E.csv&quot;,
+      &quot;sha256&quot;: &quot;5ec0c7835f34a95dd765eb5a3c6a84cdd263b757511649f02b726766472adcc8&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;6J&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6J.csv&quot;,
+      &quot;sha256&quot;: &quot;d37f42f045f3c83694ffc88cbdc93dbfe98a5b6a2a784f98c320ad5b0252af36&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;6M&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6M.csv&quot;,
+      &quot;sha256&quot;: &quot;d9ea662b6f96d14c126223765e61df92db6faaa4afa047eae6db1aee49b30f8f&quot;,
+      &quot;observations&quot;: 2187,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.8% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8382522039095439
+    },
+    &quot;6N&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6N.csv&quot;,
+      &quot;sha256&quot;: &quot;541ec9392069ae1844ed38d4029672ee8163fc67d51774f29607c99c508ebdfb&quot;,
+      &quot;observations&quot;: 2187,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.8% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8382522039095439
+    },
+    &quot;6S&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/6S.csv&quot;,
+      &quot;sha256&quot;: &quot;cbc919ce0e8cf06b938cf8913392c367dae0318086774fc88c20fdaadf06e6ea&quot;,
+      &quot;observations&quot;: 2545,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9754695285550019
+    },
+    &quot;BTC&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/BTC.csv&quot;,
+      &quot;sha256&quot;: &quot;58f5c6f8178b3385943b62455f1b1c1f19014d2892958b753f05a18f22d22f85&quot;,
+      &quot;observations&quot;: 260,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 10.0% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.09965504024530472
+    },
+    &quot;BZ&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/BZ.csv&quot;,
+      &quot;sha256&quot;: &quot;fc769ea22ed56555cb597eef054aa8abd9997bf29e694581a56a780b72c59b7d&quot;,
+      &quot;observations&quot;: 2237,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 85.7% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8574166347259486
+    },
+    &quot;CL&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/CL.csv&quot;,
+      &quot;sha256&quot;: &quot;264dfbc223500197cb2fe5756a465eb0c29df1efa2ca6830a6b715c8bc151aa9&quot;,
+      &quot;observations&quot;: 2547,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9762361057876581
+    },
+    &quot;DX&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/DX.csv&quot;,
+      &quot;sha256&quot;: null,
+      &quot;issue&quot;: &quot;No daily price file&quot;
+    },
+    &quot;EMD&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/EMD.csv&quot;,
+      &quot;sha256&quot;: &quot;d1988b94bb015855a838fe10f01a789bf8006bf11123b3df3a498c98982f831d&quot;,
+      &quot;observations&quot;: 2187,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.8% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8382522039095439
+    },
+    &quot;ES&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ES.csv&quot;,
+      &quot;sha256&quot;: &quot;4d2dc8c092865f14ce38700358412adf2cb08aed2b953e18e42a305b99493546&quot;,
+      &quot;observations&quot;: 2522,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9666538903794557
+    },
+    &quot;ETH&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ETH.csv&quot;,
+      &quot;sha256&quot;: &quot;603b0b3e764bc9d5bf8b41a8684fb59cbf9b3dff226c9fecba897c10e56e59f5&quot;,
+      &quot;observations&quot;: 0,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 0.0% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.0
+    },
+    &quot;GC&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/GC.csv&quot;,
+      &quot;sha256&quot;: &quot;466b742746c7cd02831fadf74a1523942a89e8e5b039ec2b324741c67dd6039a&quot;,
+      &quot;observations&quot;: 2540,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9735530854733614
+    },
+    &quot;GF&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/GF.csv&quot;,
+      &quot;sha256&quot;: &quot;cc2c4cf7c92090e248b65696ccba32c437f12dfea4aaf1b616f1b0956242993a&quot;,
+      &quot;observations&quot;: 2184,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.7% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8371023380605596
+    },
+    &quot;HE&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/HE.csv&quot;,
+      &quot;sha256&quot;: &quot;5e3b96fbd160dcd41ce6514c86d81e1cdaac1ec0d3fa9fe7fb0ea97abe3ab42f&quot;,
+      &quot;observations&quot;: 2520,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9658873131467995
+    },
+    &quot;HG&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/HG.csv&quot;,
+      &quot;sha256&quot;: &quot;383bfab975d73ce3809d41150de443afdfbec8c4b76841440ad38730d6a064f7&quot;,
+      &quot;observations&quot;: 2540,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9735530854733614
+    },
+    &quot;HO&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/HO.csv&quot;,
+      &quot;sha256&quot;: &quot;5561b3bef6ba3ffb75aedeba600b6d507f6c250628d1fe1a9cf9c76b3cd34647&quot;,
+      &quot;observations&quot;: 2546,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.97585281717133
+    },
+    &quot;KE&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/KE.csv&quot;,
+      &quot;sha256&quot;: &quot;8ce0e5902e237bbbe44716c690922932f918c1583a216b687436af310d512083&quot;,
+      &quot;observations&quot;: 2184,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.7% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8371023380605596
+    },
+    &quot;LE&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/LE.csv&quot;,
+      &quot;sha256&quot;: &quot;74deeaa95ff0cf0246514e82b70b00d0f40b9deaa8aeda7286e57414c3741983&quot;,
+      &quot;observations&quot;: 2520,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9658873131467995
+    },
+    &quot;NG&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/NG.csv&quot;,
+      &quot;sha256&quot;: &quot;122b3836d878469437179dbbbd78d0e7477d8fce3d0c6345dfebc1fec283ddcb&quot;,
+      &quot;observations&quot;: 2547,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9762361057876581
+    },
+    &quot;NKD&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/NKD.csv&quot;,
+      &quot;sha256&quot;: &quot;5ab15c24d52d1371a0867ce1e5eca75d7af8f28f402bc6dea69f7228e84cfe4e&quot;,
+      &quot;observations&quot;: 2187,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.8% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8382522039095439
+    },
+    &quot;NQ&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/NQ.csv&quot;,
+      &quot;sha256&quot;: &quot;0f910ce30f196e50edf48c22e2db5c9c05584c03317aed22fed61e6f2f22d038&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;PA&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/PA.csv&quot;,
+      &quot;sha256&quot;: &quot;57c9b32991a4234ed5fc0faf929e5eaa8d712ff7b6b7c199d078d1714947d487&quot;,
+      &quot;observations&quot;: 2184,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.7% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8371023380605596
+    },
+    &quot;PL&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/PL.csv&quot;,
+      &quot;sha256&quot;: &quot;9b15b1a5e872ef02a5d0e69e077b0c9d2442eb184ea0804a20d63828866cad9f&quot;,
+      &quot;observations&quot;: 2540,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9735530854733614
+    },
+    &quot;RB&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/RB.csv&quot;,
+      &quot;sha256&quot;: &quot;99fa00a54963df7f1ae00a6960db9d19dd5c17b5e0da4d913f9abc3f3563f76f&quot;,
+      &quot;observations&quot;: 2546,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.97585281717133
+    },
+    &quot;RTY&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/RTY.csv&quot;,
+      &quot;sha256&quot;: &quot;f95baa77dea50c701d3ecb2111c46f74605fcb6295a88b475f93e755d3d5aeee&quot;,
+      &quot;observations&quot;: 373,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 14.3% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.14296665389037946
+    },
+    &quot;SI&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/SI.csv&quot;,
+      &quot;sha256&quot;: &quot;5e7063c51db6734e974e0260bd4feffcd45b4b94bcaa02e0d8761391d9dccd30&quot;,
+      &quot;observations&quot;: 2541,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9739363740896896
+    },
+    &quot;SOL&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/SOL.csv&quot;,
+      &quot;sha256&quot;: &quot;35e819d1dcb236f3cc6449ff1ca43c33a70b9976b9299cc446eb03d73b05627f&quot;,
+      &quot;observations&quot;: 0,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 0.0% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.0
+    },
+    &quot;UB&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/UB.csv&quot;,
+      &quot;sha256&quot;: &quot;e5f81d727069955a2b776ba1a19630fd1e7e3184915f491460d34095ae50175b&quot;,
+      &quot;observations&quot;: 1930,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 74.0% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.7397470295132235
+    },
+    &quot;XRP&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/XRP.csv&quot;,
+      &quot;sha256&quot;: &quot;3e713fb1a3b06d1185334ebb6d4c89285b85ca4821913be7f40ec532d092ce03&quot;,
+      &quot;observations&quot;: 0,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 0.0% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.0
+    },
+    &quot;YM&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/YM.csv&quot;,
+      &quot;sha256&quot;: &quot;e09c0d55818936fc768fbcd156a301236c7ae5ed262341850504a4f276fc4b53&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;ZB&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZB.csv&quot;,
+      &quot;sha256&quot;: &quot;a7c94e8c33f83861917f00da61947b6d51b89d61f74909f3f4a4b4b9ed6b9e1b&quot;,
+      &quot;observations&quot;: 2544,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9750862399386738
+    },
+    &quot;ZC&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZC.csv&quot;,
+      &quot;sha256&quot;: &quot;bf58fd5182e85382b8aade7d4b392c278909a72718edb353d5d4febcf8bbfa29&quot;,
+      &quot;observations&quot;: 2519,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9655040245304715
+    },
+    &quot;ZF&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZF.csv&quot;,
+      &quot;sha256&quot;: &quot;e76b6a669acf0ad8545b4951834eddfa54ceed6aeaea769ed8e4bd14a0063117&quot;,
+      &quot;observations&quot;: 2548,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9766193944039862
+    },
+    &quot;ZL&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZL.csv&quot;,
+      &quot;sha256&quot;: &quot;bcf79954f8609e0ce1902243cca8bb527f071d8a91a792531ad607ea7943c98f&quot;,
+      &quot;observations&quot;: 2519,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9655040245304715
+    },
+    &quot;ZM&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZM.csv&quot;,
+      &quot;sha256&quot;: &quot;57c99cb69c993b39926de13f1f126d097f0a81b0505cfe6fcc157293b84e62f2&quot;,
+      &quot;observations&quot;: 2517,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9647374472978153
+    },
+    &quot;ZN&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZN.csv&quot;,
+      &quot;sha256&quot;: &quot;f22957f920aec15184d652fc68c64ae049dd307b6f59d8287699f483eefeb1c0&quot;,
+      &quot;observations&quot;: 2546,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.97585281717133
+    },
+    &quot;ZO&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZO.csv&quot;,
+      &quot;sha256&quot;: &quot;a60d3eec1710387b8cc45b56e93d31a5d63a1ef67ec277607681f42366c50ddf&quot;,
+      &quot;observations&quot;: 2184,
+      &quot;issue&quot;: &quot;Research-period weekday coverage 83.7% &lt; 90.0%&quot;,
+      &quot;research_weekday_coverage&quot;: 0.8371023380605596
+    },
+    &quot;ZS&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZS.csv&quot;,
+      &quot;sha256&quot;: &quot;4e7e521b5b4a5d743b680932e241fb7804371bdcce35d32d8640245bb3a34720&quot;,
+      &quot;observations&quot;: 2519,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9655040245304715
+    },
+    &quot;ZT&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZT.csv&quot;,
+      &quot;sha256&quot;: &quot;8937c8fbca4bfc57f7cf8ed921bd702b5b7709d23b4d8510f3f71dbc2f87b069&quot;,
+      &quot;observations&quot;: 2546,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.97585281717133
+    },
+    &quot;ZW&quot;: {
+      &quot;path&quot;: &quot;/home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/data/market_data/daily/ZW.csv&quot;,
+      &quot;sha256&quot;: &quot;709b1e9757f20f3c1236d995f3e7bce9c5b1035b0238e2d3f18a79db62ecd275&quot;,
+      &quot;observations&quot;: 2519,
+      &quot;issue&quot;: null,
+      &quot;research_weekday_coverage&quot;: 0.9655040245304715
+    }
+  },
+  &quot;candidates&quot;: {
+    &quot;BTC&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Crypto&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;BTC&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    },
+    &quot;ES&quot;: {
+      &quot;individual_gate&quot;: &quot;PASS&quot;,
+      &quot;economic_group&quot;: &quot;Equity indexes&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;ES&quot;,
+        &quot;NQ&quot;,
+        &quot;YM&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;FAIL&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;GROUP-SUPPORTED&quot;,
+      &quot;reason&quot;: &quot;Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {
+        &quot;NQ&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8133928918656687,
+          &quot;windows&quot;: 38,
+          &quot;similar_window_fraction&quot;: 0.9210526315789473,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2496,
+          &quot;calendar_coverage&quot;: 0.9795918367346939,
+          &quot;rolling_range&quot;: [
+            0.40038180245213073,
+            0.9584402571941945
+          ]
+        },
+        &quot;YM&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8548697535755769,
+          &quot;windows&quot;: 38,
+          &quot;similar_window_fraction&quot;: 0.9210526315789473,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2496,
+          &quot;calendar_coverage&quot;: 0.9795918367346939,
+          &quot;rolling_range&quot;: [
+            0.3814022504627091,
+            0.9868103218997443
+          ]
+        },
+        &quot;RTY&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;EMD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;NKD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        }
+      },
+      &quot;shared_region&quot;: {
+        &quot;status&quot;: &quot;FAIL&quot;,
+        &quot;connected_points&quot;: 0,
+        &quot;region_fraction&quot;: 0.0,
+        &quot;reason&quot;: &quot;No sufficiently broad, neighbor-supported profitable region&quot;,
+        &quot;points&quot;: [],
+        &quot;grid_points&quot;: 2
+      },
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [
+          &quot;ES&quot;,
+          &quot;NQ&quot;,
+          &quot;YM&quot;
+        ],
+        &quot;passing_count&quot;: 3,
+        &quot;tested_count&quot;: 3,
+        &quot;pass_fraction&quot;: 1.0,
+        &quot;passed&quot;: true
+      },
+      &quot;related_passing_peers&quot;: [
+        &quot;NQ&quot;,
+        &quot;YM&quot;
+      ],
+      &quot;support_basis&quot;: &quot;Sector gate&quot;
+    },
+    &quot;NQ&quot;: {
+      &quot;individual_gate&quot;: &quot;PASS&quot;,
+      &quot;economic_group&quot;: &quot;Equity indexes&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;ES&quot;,
+        &quot;NQ&quot;,
+        &quot;YM&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;FAIL&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;GROUP-SUPPORTED&quot;,
+      &quot;reason&quot;: &quot;Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {
+        &quot;ES&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8133928918656687,
+          &quot;windows&quot;: 38,
+          &quot;similar_window_fraction&quot;: 0.9210526315789473,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2496,
+          &quot;calendar_coverage&quot;: 0.9795918367346939,
+          &quot;rolling_range&quot;: [
+            0.40038180245213073,
+            0.9584402571941945
+          ]
+        },
+        &quot;YM&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8751457307101347,
+          &quot;windows&quot;: 39,
+          &quot;similar_window_fraction&quot;: 0.9743589743589743,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2548,
+          &quot;calendar_coverage&quot;: 1.0,
+          &quot;rolling_range&quot;: [
+            0.5942899190781952,
+            0.9562308125047331
+          ]
+        },
+        &quot;RTY&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;EMD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;NKD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        }
+      },
+      &quot;shared_region&quot;: {
+        &quot;status&quot;: &quot;FAIL&quot;,
+        &quot;connected_points&quot;: 0,
+        &quot;region_fraction&quot;: 0.0,
+        &quot;reason&quot;: &quot;No sufficiently broad, neighbor-supported profitable region&quot;,
+        &quot;points&quot;: [],
+        &quot;grid_points&quot;: 2
+      },
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [
+          &quot;ES&quot;,
+          &quot;NQ&quot;,
+          &quot;YM&quot;
+        ],
+        &quot;passing_count&quot;: 3,
+        &quot;tested_count&quot;: 3,
+        &quot;pass_fraction&quot;: 1.0,
+        &quot;passed&quot;: true
+      },
+      &quot;related_passing_peers&quot;: [
+        &quot;ES&quot;,
+        &quot;YM&quot;
+      ],
+      &quot;support_basis&quot;: &quot;Sector gate&quot;
+    },
+    &quot;YM&quot;: {
+      &quot;individual_gate&quot;: &quot;PASS&quot;,
+      &quot;economic_group&quot;: &quot;Equity indexes&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;ES&quot;,
+        &quot;NQ&quot;,
+        &quot;YM&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;FAIL&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;GROUP-SUPPORTED&quot;,
+      &quot;reason&quot;: &quot;Sector: 3 of 3 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {
+        &quot;ES&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8548697535755769,
+          &quot;windows&quot;: 38,
+          &quot;similar_window_fraction&quot;: 0.9210526315789473,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2496,
+          &quot;calendar_coverage&quot;: 0.9795918367346939,
+          &quot;rolling_range&quot;: [
+            0.3814022504627091,
+            0.9868103218997443
+          ]
+        },
+        &quot;NQ&quot;: {
+          &quot;status&quot;: &quot;SIMILAR&quot;,
+          &quot;correlation&quot;: 0.8751457307101347,
+          &quot;windows&quot;: 39,
+          &quot;similar_window_fraction&quot;: 0.9743589743589743,
+          &quot;distinct_window_fraction&quot;: 0.0,
+          &quot;observations&quot;: 2548,
+          &quot;calendar_coverage&quot;: 1.0,
+          &quot;rolling_range&quot;: [
+            0.5942899190781952,
+            0.9562308125047331
+          ]
+        },
+        &quot;RTY&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;EMD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        },
+        &quot;NKD&quot;: {
+          &quot;status&quot;: &quot;INSUFFICIENT DATA&quot;,
+          &quot;correlation&quot;: null,
+          &quot;windows&quot;: 0,
+          &quot;similar_window_fraction&quot;: null,
+          &quot;distinct_window_fraction&quot;: null
+        }
+      },
+      &quot;shared_region&quot;: {
+        &quot;status&quot;: &quot;FAIL&quot;,
+        &quot;connected_points&quot;: 0,
+        &quot;region_fraction&quot;: 0.0,
+        &quot;reason&quot;: &quot;No sufficiently broad, neighbor-supported profitable region&quot;,
+        &quot;points&quot;: [],
+        &quot;grid_points&quot;: 2
+      },
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [
+          &quot;ES&quot;,
+          &quot;NQ&quot;,
+          &quot;YM&quot;
+        ],
+        &quot;passing_count&quot;: 3,
+        &quot;tested_count&quot;: 3,
+        &quot;pass_fraction&quot;: 1.0,
+        &quot;passed&quot;: true
+      },
+      &quot;related_passing_peers&quot;: [
+        &quot;ES&quot;,
+        &quot;NQ&quot;
+      ],
+      &quot;support_basis&quot;: &quot;Sector gate&quot;
+    },
+    &quot;ZN&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Rates&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;ZN&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    },
+    &quot;GC&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Metals&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;GC&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    },
+    &quot;CL&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Energy&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;CL&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    },
+    &quot;ZC&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Grains and oilseeds&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;ZC&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    },
+    &quot;6E&quot;: {
+      &quot;individual_gate&quot;: &quot;NO DATA&quot;,
+      &quot;economic_group&quot;: &quot;Currencies&quot;,
+      &quot;behavioral_peers&quot;: [
+        &quot;6E&quot;
+      ],
+      &quot;peer_robustness&quot;: &quot;INSUFFICIENT DATA&quot;,
+      &quot;distinct_exception&quot;: &quot;UNPROVEN&quot;,
+      &quot;wfa_route&quot;: &quot;HOLD&quot;,
+      &quot;reason&quot;: &quot;Sector: 0 of 0 instruments pass; requires at least 3 and 50%. No pair/distinctness bypass.&quot;,
+      &quot;relationships&quot;: {},
+      &quot;shared_region&quot;: {},
+      &quot;own_region&quot;: {},
+      &quot;subperiod_region&quot;: {},
+      &quot;group_support&quot;: {
+        &quot;passing_symbols&quot;: [],
+        &quot;passing_count&quot;: 0,
+        &quot;tested_count&quot;: 0,
+        &quot;pass_fraction&quot;: 0.0,
+        &quot;passed&quot;: false
+      },
+      &quot;related_passing_peers&quot;: [],
+      &quot;support_basis&quot;: &quot;None&quot;
+    }
+  },
+  &quot;period_issue&quot;: null,
+  &quot;subperiod_source&quot;: null
+}</pre></details></section>
+    <div class="selection-flow"><div>1 · Freeze research shortlist</div><div>2 · Verify execution</div><div>3 · Compare OOS at equal risk</div><div>4 · Confirm frozen choice</div></div>
+    <p>The default is one symbol per group. A second must reduce maximum drawdown by at least <b>15%</b>
+    versus the better single-symbol drawdown, sacrificing no more than <b>5%</b> of the better annualized return,
+    under both normal and stressed costs. The 50/50 combination shares one total risk budget. It must improve at least 60% of comparison folds,
+    pass the performance gates, fit whole-contract sizing, and demonstrate benefit again in later confirmation.</p>
+    <p>Distinctiveness nominees are hypotheses to test. Daily volume prioritizes research; dated spread, slippage, depth and order-size evidence determines execution eligibility.
+    These are within-group selections; cross-group portfolio risk still requires review.</p>
+    <div class="selection-grid"><article class="selection-card"><h3>Equity indexes</h3>
+        <span class="selection-stage ">Research gate blocked</span>
+        <p>3 / 3 tested symbols passed optimization.</p>
+        <ul><li>No eligible shortlist</li></ul><p class="selection-muted">Held by peer gate: None<br>Reserves: ES, NQ, YM</p>
+        <p>Primary candidate: <b>Pending evidence</b><br>Backup: None<br>
+        Proposed for confirmation: <b>None</b><br>Production selection: <b>None</b></p>
+        <ul class="selection-blockers"></ul><details><summary>WFA representative ranking</summary><p>Highest median CAR/MDD; within 10% use verified execution cost, liquidity, then lower-quartile CAR/MDD</p><table><tr><th>Symbol</th><th>Median CAR/MDD</th><th>Lower quartile</th><th>Volume proxy</th></tr><tr><td>ES</td><td>0.725</td><td>0.712</td><td>1293729.5</td></tr><tr><td>NQ</td><td>0.760</td><td>0.740</td><td>524751.0</td></tr><tr><td>YM</td><td>0.590</td><td>0.585</td><td>72924.5</td></tr></table></details></article></div>
+    <details><summary>Exact selection policy and calculation rules</summary>
+    <p>Require at least 252 comparison sessions across 5 non-overlapping folds;
+    positive net and stressed CAGR; at least 60% profitable folds under both costs;
+    drawdown ≤ 20% and drawdown duration ≤ 252 sessions under both costs.
+    Costs are stressed by 2×. CAGR compounds daily returns and annualizes at 252 sessions.
+    Rank by the lower quartile of fold CAGR (the worse of normal and stressed in each fold).
+    Candidates within 1.0% CAGR points of the best score are tied; prefer lower measured cost, then slippage, spread, greater depth, then symbol name.
+    Final confirmation requires 60 later sessions, positive normal/stressed return, and the same drawdown/duration limits.
+    A failed confirmation does not automatically promote a backup. Policy values are editable research settings.</p>
+    <pre>{
+  &quot;schema_version&quot;: 1,
+  &quot;distinct_candidates&quot;: {
+    &quot;Energy&quot;: [
+      &quot;NG&quot;
+    ]
+  },
+  &quot;max_execution_age_days&quot;: 90,
+  &quot;max_spread_ticks&quot;: 2.0,
+  &quot;max_slippage_ticks&quot;: 2.0,
+  &quot;max_round_trip_cost_r&quot;: 0.1,
+  &quot;min_comparison_days&quot;: 252,
+  &quot;min_folds&quot;: 5,
+  &quot;min_profitable_fold_fraction&quot;: 0.6,
+  &quot;max_drawdown&quot;: 0.2,
+  &quot;max_recovery_sessions&quot;: 252,
+  &quot;cost_stress_multiple&quot;: 2.0,
+  &quot;primary_tie_cagr_tolerance&quot;: 0.01,
+  &quot;allow_additional_symbol&quot;: true,
+  &quot;min_relative_drawdown_reduction&quot;: 0.15,
+  &quot;max_return_sacrifice_fraction&quot;: 0.05,
+  &quot;min_improved_fold_fraction&quot;: 0.6,
+  &quot;min_confirmation_days&quot;: 60
+}</pre></details></section></details><details class="report-details"><summary>Full optimization results</summary><div class="grid"><section class='card'><h2>Core market</h2><div class='verdict fail'>NO DATA</div>
+        <dl><dt>Profitable paramsets</dt><dd>0.0%</dd><dt>Median PF</dt><dd>0.00</dd><dt>Median trades</dt><dd>0</dd><dt>Excluded zero-trade rows</dt><dd>0</dd></dl><ul></ul></section><section class='card'><h2>Same-family transfer</h2><div class='verdict fail'>NO DATA</div>
+        <dl><dt>Profitable paramsets</dt><dd>0.0%</dd><dt>Median PF</dt><dd>0.00</dd><dt>Median trades</dt><dd>0</dd><dt>Excluded zero-trade rows</dt><dd>0</dd></dl><ul></ul></section><section class='card'><h2>Broad-universe diagnostic</h2><div class='verdict fail'>NO DATA</div>
+        <dl><dt>Profitable paramsets</dt><dd>0.0%</dd><dt>Median PF</dt><dd>0.00</dd><dt>Median trades</dt><dd>0</dd><dt>Excluded zero-trade rows</dt><dd>0</dd></dl><ul></ul></section></div><h2>Symbol detail</h2><div class="scroll"><table><thead><tr><th>Symbol</th><th>Sector</th><th>Paramsets</th><th>Eligible</th><th>Profitable %</th><th>Median PF</th><th>Median Trades</th><th>Status</th></tr></thead><tbody><tr><td>ES</td><td>Equity indexes</td><td>2</td><td>2</td><td>100.0</td><td>1.325</td><td>145.0</td><td>ECONOMIC</td></tr><tr><td>NQ</td><td>Equity indexes</td><td>2</td><td>2</td><td>100.0</td><td>1.36</td><td>150.0</td><td>ECONOMIC</td></tr><tr><td>YM</td><td>Equity indexes</td><td>2</td><td>2</td><td>100.0</td><td>1.235</td><td>140.0</td><td>ECONOMIC</td></tr></tbody></table></div><p>Symbol diagnostics are shown, but no strategy verdict was assigned.</p></details></main></body></html>

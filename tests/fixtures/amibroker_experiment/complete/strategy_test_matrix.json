@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "matrix_id": "complete-fixture",
+  "research_window": {"start": "2009-01-01", "end": "2019-01-01"},
+  "timezone": "America/Detroit",
+  "modes": {"pilot": ["fixture-native"], "full": ["fixture-native"]},
+  "jobs": {
+    "fixture-native": {
+      "job_id": "fixture-native",
+      "strategy_id": "Fixture_Strategy",
+      "source_afl": "Fixture_Strategy.afl",
+      "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "periodicity": "15m",
+      "interval_seconds": 900,
+      "database": "fixture",
+      "project_template": "fixture.apx",
+      "symbols": ["ES", "NQ", "YM"],
+      "adapter": {"name": "native"},
+      "analysis_profile": "Analyzer_Profiles/Intraday_15m_Analyzer_Profile.json",
+      "enabled": true
+    }
+  }
+}

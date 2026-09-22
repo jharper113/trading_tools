@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "experiment_id": "complete-fixture",
+  "mode": "pilot",
+  "status": "COMPLETE",
+  "matrix_path": "strategy_test_matrix.json",
+  "matrix_sha256": "53fb3a2f7cbe0803fb4dddb952daae83455c6b42ef4c10816547a28277f2d7de",
+  "timezone": "America/Detroit",
+  "jobs": [
+    {
+      "job_id": "fixture-native",
+      "strategy": "Fixture_Strategy",
+      "periodicity": "15m",
+      "adapter": "native",
+      "status": "COMPLETE",
+      "run_manifest_path": "run/run_manifest.json",
+      "run_manifest_sha256": "514aba1b2824d024e16469e04470e6b57d8e234e35a544dfe86eed742153a0a9"
+    }
+  ]
+}
