@@ -249,6 +249,87 @@ def _canonical_symbol(path: Path, member: str) -> str:
     return f"/{KIBOT_SYMBOL_MAP.get(vendor, vendor)}"
 
 
+def _read_intraday_member_vectorized(path, member, acquired_at, symbol):
+    names = ["date_text", "time_text", "open", "high", "low", "close", "volume", "_extra"]
+    try:
+        with zipfile.ZipFile(path) as archive, archive.open(member) as source:
+            raw = pd.read_csv(source, header=None, names=names, dtype=str)
+    except (OSError, KeyError, UnicodeError, zipfile.BadZipFile, pd.errors.ParserError) as error:
+        raise KibotDataError(f"Unable to read {member} from {path}: {error}") from error
+    if raw.empty:
+        empty = pd.DataFrame(columns=CANONICAL_COLUMNS)
+        empty.attrs["rejections"] = []
+        return empty
+
+    bad_width = raw["_extra"].notna() | raw[names[:-1]].isna().any(axis=1)
+    if bad_width.any():
+        row_number = int(raw.index[bad_width][0]) + 1
+        _row_error(path, member, row_number, "expected 7 columns")
+
+    local_text = raw["date_text"].str.strip() + " " + raw["time_text"].str.strip()
+    naive = pd.to_datetime(local_text, format="%m/%d/%Y %H:%M", errors="coerce")
+    if naive.isna().any():
+        row_number = int(raw.index[naive.isna()][0]) + 1
+        _row_error(path, member, row_number, f"invalid date/time: {local_text.iloc[row_number - 1]!r}")
+    localized = naive.dt.tz_localize(
+        "America/Detroit", ambiguous="NaT", nonexistent="NaT"
+    )
+    if localized.isna().any():
+        row_number = int(raw.index[localized.isna()][0]) + 1
+        _strict_eastern_to_utc(local_text.iloc[row_number - 1], path, member, row_number)
+    off_grid = naive.dt.minute.mod(5).ne(0)
+    if off_grid.any():
+        row_number = int(raw.index[off_grid][0]) + 1
+        _row_error(path, member, row_number, "timestamp is not aligned to the five-minute grid")
+
+    numeric = raw[["open", "high", "low", "close", "volume"]].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    valid_numeric = numeric.notna().all(axis=1) & np.isfinite(numeric).all(axis=1)
+    if not valid_numeric.all():
+        row_number = int(raw.index[~valid_numeric][0]) + 1
+        _row_error(path, member, row_number, "price or volume is not numeric and finite")
+    envelope = (
+        numeric["low"].le(numeric["high"])
+        & numeric["low"].le(numeric[["open", "close"]].min(axis=1))
+        & numeric["high"].ge(numeric[["open", "close"]].max(axis=1))
+    )
+    if not envelope.all():
+        row_number = int(raw.index[~envelope][0]) + 1
+        _row_error(path, member, row_number, "invalid OHLC envelope")
+
+    utc = localized.dt.tz_convert("UTC")
+    result = pd.DataFrame(
+        {
+            "timestamp": utc.dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "date": utc.dt.strftime("%Y-%m-%d"),
+            "symbol": symbol,
+            "frequency": "5min",
+            "open": numeric["open"],
+            "high": numeric["high"],
+            "low": numeric["low"],
+            "close": numeric["close"],
+            "volume": numeric["volume"],
+            "open_interest": pd.NA,
+            "source": "kibot",
+            "retrieved_at": acquired_at,
+        },
+        columns=CANONICAL_COLUMNS,
+    )
+    keys = ["symbol", "frequency", "timestamp"]
+    duplicated = result.duplicated(keys, keep=False)
+    if duplicated.any():
+        values = ["open", "high", "low", "close", "volume"]
+        for _, group in result.loc[duplicated].groupby(keys, sort=False):
+            if len(group[values].drop_duplicates()) > 1:
+                row_number = int(group.index[-1]) + 1
+                _row_error(path, member, row_number, "conflicting duplicate timestamp")
+    result = result.drop_duplicates(keys, keep="first")
+    result = result.sort_values("timestamp").reset_index(drop=True)
+    result.attrs["rejections"] = []
+    return result
+
+
 def read_kibot_member(
     path,
     member: str,
@@ -260,6 +341,8 @@ def read_kibot_member(
     path = Path(path)
     frequency = _validate_frequency(frequency)
     symbol = _canonical_symbol(path, member)
+    if frequency == "5min":
+        return _read_intraday_member_vectorized(path, member, acquired_at, symbol)
     expected_columns = 6 if frequency == "daily" else 7
     records = []
     rejections = []
