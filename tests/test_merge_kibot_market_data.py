@@ -245,6 +245,7 @@ def test_publish_moves_vendor_zips_archives_60min_and_swaps_data(tmp_path):
     assert manifest["files"][0]["rows"] == 1
     assert not (market / "60min").exists()
     assert len(pd.read_csv(market / "5min" / "ES.csv")) == 4
+    assert not paths.stage_root.exists()
 
 
 def test_publish_refuses_existing_archive_destination(tmp_path):
@@ -267,6 +268,20 @@ def test_publish_rejects_source_zip_changed_after_staging(tmp_path):
     assert not paths.canonical_archive_dir.exists()
 
 
+def test_publish_rejects_staged_csv_changed_after_audit(tmp_path):
+    paths, market, *_ = stage_fixture(tmp_path)
+    staged_es = paths.stage_root / "daily" / "ES.csv"
+    frame = pd.read_csv(staged_es)
+    frame.loc[0, "close"] = 999
+    frame.to_csv(staged_es, index=False)
+
+    with pytest.raises(PublishError, match="(?i)staged data changed after audit"):
+        publish_staged_repository(paths)
+
+    assert len(pd.read_csv(market / "daily" / "ES.csv")) == 1
+    assert not paths.canonical_archive_dir.exists()
+
+
 def test_publish_requires_passing_staged_summary(tmp_path):
     paths, market, *_ = stage_fixture(tmp_path)
     summary_path = paths.quality_stage / "merge_summary.json"
@@ -274,7 +289,7 @@ def test_publish_requires_passing_staged_summary(tmp_path):
     summary["status"] = "FAIL"
     summary_path.write_text(json.dumps(summary))
 
-    with pytest.raises(PublishError, match="status is not PASS"):
+    with pytest.raises(PublishError, match="changed after audit|status is not PASS"):
         publish_staged_repository(paths)
 
     assert len(pd.read_csv(market / "daily" / "ES.csv")) == 1

@@ -110,6 +110,18 @@ def _directory_manifest(path: Path) -> dict[str, object]:
     return {"status": "PASS", "root": str(path), "files": files}
 
 
+def _stage_file_records(stage_root: Path) -> list[dict[str, object]]:
+    return [
+        {
+            "path": path.relative_to(stage_root).as_posix(),
+            "size": path.stat().st_size,
+            "sha256": _sha256(path),
+        }
+        for path in sorted(stage_root.rglob("*"))
+        if path.is_file() and path.name != "stage_complete.json"
+    ]
+
+
 def _coverage_rows(stage_root: Path) -> list[dict[str, object]]:
     records = []
     for frequency in ("daily", "5min"):
@@ -384,6 +396,10 @@ def _stage_kibot_merge(
             "minimum_research_rows": minimum_research_rows,
         },
     )
+    _write_json(
+        stage_root / "stage_complete.json",
+        {"status": "PASS", "files": _stage_file_records(stage_root)},
+    )
     return paths
 
 
@@ -438,6 +454,30 @@ def publish_staged_repository(
     existing = [str(path) for path in destinations if path.exists()]
     if existing:
         raise PublishError(f"Archive destination already exists: {', '.join(existing)}")
+    completion_path = paths.stage_root / "stage_complete.json"
+    try:
+        completion = json.loads(completion_path.read_text())
+        expected_stage_files = {
+            item["path"]: (int(item["size"]), item["sha256"])
+            for item in completion["files"]
+        }
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise PublishError(f"Staged completion manifest is invalid: {error}") from error
+    if completion.get("status") != "PASS":
+        raise PublishError("Staged completion manifest status is not PASS")
+    actual_stage_files = {
+        path.relative_to(paths.stage_root).as_posix(): path
+        for path in paths.stage_root.rglob("*")
+        if path.is_file() and path.name != "stage_complete.json"
+    }
+    if set(actual_stage_files) != set(expected_stage_files):
+        raise PublishError("Staged data changed after audit: file set differs")
+    for relative_path, path in actual_stage_files.items():
+        expected_size, expected_hash = expected_stage_files[relative_path]
+        if path.stat().st_size != expected_size or _sha256(path) != expected_hash:
+            raise PublishError(
+                f"Staged data changed after audit: {relative_path}"
+            )
     summary_path = paths.quality_stage / "merge_summary.json"
     if not summary_path.exists():
         raise PublishError("Staged merge summary is missing")
@@ -470,6 +510,7 @@ def publish_staged_repository(
     vendor_moves = []
     sixty_moved = False
     quality_moved = False
+    completion_archived = False
     fault_hook = fault_hook or (lambda _point: None)
     try:
         paths.canonical_archive_dir.mkdir(parents=True)
@@ -509,11 +550,24 @@ def publish_staged_repository(
         paths.quality_destination.parent.mkdir(parents=True, exist_ok=True)
         rename(paths.quality_stage, paths.quality_destination)
         quality_moved = True
+        rename(
+            completion_path,
+            paths.quality_destination / "stage_complete.json",
+        )
+        completion_archived = True
+        paths.stage_root.rmdir()
+        stage_parent = paths.stage_root.parent
+        if stage_parent.exists() and not any(stage_parent.iterdir()):
+            stage_parent.rmdir()
         return {"status": "PASS", "market_data_dir": str(paths.market_data_dir)}
     except Exception as error:
         try:
             if quality_moved and paths.quality_destination.exists():
                 rename(paths.quality_destination, paths.quality_stage)
+            if completion_archived:
+                archived_completion = paths.quality_stage / "stage_complete.json"
+                if archived_completion.exists():
+                    rename(archived_completion, completion_path)
             for archived_zip, source_zip in reversed(vendor_moves):
                 if archived_zip.exists() and not source_zip.exists():
                     shutil.copy2(archived_zip, source_zip)
