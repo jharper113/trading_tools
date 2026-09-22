@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from export_amibroker_market_data import export_amibroker_market_data
 from download_market_data import DEFAULT_SYMBOLS, safe_symbol_filename
@@ -197,6 +198,69 @@ def test_export_writes_completion_manifest_after_both_csv_files(tmp_path):
     assert manifest["intraday"]["file"] == "5min.csv"
 
 
+def test_export_streams_small_chunks_in_deterministic_symbol_order(tmp_path):
+    market_data = tmp_path / "market_data"
+    for ticker, close in (("NQ", 200), ("ES", 100)):
+        write_market_data(
+            market_data / "daily" / f"{ticker}.csv",
+            [
+                {
+                    "timestamp": f"2026-01-0{day}T00:00:00Z",
+                    "date": f"2026-01-0{day}",
+                    "symbol": f"/{ticker}",
+                    "frequency": "daily",
+                    "open": close + day - 1,
+                    "high": close + day + 1,
+                    "low": close + day - 2,
+                    "close": close + day,
+                }
+                for day in (1, 2)
+            ],
+        )
+
+    result = export_amibroker_market_data(market_data, chunk_size=1)
+
+    exported = pd.read_csv(result["daily_path"])
+    assert exported[["ticker", "date"]].to_dict("records") == [
+        {"ticker": "ES", "date": "2026-01-01"},
+        {"ticker": "ES", "date": "2026-01-02"},
+        {"ticker": "NQ", "date": "2026-01-01"},
+        {"ticker": "NQ", "date": "2026-01-02"},
+    ]
+    assert result["manifest"]["daily"]["source_rows"] == 4
+    assert result["manifest"]["daily"]["exported_rows"] == 4
+
+
+def test_failed_stream_leaves_no_completion_manifest(tmp_path, monkeypatch):
+    market_data = tmp_path / "market_data"
+    write_market_data(
+        market_data / "daily" / "ES.csv",
+        [{
+            "timestamp": "2026-01-02T00:00:00Z",
+            "date": "2026-01-02",
+            "symbol": "/ES",
+            "frequency": "daily",
+            "open": 100,
+            "high": 102,
+            "low": 99,
+            "close": 101,
+        }],
+    )
+    output = tmp_path / "amibroker"
+    output.mkdir()
+    (output / "export_complete.json").write_text('{"status": "old"}')
+
+    def fail_read(*args, **kwargs):
+        raise OSError("injected stream failure")
+
+    monkeypatch.setattr("export_amibroker_market_data.pd.read_csv", fail_read)
+    with pytest.raises(OSError, match="injected"):
+        export_amibroker_market_data(market_data, output_dir=output, chunk_size=1)
+
+    assert not (output / "export_complete.json").exists()
+    assert not list(output.glob(".*.tmp"))
+
+
 def test_export_writes_separate_safe_instrument_property_files(tmp_path):
     market_data = tmp_path / "market_data"
     write_market_data(
@@ -348,7 +412,7 @@ def test_default_instrument_settings_cover_every_download_symbol():
     settings = pd.read_csv("amibroker_import/instrument_settings.csv")
     expected = {safe_symbol_filename(symbol) for symbol in DEFAULT_SYMBOLS}
 
-    assert set(settings["ticker"]) == expected
+    assert set(settings["ticker"]) == expected | {"RP"}
     assert not settings["ticker"].duplicated().any()
     assert settings["full_name"].notna().all()
     assert settings["round_lot_size"].eq(1).all()
@@ -358,14 +422,21 @@ def test_default_instrument_settings_cover_every_download_symbol():
     assert unsafe["point_value"].isna().all()
     assert unsafe.loc[["6J", "HG", "SI"], "tick_size"].isna().all()
 
+    rp = settings.set_index("ticker").loc["RP"]
+    assert rp["full_name"] == "Continuous Euro FX/British Pound"
+    assert rp["round_lot_size"] == 1
+    assert pd.isna(rp["point_value"])
+    assert pd.isna(rp["tick_size"])
+
 
 def test_powershell_importer_contains_configured_windows_paths():
     script = Path("amibroker_import/Import-MarketData.ps1").read_text()
+    script_lower = script.lower()
 
-    assert r"Z:\04_code\python\trading_tools\data\market_data" in script
+    assert r"z:\04_code\python\trading_tools\data\market_data" in script_lower
     assert r"C:\Program Files (x86)\AmiBroker\Broker.exe" in script
-    assert r"Z:\04_code\amibroker\databases\Harp_daily" in script
-    assert r"Z:\04_code\amibroker\databases\Harp_intraday" in script
+    assert r"z:\04_code\amibroker\databases\harp_daily" in script_lower
+    assert r"z:\04_code\amibroker\databases\harp_intraday" in script_lower
     assert 'New-Object -ComObject "Broker.Application"' in script
     assert "$ab.SaveDatabase()" in script
     assert "$InstrumentDetailsFile" in script

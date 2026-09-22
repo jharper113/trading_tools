@@ -553,12 +553,25 @@ def test_default_symbols_cover_liquid_futures_categories():
     assert "/MSL" in DEFAULT_SYMBOLS
     assert "/XRP" in DEFAULT_SYMBOLS
     assert "/MXP" in DEFAULT_SYMBOLS
+
+
+def test_rp_is_known_but_not_a_default_schwab_download():
+    assert FUTURES_PRODUCTS["/RP"]["category"] == "currency"
+    assert FUTURES_PRODUCTS["/RP"]["schwab_enabled"] is False
+    assert "/RP" not in DEFAULT_SYMBOLS
     assert "/MCA" in DEFAULT_SYMBOLS
     assert "SPY" in DEFAULT_SYMBOLS
 
 
 def test_default_symbols_include_all_configured_products():
-    assert set(FUTURES_PRODUCTS).issubset(DEFAULT_SYMBOLS)
+    enabled_futures = {
+        symbol
+        for symbol, product in FUTURES_PRODUCTS.items()
+        if product.get("schwab_enabled", True)
+    }
+    disabled_futures = set(FUTURES_PRODUCTS) - enabled_futures
+    assert enabled_futures.issubset(DEFAULT_SYMBOLS)
+    assert disabled_futures.isdisjoint(DEFAULT_SYMBOLS)
     assert set(EQUITY_PRODUCTS).issubset(DEFAULT_SYMBOLS)
     assert set(LEGACY_PRODUCTS).issubset(DEFAULT_SYMBOLS)
 

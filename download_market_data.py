@@ -133,6 +133,12 @@ FUTURES_PRODUCTS = {
         "exchange": "CME",
         "category": "currency",
     },
+    "/RP": {
+        "name": "Continuous Euro FX/British Pound",
+        "exchange": "Kibot",
+        "category": "currency",
+        "schwab_enabled": False,
+    },
     "/6M": {
         "name": "Mexican Peso",
         "exchange": "CME",
@@ -369,7 +375,11 @@ LEGACY_PRODUCTS = {
     },
 }
 DEFAULT_SYMBOLS = [
-    *FUTURES_PRODUCTS.keys(),
+    *(
+        symbol
+        for symbol, product in FUTURES_PRODUCTS.items()
+        if product.get("schwab_enabled", True)
+    ),
     *EQUITY_PRODUCTS.keys(),
     *LEGACY_PRODUCTS.keys(),
 ]

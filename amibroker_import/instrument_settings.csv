@@ -43,6 +43,7 @@ PL,Platinum,50,0.1,,,1,USD,
 RB,RBOB Gasoline,42000,0.0001,,,1,USD,
 RF___CCB,Mini Russell 1000 (legacy ICE contract),,0.1,,,1,USD,Point value omitted because it changed from 100 to 50 effective 2016-12-05.
 RTY,E-mini Russell 2000,50,0.1,,,1,USD,
+RP,Continuous Euro FX/British Pound,,,,,1,USD,Kibot-only continuous cross-rate series; contract specifications not yet verified.
 SB,ICE Sugar No. 11,1120,0.01,,,1,USD,
 SI,Silver,,,,,1,USD,Point value and tick size omitted because the stored series changes price scale at the Norgate-to-Schwab boundary.
 SOL,CME Solana,500,0.05,,,1,USD,
