@@ -668,6 +668,19 @@ def merge_market_data_sources(frames, reviewed_bars=None) -> MergeResult:
         review_table = review_table[
             [*group_columns, "_reviewed_source"]
         ].drop_duplicates(group_columns, keep="last")
+        review_keys = {
+            tuple(row[column] for column in group_columns)
+            for _, row in review_table.iterrows()
+        }
+        candidate_keys = {
+            tuple(row[column] for column in group_columns)
+            for _, row in candidates.iterrows()
+        }
+        missing_keys = review_keys - candidate_keys
+        if missing_keys:
+            raise KibotDataError(
+                f"Reviewed selection has no candidate rows: {sorted(missing_keys)[0]}"
+            )
         reviewed_candidates = candidates.merge(
             review_table, on=group_columns, how="inner"
         )
@@ -675,16 +688,28 @@ def merge_market_data_sources(frames, reviewed_bars=None) -> MergeResult:
             desired = reviewed_candidates["_reviewed_source"].astype(str)
             actual = reviewed_candidates["source"].astype(str)
             matches = reviewed_candidates[
-                actual.eq(desired) | actual.eq("reviewed_" + desired)
+                actual.eq(desired)
+                | actual.eq("reviewed_" + desired)
+                | (desired.eq("local") & actual.str.startswith("reviewed"))
             ].sort_values([*group_columns, "_frame_order", "_row_order"], kind="stable")
             matched = matches.drop_duplicates(group_columns, keep="first")
-            matched_keys = matched.set_index(group_columns).index
-            all_reviewed_keys = reviewed_candidates.set_index(group_columns).index
-            fallback = reviewed_candidates[
-                ~all_reviewed_keys.isin(matched_keys)
-            ].sort_values([*group_columns, "_frame_order", "_row_order"], kind="stable")
-            fallback = fallback.drop_duplicates(group_columns, keep="first")
-            reviewed_choices = pd.concat([matched, fallback], ignore_index=True)
+            matched_keys = {
+                tuple(row[column] for column in group_columns)
+                for _, row in matched.iterrows()
+            }
+            unavailable_keys = review_keys - matched_keys
+            if unavailable_keys:
+                key = sorted(unavailable_keys)[0]
+                desired_source = review_table.loc[
+                    review_table[group_columns]
+                    .eq(pd.Series(key, index=group_columns))
+                    .all(axis=1),
+                    "_reviewed_source",
+                ].iloc[0]
+                raise KibotDataError(
+                    f"Reviewed selection source {desired_source!r} is unavailable for {key}"
+                )
+            reviewed_choices = matched
             reviewed_keys = reviewed_choices.set_index(group_columns).index
             selection_keys = selections.set_index(group_columns).index
             selections = selections.loc[~selection_keys.isin(reviewed_keys)]

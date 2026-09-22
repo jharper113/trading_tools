@@ -184,6 +184,8 @@ def test_stage_rejects_required_series_without_research_window(tmp_path):
             "2026-09-22T12:00:00Z",
             minimum_research_rows={"daily": 2, "5min": 2},
         )
+    staging = market / ".staging"
+    assert not staging.exists() or not any(staging.iterdir())
 
 
 def test_stage_rejects_sparse_required_series_even_when_endpoints_span_window(tmp_path):
@@ -251,6 +253,32 @@ def test_publish_refuses_existing_archive_destination(tmp_path):
 
     with pytest.raises(PublishError, match="already exists"):
         publish_staged_repository(paths)
+
+
+def test_publish_rejects_source_zip_changed_after_staging(tmp_path):
+    paths, market, _, daily_zip, _ = stage_fixture(tmp_path)
+    with daily_zip.open("ab") as stream:
+        stream.write(b"changed-after-staging")
+
+    with pytest.raises(PublishError, match="changed after staging"):
+        publish_staged_repository(paths)
+
+    assert len(pd.read_csv(market / "daily" / "ES.csv")) == 1
+    assert not paths.canonical_archive_dir.exists()
+
+
+def test_publish_requires_passing_staged_summary(tmp_path):
+    paths, market, *_ = stage_fixture(tmp_path)
+    summary_path = paths.quality_stage / "merge_summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["status"] = "FAIL"
+    summary_path.write_text(json.dumps(summary))
+
+    with pytest.raises(PublishError, match="status is not PASS"):
+        publish_staged_repository(paths)
+
+    assert len(pd.read_csv(market / "daily" / "ES.csv")) == 1
+    assert not paths.canonical_archive_dir.exists()
 
 
 def test_publish_rolls_back_both_directories_on_second_stage_move_failure(tmp_path):

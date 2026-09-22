@@ -128,10 +128,11 @@ button updates `data/market_data/` and records reviewed bars in
 from being overwritten during later market-data refreshes. The dashboard can
 also download either a decisions CSV or a selected-bars CSV.
 
-The validated and repaired bar files stay in
+The active validated repository keeps daily and five-minute files in
 `data/market_data/<frequency>/<symbol>.csv`, such as
-`data/market_data/daily/ES.csv`, `data/market_data/5min/ES.csv`, and
-`data/market_data/60min/ES.csv`. Run `export_amibroker_market_data.py` or pass
+`data/market_data/daily/ES.csv` and `data/market_data/5min/ES.csv`. Older
+60-minute files are archived outside the active repository. Run
+`export_amibroker_market_data.py` or pass
 `--export-amibroker` to the downloader to create combined daily and 5-minute
 files plus instrument-property imports for the Windows importer in
 `amibroker_import/`. The maintained point values, tick sizes, and optional

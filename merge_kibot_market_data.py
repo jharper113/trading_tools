@@ -245,7 +245,7 @@ def _validate_staged_coverage(
                 )
 
 
-def stage_kibot_merge(
+def _stage_kibot_merge(
     daily_zip,
     intraday_zip,
     market_data_dir,
@@ -254,6 +254,7 @@ def stage_kibot_merge(
     *,
     free_bytes: int | None = None,
     minimum_research_rows: dict[str, int] | None = None,
+    stage_root: Path,
 ) -> MigrationPaths:
     """Build and audit a merged repository without changing active data."""
     market_data_dir = Path(market_data_dir)
@@ -278,7 +279,6 @@ def stage_kibot_merge(
         raise SpaceError(f"Insufficient free space: need {required} bytes, have {available}")
 
     archive_date = acquired_at[:10]
-    stage_root = market_data_dir / ".staging" / f"kibot_merge_{archive_date}_{uuid.uuid4().hex}"
     quality_stage = stage_root / "quality"
     paths = MigrationPaths(
         market_data_dir=market_data_dir,
@@ -387,6 +387,41 @@ def stage_kibot_merge(
     return paths
 
 
+def stage_kibot_merge(
+    daily_zip,
+    intraday_zip,
+    market_data_dir,
+    archive_root,
+    acquired_at: str,
+    *,
+    free_bytes: int | None = None,
+    minimum_research_rows: dict[str, int] | None = None,
+) -> MigrationPaths:
+    """Build and audit a merged repository without changing active data."""
+    market_data_dir = Path(market_data_dir)
+    stage_parent = market_data_dir / ".staging"
+    stage_root = stage_parent / (
+        f"kibot_merge_{acquired_at[:10]}_{uuid.uuid4().hex}"
+    )
+    try:
+        return _stage_kibot_merge(
+            daily_zip,
+            intraday_zip,
+            market_data_dir,
+            archive_root,
+            acquired_at,
+            free_bytes=free_bytes,
+            minimum_research_rows=minimum_research_rows,
+            stage_root=stage_root,
+        )
+    except Exception:
+        if stage_root.exists():
+            shutil.rmtree(stage_root)
+        if stage_parent.exists() and not any(stage_parent.iterdir()):
+            stage_parent.rmdir()
+        raise
+
+
 def publish_staged_repository(
     paths: MigrationPaths,
     *,
@@ -403,8 +438,32 @@ def publish_staged_repository(
     existing = [str(path) for path in destinations if path.exists()]
     if existing:
         raise PublishError(f"Archive destination already exists: {', '.join(existing)}")
-    if not (paths.quality_stage / "merge_summary.json").exists():
+    summary_path = paths.quality_stage / "merge_summary.json"
+    if not summary_path.exists():
         raise PublishError("Staged merge summary is missing")
+    try:
+        summary = json.loads(summary_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise PublishError(f"Staged merge summary is invalid: {error}") from error
+    if summary.get("status") != "PASS":
+        raise PublishError("Staged merge summary status is not PASS")
+
+    manifest_path = paths.quality_stage / "source_manifest.json"
+    try:
+        source_manifest = json.loads(manifest_path.read_text())
+        expected_hashes = {
+            item["frequency"]: item["sha256"]
+            for item in source_manifest["archives"]
+        }
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise PublishError(f"Staged source manifest is invalid: {error}") from error
+    for frequency, source in (("daily", paths.daily_zip), ("5min", paths.intraday_zip)):
+        try:
+            actual_hash = _sha256(source)
+        except OSError as error:
+            raise PublishError(f"Unable to verify staged source {source}: {error}") from error
+        if expected_hashes.get(frequency) != actual_hash:
+            raise PublishError(f"{source} changed after staging")
 
     moved_old = []
     installed_new = []
