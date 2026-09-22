@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import webbrowser
 
 import pandas as pd
 import pytest
@@ -103,7 +104,7 @@ def cli_experiment_fixture(tmp_path):
 
 def test_analyze_job_writes_detailed_reports_inside_run_without_browser(valid_job, monkeypatch):
     opened = []
-    monkeypatch.setattr(runner.webbrowser, "open", lambda url: opened.append(url))
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
     result = analyze_job(valid_job, valid_job["run_path"] / "Analysis_Reports")
     assert result["status"] == "COMPLETE"
     assert Path(result["html_path"]).is_file()
@@ -113,7 +114,7 @@ def test_analyze_job_writes_detailed_reports_inside_run_without_browser(valid_jo
 
 
 def test_library_analysis_never_opens_browser(monkeypatch, valid_job):
-    monkeypatch.setattr(runner.webbrowser, "open", lambda *_: pytest.fail("browser opened"))
+    monkeypatch.setattr(webbrowser, "open", lambda *_: pytest.fail("browser opened"))
     analyze_job(valid_job, valid_job["run_path"] / "Analysis_Reports")
 
 
