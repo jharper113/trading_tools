@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,13 +44,9 @@ def read_project_context(project_path):
         timeframe = f"Intraday_{interval // 60}m"
     else:
         timeframe = f"Interval_{interval}s"
-    is_start = _text(root, "ISStartDate")
-    project_mode = (
-        "wfa"
-        if "wfa" in project_path.stem.lower()
-        or (is_start and is_start != "1970-01-01")
-        else "optimization"
-    )
+    labels = set(re.split(r"[^a-z0-9]+", project_path.stem.lower()))
+    modes = labels & {"wfa", "optimization"}
+    project_mode = modes.pop() if len(modes) == 1 else "unknown"
     return ProjectContext(
         project_path=project_path,
         formula_path=formula_path,

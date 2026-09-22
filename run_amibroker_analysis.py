@@ -46,7 +46,7 @@ def _profile_path(context):
 def run_analysis(project_path, results_dir, output_root, registry_path=DEFAULT_REGISTRY, core_symbols=None):
     context = read_project_context(project_path)
     result_type = detect_result_type(results_dir)
-    if context.project_mode != result_type:
+    if context.project_mode != "unknown" and context.project_mode != result_type:
         raise ValueError(
             f"AmiBroker project is {context.project_mode}, but the exports are "
             f"{result_type}. Select the matching APX project and result folder."

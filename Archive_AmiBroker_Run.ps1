@@ -76,6 +76,9 @@ try {
         $project.Load($snapshot)
         $formulaPath = Project-Value $project 'FormulaPath'
         $strategy = [IO.Path]::GetFileNameWithoutExtension(($formulaPath -split '[\\/]')[-1])
+        if ($null -ne $cfg.PSObject.Properties['experiment'] -and [string]$cfg.experiment.strategy_id) {
+            $strategy = [string]$cfg.experiment.strategy_id
+        }
         if (-not $strategy) { throw 'APX has no strategy FormulaPath' }
         $periodicity = Project-Value $project 'Periodicity'
         $interval = Project-Value $project 'ChartInterval'
@@ -125,7 +128,12 @@ try {
             }
         }
         Save-Json $manifest $manifestPath
-        Save-Json ([ordered]@{run_dir=$runDir; manifest_path=$manifestPath}) $contextPath
+        $attemptId = ''; $experimentJobId = ''
+        if ($null -ne $cfg.PSObject.Properties['experiment']) {
+            $attemptId = [string]$cfg.experiment.attempt_id
+            $experimentJobId = [string]$cfg.experiment.job_id
+        }
+        Save-Json ([ordered]@{run_dir=$runDir; manifest_path=$manifestPath; attempt_id=$attemptId; job_id=$experimentJobId}) $contextPath
         Write-Output "Run archive: $runDir"
     }
     else {

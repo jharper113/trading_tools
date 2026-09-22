@@ -45,6 +45,7 @@ try {
     if ($CsvFixture) {
         Copy-Item -LiteralPath $CsvFixture -Destination $csvPath -Force
     } else {
+        if (Test-Path -LiteralPath $csvPath) { Remove-Item -LiteralPath $csvPath -Force }
         foreach ($required in @($Broker, $Database, $ProjectTemplate, (Join-Path $PSScriptRoot 'AmiBroker_Timezone_Preflight.afl'))) {
             if (-not (Test-Path -LiteralPath $required)) { throw "Required preflight input does not exist: $required" }
         }
@@ -68,7 +69,7 @@ try {
         Add-BatchStep $batch $root 'LoadDatabase' $Database
         Add-BatchStep $batch $root 'LoadProject' $projectPath
         Add-BatchStep $batch $root 'SetCurrentSymbol' 'ES'
-        Add-BatchStep $batch $root 'Scan' ''
+        Add-BatchStep $batch $root 'Explore' ''
         Add-BatchStep $batch $root 'Export' $csvPath
         $batchPath = Join-Path $WorkDir 'timezone_preflight.abb'
         $batch.Save($batchPath)

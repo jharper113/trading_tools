@@ -23,6 +23,10 @@ def test_runner_and_archive_contract_are_present():
     assert "PublishAudit" in archiver
     assert "audit_exports" in archiver
     assert "experiment_artifacts" in archiver
+    assert "attempt_id" in runner
+    assert "attempt_id" in archiver
+    assert "Validate-FullUnlock" in runner
+    assert "Builder exited" not in runner
 
 
 def test_runner_rejects_compact_matrix_for_full_mode_without_unlock(tmp_path):

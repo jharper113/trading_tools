@@ -6,12 +6,14 @@ import pandas as pd
 import pytest
 
 from amibroker_experiment_results import (
+    _verify_experiment_provenance,
     admit_jobs,
     evaluate_sectors,
     load_experiment,
     parse_number,
     summarize_job,
 )
+from amibroker_paths import resolve_portable_path
 
 
 def _sha(path):
@@ -206,3 +208,50 @@ def test_nonfinite_car_mdd_cannot_win(tmp_path, bad):
 @pytest.mark.parametrize("text,expected", [("1,234.5", 1234.5), ("12.5%", 12.5)])
 def test_parse_number_accepts_amibroker_formatting(text, expected):
     assert parse_number(text) == expected
+
+
+def test_windows_z_drive_paths_resolve_on_linux(monkeypatch):
+    monkeypatch.setenv("AMIBROKER_WINDOWS_ROOT", "/mnt/harp")
+    assert resolve_portable_path(r"Z:\04_Code\run.json") == Path("/mnt/harp/04_Code/run.json")
+
+
+def test_current_archive_provenance_rejects_modified_generated_formula(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    formula = run / "formula.afl"
+    formula.write_text("Buy = 1;")
+    project = run / "project.apx"
+    project.write_text("<AnalysisDoc><FormulaContent>Buy = 1;</FormulaContent></AnalysisDoc>")
+    matrix = tmp_path / "matrix.json"
+    source = tmp_path / "source.afl"
+    profile = tmp_path / "profile.json"
+    batch = run / "batch.abb"
+    config = run / "batch.archive.json"
+    for path, text in ((matrix, "{}"), (source, "Buy = 1;"), (profile, "{}"),
+                       (batch, "<batch/>"), (config, "{}")):
+        path.write_text(text)
+    build = tmp_path / "build_manifest.json"
+    build.write_text(json.dumps({
+        "job_id": "job", "attempt_id": "attempt-1", "outputs": {
+            "formula": {"path": str(formula), "sha256": _sha(formula)},
+            "project": {"path": str(project), "sha256": _sha(project)},
+            "batch": {"path": str(batch), "sha256": _sha(batch)},
+            "archive_config": {"path": str(config), "sha256": _sha(config)},
+        },
+    }))
+    artifacts = []
+    for name, path in (("matrix_path", matrix), ("source_afl", source),
+                       ("analysis_profile", profile), ("build_manifest", build)):
+        artifacts.append({"name": name, "path": str(path), "sha256": _sha(path)})
+    run_manifest = {
+        "schema_version": 2, "project_sha256": _sha(project),
+        "experiment": {"job_id": "job", "attempt_id": "attempt-1", "source_sha256": _sha(source),
+                       "matrix_sha256": _sha(matrix)},
+        "experiment_artifacts": artifacts,
+    }
+    job = {"job_id": "job", "source_sha256": _sha(source)}
+    experiment = {"matrix_sha256": _sha(matrix)}
+    _verify_experiment_provenance(run, run_manifest, job, experiment)
+    formula.write_text("Buy = 0;")
+    with pytest.raises(ValueError, match="formula"):
+        _verify_experiment_provenance(run, run_manifest, job, experiment)

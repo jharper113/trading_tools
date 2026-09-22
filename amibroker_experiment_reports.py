@@ -16,8 +16,6 @@ def analyze_job(job: dict, output_root: Path) -> dict:
             job["run_path"],
             output_root,
             core_symbols=job.get("core_symbols", []),
-            research_start="2009-01-01",
-            research_end="2019-01-01",
         )
         report = {
             "job_id": job["job_id"],

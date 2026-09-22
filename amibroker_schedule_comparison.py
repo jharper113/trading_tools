@@ -89,6 +89,9 @@ def compare_optimization_pair(
         if native_parameters != low_parameters or not left_grid or left_grid != right_grid:
             output.append(_not_comparable(base, "Parameter grids do not have full shared coverage"))
             continue
+        if not metadata.get("same_source_policy", False):
+            output.append(_not_comparable(base, "Schedules do not share source and policy provenance"))
+            continue
         required = {"CAR/MDD", "Profit Factor", "Max. Sys % Drawdown"}
         if not required.issubset(left) or not required.issubset(right):
             output.append(_not_comparable(base, "Required optimization metrics are missing"))
@@ -99,7 +102,8 @@ def compare_optimization_pair(
         low_pf = _median(right, "Profit Factor")
         native_dd = abs(_median(left, "Max. Sys % Drawdown"))
         low_dd = abs(_median(right, "Max. Sys % Drawdown"))
-        if not math.isfinite(low_car) or low_car <= 0 or not math.isfinite(low_dd) or low_dd <= 0:
+        metrics = (native_car, low_car, native_pf, low_pf, native_dd, low_dd)
+        if not all(math.isfinite(value) for value in metrics) or low_car <= 0 or low_dd <= 0:
             result = _not_comparable(base, "Low-touch baseline is nonpositive or nonfinite")
             result.update(native_median_car_mdd=native_car, low_touch_median_car_mdd=low_car)
             output.append(result)
@@ -113,12 +117,20 @@ def compare_optimization_pair(
             and relative_car_mdd >= .25
             and (profit_factor >= .10 or drawdown >= .15)
         )
-        recommendation = "FREQUENT_ENTRY_WFA_CANDIDATE" if material else "LOW_TOUCH"
-        reason = (
-            "Native schedule clears both material-improvement layers"
-            if material
-            else "Low-touch schedule remains preferred"
+        low_touch_pass = (
+            _metadata_flag(metadata, "low_touch_individual_pass", symbol)
+            and _metadata_flag(metadata, "low_touch_sector_pass", symbol)
         )
+        recommendation = (
+            "FREQUENT_ENTRY_WFA_CANDIDATE" if material
+            else "LOW_TOUCH" if low_touch_pass
+            else "NO_WFA_CANDIDATE"
+        )
+        reason = {
+            "FREQUENT_ENTRY_WFA_CANDIDATE": "Native schedule clears both material-improvement layers",
+            "LOW_TOUCH": "Low-touch schedule passes its gates and remains preferred",
+            "NO_WFA_CANDIDATE": "Neither schedule qualifies under the paired schedule policy",
+        }[recommendation]
         output.append(
             {
                 **base,

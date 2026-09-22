@@ -19,6 +19,10 @@ SOURCE_0063 = Path(
 
 def test_builder_script_exists():
     assert BUILDER.is_file()
+    text = BUILDER.read_text(encoding="utf-8")
+    assert "'Explore'" in text
+    assert "GENERATED EXPERIMENT PROVENANCE" in text
+    assert "AttemptId" in text
 
 
 def _project(path: Path):
@@ -125,6 +129,8 @@ def ps_builder():
                 str(destination),
                 "-ReportsRoot",
                 str(tmp_path / "reports"),
+                "-AttemptId",
+                "pilot-1-attempt-1",
             ],
             text=True,
             capture_output=True,
@@ -145,6 +151,8 @@ def test_builder_keeps_source_immutable_and_applies_only_cutoff(tmp_path, ps_bui
     manifest = json.loads((built / "build_manifest.json").read_text(encoding="utf-8-sig"))
     assert manifest["adapter"] == "entry_cutoff_110000"
     assert manifest["replacement_count"] == 2
+    assert manifest["attempt_id"] == "pilot-1-attempt-1"
+    assert "GENERATED EXPERIMENT PROVENANCE" in formula
 
 
 def test_builder_sets_interval_dates_and_embeds_generated_formula(tmp_path, ps_builder):
@@ -158,7 +166,7 @@ def test_builder_sets_interval_dates_and_embeds_generated_formula(tmp_path, ps_b
     batch = ET.parse(built / "batch.abb").getroot()
     actions = [node.findtext("Action") for node in batch]
     assert actions.count("Optimize") == 2
-    assert actions.count("Scan") == 2
+    assert actions.count("Explore") == 2
 
 
 @pytest.mark.parametrize("mutation", ["stale_hash", "missing_anchor", "duplicate_anchor"])
@@ -182,7 +190,7 @@ def test_builder_fails_closed_without_runnable_artifacts(tmp_path, ps_builder, m
         matrix.write_text(json.dumps(data))
     shutil.rmtree(destination)
     rerun = subprocess.run(
-        [PWSH, "-NoProfile", "-File", str(BUILDER), "-Matrix", str(matrix), "-JobId", "test-job", "-Destination", str(destination), "-ReportsRoot", str(tmp_path / "reports")],
+        [PWSH, "-NoProfile", "-File", str(BUILDER), "-Matrix", str(matrix), "-JobId", "test-job", "-Destination", str(destination), "-ReportsRoot", str(tmp_path / "reports"), "-AttemptId", "pilot-1-attempt-2"],
         text=True,
         capture_output=True,
     )

@@ -13,6 +13,10 @@ The analyzer writes `Analysis/experiment_summary.json`, two CSV extracts, and
 `<experiment-id>_Optimization_Review.xlsx`. Detailed HTML and JSON reports stay
 inside each archived run's `Analysis_Reports` directory.
 
+On Linux, recorded `Z:\...` paths map by default to
+`/home/jon/Dropbox/HarpFolders/...`. Set `AMIBROKER_WINDOWS_ROOT` if the Dropbox
+mirror is mounted elsewhere.
+
 The workbook contains six sheets:
 
 - **Passed Candidates** lists the sector representatives selected for WFA.
@@ -67,6 +71,8 @@ powershell.exe -ExecutionPolicy Bypass -File `
   -ReportsRoot "Z:\04_Code\Amibroker\Reports"
 ```
 
-The unlock is valid only for the exact expanded matrix and passing audit hashes.
+The unlock is valid only for the exact expanded matrix, passing audit, analysis
+profiles, project templates, policies, and runner/analyzer code hashes. Full-run
+resume revalidates the stored authorization before continuing.
 Run the real five-job Windows pilot and obtain an audit `PASS` before starting
 the full library.

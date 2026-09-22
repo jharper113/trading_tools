@@ -54,8 +54,12 @@ function Validate-FullUnlock([string]$UnlockPath, [string]$MatrixPath, [string]$
     if ($null -eq $unlockValue.PSObject.Properties['full_matrix_sha256'] -or [string]$unlockValue.full_matrix_sha256 -ne $MatrixHash) {
         throw 'Unlock does not authorize this expanded full matrix hash'
     }
-    if ($null -ne $unlockValue.PSObject.Properties['full_matrix_path_windows'] -and [string]$unlockValue.full_matrix_path_windows -ne $MatrixPath) {
-        throw 'Unlock expanded matrix path mismatch'
+    if ($null -eq $unlockValue.PSObject.Properties['authorization_hashes']) { throw 'Unlock has no authorization evidence hashes' }
+    foreach ($property in @($unlockValue.authorization_hashes.PSObject.Properties)) {
+        $entry = $property.Value
+        $path = if ($null -ne $entry.PSObject.Properties['path_windows'] -and [string]$entry.path_windows) { [string]$entry.path_windows } else { [string]$entry.path }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Authorization evidence is missing: $($property.Name)" }
+        if ((File-Hash $path) -ne [string]$entry.sha256) { throw "Authorization evidence changed: $($property.Name)" }
     }
     return $unlockValue
 }
@@ -68,10 +72,22 @@ try {
         $Mode = [string]$experiment.mode
         $matrixPath = [string]$experiment.matrix_path
         if ((File-Hash $matrixPath) -ne [string]$experiment.matrix_sha256) { throw 'Experiment matrix hash changed since the run started' }
+        if ($Mode -eq 'full') {
+            if (-not $Unlock -and $null -ne $experiment.PSObject.Properties['authorization']) { $Unlock = [string]$experiment.authorization.unlock_path }
+            if ($null -eq $experiment.PSObject.Properties['authorization'] -or (File-Hash $Unlock) -ne [string]$experiment.authorization.unlock_sha256) { throw 'Full-run authorization record is missing or changed' }
+            [void](Validate-FullUnlock $Unlock $matrixPath (File-Hash $matrixPath))
+        }
         foreach ($state in @($experiment.jobs)) {
             if ($state.status -eq 'RUNNING') {
                 $state.status = 'INTERRUPTED'
                 $state.error = 'Controller stopped before the attempt completed'
+                foreach ($attempt in @($state.attempts)) {
+                    if ($attempt.status -eq 'RUNNING') {
+                        $attempt.status = 'INTERRUPTED'
+                        $attempt.error = 'Controller stopped before the attempt completed'
+                        $attempt.completed_utc = [DateTime]::UtcNow.ToString('o')
+                    }
+                }
             }
         }
         $experiment.status = 'RUNNING'
@@ -86,8 +102,10 @@ try {
         if ($null -eq $modeProperty) { throw "Experiment matrix has no mode: $Mode" }
         $selectedIds = @($modeProperty.Value)
         if (@($selectedIds | Group-Object | Where-Object Count -gt 1).Count) { throw "Matrix mode $Mode contains duplicate jobs" }
+        $authorization = $null
         if ($Mode -eq 'full') {
             [void](Validate-FullUnlock $Unlock $matrixSource (File-Hash $matrixSource))
+            $authorization = [ordered]@{unlock_path=(Resolve-Path -LiteralPath $Unlock).Path; unlock_sha256=File-Hash $Unlock}
             if ($selectedIds -contains '$catalog_supported') { throw 'Full mode requires the expanded matrix emitted by the passing pilot audit' }
         }
         if (-not $ExperimentId) {
@@ -116,7 +134,7 @@ try {
             started_utc = [DateTime]::UtcNow.ToString('o'); updated_utc = [DateTime]::UtcNow.ToString('o')
             matrix_path = $matrixPath; matrix_sha256 = File-Hash $matrixPath
             timezone = 'America/Detroit'; research_window = $matrixValue.research_window
-            preflight = $null; policy_hashes = [ordered]@{}; jobs = $jobs
+            preflight = $null; policy_hashes = [ordered]@{}; authorization=$authorization; jobs = $jobs
         }
         if ($null -ne $matrixValue.PSObject.Properties['shared_policy_windows']) {
             $policy = [string]$matrixValue.shared_policy_windows
@@ -166,13 +184,13 @@ try {
         }
         $job = $matrixValue.jobs.PSObject.Properties[[string]$state.job_id].Value
         $attemptNumber = @($state.attempts).Count + 1
+        $attemptId = "$($experiment.experiment_id)-$($state.job_id)-attempt-$attemptNumber"
         $attemptDir = Join-Path (Join-Path (Join-Path (Split-Path -Parent $manifestPath) 'jobs') ([string]$state.job_id)) "attempt-$attemptNumber"
-        $attempt = [ordered]@{number=$attemptNumber; status='RUNNING'; started_utc=[DateTime]::UtcNow.ToString('o'); completed_utc=$null; build_dir=$attemptDir; error=$null}
+        $attempt = [ordered]@{number=$attemptNumber; attempt_id=$attemptId; status='RUNNING'; started_utc=[DateTime]::UtcNow.ToString('o'); completed_utc=$null; build_dir=$attemptDir; error=$null}
         $state.attempts = @($state.attempts) + @($attempt)
         $state.status = 'RUNNING'; $state.error = $null; $experiment.updated_utc = [DateTime]::UtcNow.ToString('o'); Save-Json $experiment $manifestPath
         try {
-            & (Join-Path $PSScriptRoot 'Build-AmiBroker-ExperimentJob.ps1') -Matrix $matrixPath -JobId ([string]$state.job_id) -Destination $attemptDir -ReportsRoot $ReportsRoot
-            if ($LASTEXITCODE -ne 0) { throw "Job builder exited $LASTEXITCODE" }
+            & (Join-Path $PSScriptRoot 'Build-AmiBroker-ExperimentJob.ps1') -Matrix $matrixPath -JobId ([string]$state.job_id) -Destination $attemptDir -ReportsRoot $ReportsRoot -AttemptId $attemptId
             $state.build_manifest_path = Join-Path $attemptDir 'build_manifest.json'
             & $Broker '/runbatch' (Join-Path $attemptDir 'batch.abb') '/exit'
             if ($LASTEXITCODE -ne 0) { throw "AmiBroker exited $LASTEXITCODE" }
@@ -181,6 +199,9 @@ try {
             if (-not (Test-Path -LiteralPath $contextPath -PathType Leaf)) { throw 'AmiBroker did not publish archive context' }
             $context = Read-Json $contextPath
             $run = Assert-RunManifest ([string]$context.manifest_path) @($job.symbols)
+            if ([string]$context.attempt_id -ne $attemptId -or [string]$context.job_id -ne [string]$state.job_id) { throw 'Archive context does not belong to this attempt' }
+            if ([string]$run.experiment.attempt_id -ne $attemptId -or [string]$run.experiment.job_id -ne [string]$state.job_id) { throw 'Run manifest does not belong to this attempt' }
+            if ([string]$run.experiment.build_manifest -ne [string]$state.build_manifest_path) { throw 'Run manifest build identity mismatch' }
             $state.run_manifest_path = [string]$context.manifest_path
             $state.run_manifest_sha256 = File-Hash ([string]$context.manifest_path)
             $state.entry_audit_hashes = @($run.audit_exports | ForEach-Object { [ordered]@{symbol=$_.symbol; sha256=$_.sha256} })

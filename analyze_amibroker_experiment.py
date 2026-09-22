@@ -7,12 +7,13 @@ import argparse
 import json
 import math
 import shutil
+import uuid
 from pathlib import Path
 
 import pandas as pd
 
 from amibroker_experiment_reports import analyze_job
-from amibroker_experiment_results import admit_jobs, evaluate_sectors, load_experiment, summarize_job
+from amibroker_experiment_results import admit_jobs, evaluate_sectors, load_experiment, sha256, summarize_job
 from amibroker_experiment_workbook import write_workbook
 from amibroker_schedule_comparison import compare_optimization_pair
 
@@ -61,6 +62,9 @@ def _comparisons(jobs: list[dict], records: list[dict]) -> list[dict]:
         individual = {row["symbol"]: row["individual_pass"] for row in native_records}
         sector = {row["symbol"]: row["sector_pass"] for row in native_records}
         for low_touch in alternatives:
+            low_records = [row for row in records if row["job_id"] == low_touch["job_id"]]
+            low_individual = {row["symbol"]: row["individual_pass"] for row in low_records}
+            low_sector = {row["symbol"]: row["sector_pass"] for row in low_records}
             native_window = native.get("research_window", {})
             low_window = low_touch.get("research_window", {})
             result.extend(compare_optimization_pair(
@@ -74,6 +78,12 @@ def _comparisons(jobs: list[dict], records: list[dict]) -> list[dict]:
                     "low_touch_research_end": low_window.get("end"),
                     "native_individual_pass": individual,
                     "native_sector_pass": sector,
+                    "low_touch_individual_pass": low_individual,
+                    "low_touch_sector_pass": low_sector,
+                    "same_source_policy": (
+                        native["source_hash"] == low_touch["source_hash"]
+                        and sha256(native["analysis_profile"]) == sha256(low_touch["analysis_profile"])
+                    ),
                 }
             ))
     return result
@@ -86,24 +96,38 @@ def build_summary(manifest_path: Path) -> dict:
     records = []
     reports = {}
     analysis_failures = []
+    successful_jobs = []
     for job in jobs:
-        profile = _load_json(job["analysis_profile"])
-        records.extend(summarize_job(job, profile, groups))
         report = analyze_job(job, Path(job["run_path"]) / "Analysis_Reports")
         reports[job["job_id"]] = report
-        if report["status"] != "COMPLETE":
+        if report["status"] == "COMPLETE":
+            try:
+                profile = _load_json(job["analysis_profile"])
+                records.extend(summarize_job(job, profile, groups))
+                successful_jobs.append(job)
+            except Exception as exc:
+                report = {**report, "status": "FAILED", "error": str(exc)}
+                reports[job["job_id"]] = report
+                analysis_failures.append({"job_id": job["job_id"], "reason": str(exc)})
+        else:
             analysis_failures.append({"job_id": job["job_id"], "reason": report["error"]})
     records = evaluate_sectors(records)
     for row in records:
         report = reports.get(row["job_id"], {})
         row["html_path"] = report.get("html_path")
         row["json_path"] = report.get("json_path")
-    comparisons = _comparisons(jobs, records)
+    comparisons = _comparisons(successful_jobs, records)
     passed = [row for row in records if row["selected_representative"]]
     return {
         "schema_version": 1,
         "experiment_id": experiment["experiment_id"],
         "experiment_manifest": str(Path(manifest_path).resolve()),
+        "matrix_sha256": experiment.get("matrix_sha256"),
+        "research_window": experiment.get("_matrix", {}).get("research_window", {}),
+        "timezone": experiment.get("_matrix", {}).get("timezone"),
+        "preflight": experiment.get("preflight"),
+        "policy_hashes": experiment.get("policy_hashes", {}),
+        "audit_status": "PENDING",
         "job_counts": {
             "total": len(experiment.get("jobs", [])),
             "admitted": len(jobs),
@@ -122,11 +146,10 @@ def build_summary(manifest_path: Path) -> dict:
 
 def write_outputs(summary: dict, output_dir: Path) -> Path:
     output_dir = Path(output_dir).resolve()
-    temporary = output_dir.with_name(output_dir.name + ".tmp")
     backup = output_dir.with_name(output_dir.name + ".previous")
-    for path in (temporary, backup):
-        if path.exists():
-            shutil.rmtree(path)
+    if not output_dir.exists() and backup.exists():
+        backup.rename(output_dir)
+    temporary = output_dir.with_name(output_dir.name + f".tmp.{uuid.uuid4().hex}")
     temporary.mkdir(parents=True)
     safe = _json_value(summary)
     try:
@@ -142,12 +165,15 @@ def write_outputs(summary: dict, output_dir: Path) -> Path:
         workbook_name = f"{summary['experiment_id']}_Optimization_Review.xlsx"
         write_workbook(safe, temporary / workbook_name)
         if output_dir.exists():
+            if backup.exists():
+                shutil.rmtree(backup)
             output_dir.rename(backup)
         temporary.rename(output_dir)
         if backup.exists():
             shutil.rmtree(backup)
     except Exception as exc:
-        (temporary / "output_error.txt").write_text(str(exc), encoding="utf-8")
+        if temporary.exists():
+            (temporary / "output_error.txt").write_text(str(exc), encoding="utf-8")
         if backup.exists() and not output_dir.exists():
             backup.rename(output_dir)
         raise

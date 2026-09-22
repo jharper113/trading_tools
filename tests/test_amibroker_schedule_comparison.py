@@ -31,6 +31,9 @@ def _metadata(**updates):
         "low_touch_research_end": "2019-01-01",
         "native_individual_pass": True,
         "native_sector_pass": True,
+        "low_touch_individual_pass": True,
+        "low_touch_sector_pass": True,
+        "same_source_policy": True,
     }
     value.update(updates)
     return value
@@ -89,6 +92,24 @@ def test_failed_gate_and_nonpositive_baseline_are_handled():
     )[0]
     assert failed["recommendation"] == "LOW_TOUCH"
     assert invalid["recommendation"] == "NOT COMPARABLE"
+
+
+def test_low_touch_must_pass_its_own_gates():
+    result = compare_optimization_pair(
+        _rows(car_mdd=.50, pf=1.20, drawdown=20),
+        _rows(car_mdd=.60, pf=.80, drawdown=20),
+        _metadata(low_touch_individual_pass=False, low_touch_sector_pass=False),
+    )[0]
+    assert result["recommendation"] == "NO_WFA_CANDIDATE"
+
+
+def test_nonfinite_pair_metrics_are_not_comparable():
+    result = compare_optimization_pair(
+        _rows(car_mdd=.75, pf=float("inf"), drawdown=18),
+        _rows(car_mdd=.60, pf=1.20, drawdown=20),
+        _metadata(low_touch_individual_pass=True, low_touch_sector_pass=True),
+    )[0]
+    assert result["recommendation"] == "NOT COMPARABLE"
 
 
 def test_declared_research_dates_must_match():

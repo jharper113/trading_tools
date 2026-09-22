@@ -10,6 +10,7 @@ import pytest
 from amibroker_experiment_reports import analyze_job
 from amibroker_analysis_common import read_project_context
 import run_amibroker_analysis as runner
+import analyze_amibroker_experiment as experiment_analyzer
 
 
 def _sha(path):
@@ -166,3 +167,49 @@ def test_cli_is_rerunnable_and_never_promotes_corrupt_job(cli_experiment_fixture
     assert (output / "all_symbol_results.csv").is_file()
     assert (output / "schedule_comparisons.csv").is_file()
     assert (output / "experiment-1_Optimization_Review.xlsx").is_file()
+
+
+def test_failed_detailed_analysis_is_excluded_without_stopping_other_jobs(tmp_path, monkeypatch):
+    jobs = [
+        {"job_id": "good", "run_path": tmp_path / "good", "analysis_profile": tmp_path / "p.json"},
+        {"job_id": "bad", "run_path": tmp_path / "bad", "analysis_profile": tmp_path / "p.json"},
+    ]
+    for job in jobs:
+        job["run_path"].mkdir()
+    monkeypatch.setattr(experiment_analyzer, "load_experiment", lambda _: {
+        "experiment_id": "x", "jobs": [{}, {}]
+    })
+    monkeypatch.setattr(experiment_analyzer, "admit_jobs", lambda _: (jobs, []))
+    monkeypatch.setattr(experiment_analyzer, "_load_json", lambda _: {
+        "economic_groups": {}, "thresholds": {"core": {}}
+    })
+    monkeypatch.setattr(experiment_analyzer, "analyze_job", lambda job, _: {
+        "job_id": job["job_id"], "status": "FAILED" if job["job_id"] == "bad" else "COMPLETE",
+        "decision": None, "error": "broken" if job["job_id"] == "bad" else None,
+    })
+    monkeypatch.setattr(experiment_analyzer, "summarize_job", lambda job, *_: [{
+        "job_id": job["job_id"], "selected_representative": True,
+    }])
+    monkeypatch.setattr(experiment_analyzer, "evaluate_sectors", lambda rows: rows)
+    captured = []
+    monkeypatch.setattr(experiment_analyzer, "_comparisons", lambda good_jobs, _: captured.extend(good_jobs) or [])
+    summary = experiment_analyzer.build_summary(tmp_path / "manifest.json")
+    assert [row["job_id"] for row in summary["all_symbol_results"]] == ["good"]
+    assert [job["job_id"] for job in captured] == ["good"]
+    assert summary["failed_or_incomplete"] == [{"job_id": "bad", "reason": "broken"}]
+
+
+def test_output_rerun_recovers_previous_before_failed_replacement(tmp_path, monkeypatch):
+    output = tmp_path / "Analysis"
+    previous = tmp_path / "Analysis.previous"
+    previous.mkdir()
+    (previous / "marker.txt").write_text("last complete")
+    monkeypatch.setattr(experiment_analyzer, "write_workbook", lambda *_: (_ for _ in ()).throw(RuntimeError("boom")))
+    summary = {
+        "experiment_id": "x", "all_symbol_results": [], "schedule_comparisons": [],
+        "passed_candidates": [], "low_touch_recommendations": [],
+        "frequent_entry_exceptions": [], "failed_or_incomplete": [], "job_counts": {},
+    }
+    with pytest.raises(RuntimeError, match="boom"):
+        experiment_analyzer.write_outputs(summary, output)
+    assert (output / "marker.txt").read_text() == "last complete"

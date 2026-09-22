@@ -8,7 +8,7 @@ import pytest
 from amibroker_experiment_workbook import write_workbook
 from amibroker_experiment_results import evaluate_sectors, summarize_job
 from analyze_amibroker_experiment import _comparisons
-from audit_amibroker_experiment import run_audit, sha256
+from audit_amibroker_experiment import _same, run_audit, sha256
 
 
 def _hash(path):
@@ -91,10 +91,19 @@ def audit_fixture(tmp_path):
     }
     matrix_path = tmp_path / "matrix.json"
     matrix_path.write_text(json.dumps(matrix))
+    preflight_report = tmp_path / "timezone_preflight.json"
+    preflight_report.write_text(json.dumps({
+        "status": "PASS", "timezone": "America/Detroit", "timeshift_seconds": 0,
+        "interval_seconds": 300, "winter_sessions": ["2018-01-16"],
+        "summer_sessions": ["2018-07-17"],
+    }))
     experiment = tmp_path / "experiment_manifest.json"
     experiment.write_text(json.dumps({
         "schema_version": 1, "experiment_id": "pilot-1", "mode": "pilot",
-        "matrix_path": str(matrix_path), "matrix_sha256": _hash(matrix_path), "jobs": states,
+        "status": "COMPLETE", "matrix_path": str(matrix_path),
+        "matrix_sha256": _hash(matrix_path), "jobs": states,
+        "preflight": {"status": "PASS", "report_path": str(preflight_report),
+                      "report_sha256": _hash(preflight_report)},
     }))
     records = []
     comparison_jobs = []
@@ -107,19 +116,32 @@ def audit_fixture(tmp_path):
             "run_path": Path(state["run_manifest_path"]).parent,
             "run_manifest": run_manifest, "source_hash": "a" * 64,
             "research_window": matrix["research_window"],
+            "analysis_profile": profile,
         }
         comparison_jobs.append(normalized_job)
         records.extend(summarize_job(normalized_job, json.loads(profile.read_text()), groups))
     records = evaluate_sectors(records)
     comparisons = _comparisons(comparison_jobs, records)
+    detailed_reports = []
+    for state in states:
+        report_json = tmp_path / state["job_id"] / "detail.json"
+        report_html = tmp_path / state["job_id"] / "detail.html"
+        report_json.write_text("{}")
+        report_html.write_text("<html></html>")
+        detailed_reports.append({
+            "job_id": state["job_id"], "status": "COMPLETE", "decision": "TEST",
+            "error": None, "json_path": str(report_json), "json_sha256": _hash(report_json),
+            "html_path": str(report_html), "html_sha256": _hash(report_html),
+        })
     summary = {
         "schema_version": 1, "experiment_id": "pilot-1",
+        "matrix_sha256": _hash(matrix_path), "research_window": matrix["research_window"],
         "job_counts": {"total": 2, "admitted": 2, "invalid": 0, "analysis_failed": 0},
         "passed_candidates": [row for row in records if row["selected_representative"]],
         "low_touch_recommendations": [row for row in comparisons if row["recommendation"] == "LOW_TOUCH"],
         "frequent_entry_exceptions": [row for row in comparisons if row["recommendation"] == "FREQUENT_ENTRY_WFA_CANDIDATE"],
         "all_symbol_results": records, "failed_or_incomplete": [],
-        "schedule_comparisons": comparisons, "detailed_reports": [],
+        "schedule_comparisons": comparisons, "detailed_reports": detailed_reports,
     }
     analysis_dir = tmp_path / "Analysis"
     analysis_dir.mkdir()
@@ -156,6 +178,21 @@ def test_internal_success_without_reference_requires_manual_check(audit_fixture)
     report = json.loads(result.json_path.read_text())
     assert report["status"] == "MANUAL CHECK REQUIRED"
     assert not result.unlock_path.exists()
+
+
+def test_missing_and_nonfinite_values_compare_as_the_same_json_value():
+    assert _same(float("nan"), None)
+    assert _same(None, float("inf"))
+
+
+def test_omitted_declared_pilot_job_blocks_unlock(audit_fixture):
+    experiment = json.loads(audit_fixture.experiment.read_text())
+    experiment["jobs"] = experiment["jobs"][:1]
+    audit_fixture.experiment.write_text(json.dumps(experiment))
+    result = run_audit(audit_fixture.experiment, audit_fixture.analysis, audit_fixture.reference)
+    report = json.loads(result.json_path.read_text())
+    assert report["status"] == "FAIL"
+    assert any("pilot job set" in reason for reason in report["failures"])
 
 
 def test_matching_reference_produces_hash_bound_unlock(audit_fixture):

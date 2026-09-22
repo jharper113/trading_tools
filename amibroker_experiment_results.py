@@ -6,9 +6,12 @@ import hashlib
 import hmac
 import json
 import math
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pandas as pd
+
+from amibroker_paths import resolve_portable_path
 
 
 HERE = Path(__file__).resolve().parent
@@ -47,8 +50,7 @@ def verify_sha256(path: Path, expected: str) -> None:
 
 
 def _resolved(path: str, parent: Path) -> Path:
-    candidate = Path(path)
-    return candidate if candidate.is_absolute() else parent / candidate
+    return resolve_portable_path(path, parent)
 
 
 def load_experiment(path: Path) -> dict:
@@ -94,6 +96,53 @@ def _verify_exports(run_path: Path, run: dict, field: str, expected: list[str]) 
             raise ValueError(f"run archive hash mismatch: {relative}") from exc
 
 
+def _verify_experiment_provenance(run_path: Path, run: dict, job: dict, experiment: dict) -> None:
+    """Verify the generated inputs for current schema-2 experiment archives."""
+    if int(run.get("schema_version", 0) or 0) < 2:
+        return
+    project = run_path / "project.apx"
+    formula = run_path / "formula.afl"
+    if not project.is_file() or sha256(project) != run.get("project_sha256"):
+        raise ValueError("archived project hash mismatch")
+    if not formula.is_file():
+        raise ValueError("archived formula is missing")
+    try:
+        root = ET.parse(project).getroot()
+    except ET.ParseError as exc:
+        raise ValueError("archived project XML is invalid") from exc
+    embedded = (root.findtext(".//FormulaContent") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    archived = formula.read_text(encoding="utf-8-sig").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not embedded or embedded != archived:
+        raise ValueError("archived formula differs from APX FormulaContent")
+    provenance = run.get("experiment") or {}
+    if provenance.get("job_id") != job.get("job_id"):
+        raise ValueError("run provenance job identity mismatch")
+    if not provenance.get("attempt_id"):
+        raise ValueError("run provenance attempt identity is missing")
+    if provenance.get("source_sha256") != job.get("source_sha256"):
+        raise ValueError("run provenance source hash mismatch")
+    if provenance.get("matrix_sha256") != experiment.get("matrix_sha256"):
+        raise ValueError("run provenance matrix hash mismatch")
+    artifacts = {str(item.get("name")): item for item in run.get("experiment_artifacts", [])}
+    required = {"matrix_path", "source_afl", "analysis_profile", "build_manifest"}
+    if not required.issubset(artifacts):
+        raise ValueError("run provenance artifacts are incomplete")
+    for name, artifact in artifacts.items():
+        path = resolve_portable_path(artifact.get("path"), run_path)
+        if not path.is_file() or sha256(path) != artifact.get("sha256"):
+            raise ValueError(f"run provenance artifact hash mismatch: {name}")
+    build_path = resolve_portable_path(artifacts["build_manifest"]["path"], run_path)
+    build = json.loads(build_path.read_text(encoding="utf-8-sig"))
+    if build.get("job_id") != job.get("job_id"):
+        raise ValueError("build manifest job identity mismatch")
+    if build.get("attempt_id") != provenance.get("attempt_id"):
+        raise ValueError("build manifest attempt identity mismatch")
+    for name, artifact in build.get("outputs", {}).items():
+        path = resolve_portable_path(artifact.get("path"), build_path.parent)
+        if not path.is_file() or sha256(path) != artifact.get("sha256"):
+            raise ValueError(f"build output hash mismatch: {name}")
+
+
 def admit_jobs(experiment: dict) -> tuple[list[dict], list[dict]]:
     """Separate complete hash-valid jobs from failures with stable reasons."""
     matrix = experiment["_matrix"]
@@ -122,10 +171,13 @@ def admit_jobs(experiment: dict) -> tuple[list[dict], list[dict]]:
                 raise ValueError("run manifest expected symbols do not match the matrix")
             _verify_exports(run_manifest_path.parent, run, "exports", expected)
             expected_audit = [str(symbol) for symbol in run.get("expected_audit_symbols", [])]
+            if int(run.get("schema_version", 0) or 0) >= 2 and sorted(expected_audit) != sorted(expected):
+                raise ValueError("run manifest audit symbols do not match the matrix")
             if expected_audit:
                 if sorted(expected_audit) != sorted(expected):
                     raise ValueError("run manifest audit symbols do not match the matrix")
                 _verify_exports(run_manifest_path.parent, run, "audit_exports", expected)
+            _verify_experiment_provenance(run_manifest_path.parent, run, job, experiment)
             profile_path = _resolved(str(job.get("analysis_profile", "")), HERE)
             admitted.append(
                 {

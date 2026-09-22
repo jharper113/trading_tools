@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory=$true)][string]$Matrix,
     [Parameter(Mandatory=$true)][string]$JobId,
     [Parameter(Mandatory=$true)][string]$Destination,
-    [Parameter(Mandatory=$true)][string]$ReportsRoot
+    [Parameter(Mandatory=$true)][string]$ReportsRoot,
+    [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9_.-]+$')][string]$AttemptId
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -69,7 +70,9 @@ try {
         throw 'Canonical AFL source hash mismatch'
     }
 
-    $formula = [IO.File]::ReadAllText($sourcePath).Replace("`r`n", "`n").Replace("`r", "`n")
+    $sourceFormula = [IO.File]::ReadAllText($sourcePath).Replace("`r`n", "`n").Replace("`r", "`n")
+    $matrixHash = File-Hash $matrixPath
+    $formula = "// BEGIN GENERATED EXPERIMENT PROVENANCE`n// Matrix: $matrixHash`n// Job: $JobId`n// Attempt: $AttemptId`n// Source: $($job.source_sha256)`n// END GENERATED EXPERIMENT PROVENANCE`n`n" + $sourceFormula
     $replacementCount = 0
     $adapter = [string]$job.adapter.name
     if ($adapter -eq 'entry_cutoff_110000') {
@@ -125,7 +128,7 @@ AddColumn( Short, "Short", 1.0 );
     $projectTemporary = Join-Path $temporary 'project.apx'
     $project.Save($projectTemporary)
 
-    $staging = Join-Path (Join-Path (Join-Path $ReportsRoot '_ExperimentStaging') ([string]$matrixObject.matrix_id)) $JobId
+    $staging = Join-Path (Join-Path (Join-Path (Join-Path $ReportsRoot '_ExperimentStaging') ([string]$matrixObject.matrix_id)) $JobId) $AttemptId
     $auditStaging = Join-Path $staging 'entry_audit'
     $configFinal = Join-Path $Destination 'batch.archive.json'
     $batchFinal = Join-Path $Destination 'batch.abb'
@@ -143,8 +146,9 @@ AddColumn( Short, "Short", 1.0 );
         experiment = [ordered]@{
             matrix_id = [string]$matrixObject.matrix_id
             matrix_path = $matrixPath
-            matrix_sha256 = File-Hash $matrixPath
+            matrix_sha256 = $matrixHash
             job_id = $JobId
+            attempt_id = $AttemptId
             strategy_id = [string]$job.strategy_id
             periodicity = [string]$job.periodicity
             adapter = $adapter
@@ -177,7 +181,7 @@ AddColumn( Short, "Short", 1.0 );
         Add-BatchStep $batch $root 'Optimize' ''
         Add-BatchStep $batch $root 'Export' (Join-Path $staging "$symbol.csv")
         Add-ArchiveStep 'Publish' $symbol
-        Add-BatchStep $batch $root 'Scan' ''
+        Add-BatchStep $batch $root 'Explore' ''
         Add-BatchStep $batch $root 'Export' (Join-Path $auditStaging "$symbol.csv")
         Add-ArchiveStep 'PublishAudit' $symbol
     }
@@ -188,6 +192,7 @@ AddColumn( Short, "Short", 1.0 );
         schema_version = 1
         matrix_id = [string]$matrixObject.matrix_id
         job_id = $JobId
+        attempt_id = $AttemptId
         strategy = [string]$job.strategy_id
         periodicity = [string]$job.periodicity
         interval_seconds = [int]$job.interval_seconds

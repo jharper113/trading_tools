@@ -39,6 +39,9 @@ def _write_fixture(path, shift=0, interval=300, omit=None, malformed=False, dupl
 def test_preflight_files_exist():
     assert AFL.is_file()
     assert SCRIPT.is_file()
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "'Explore'" in text
+    assert "Remove-Item -LiteralPath $csvPath" in text
 
 
 @pytest.mark.parametrize("shift,interval", [(3600, 300), (0, 900)])

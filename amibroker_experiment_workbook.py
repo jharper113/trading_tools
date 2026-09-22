@@ -98,6 +98,12 @@ def write_workbook(summary: dict, destination: Path) -> Path:
     counts = summary.get("job_counts", {})
     summary_rows = [
         {"item": "experiment_id", "value": summary.get("experiment_id")},
+        {"item": "matrix_sha256", "value": summary.get("matrix_sha256")},
+        {"item": "research_window", "value": summary.get("research_window")},
+        {"item": "timezone", "value": summary.get("timezone")},
+        {"item": "preflight", "value": summary.get("preflight")},
+        {"item": "policy_hashes", "value": summary.get("policy_hashes")},
+        {"item": "audit_status", "value": summary.get("audit_status", "PENDING")},
         *({"item": f"jobs_{key}", "value": value} for key, value in counts.items()),
         {"item": "passed_candidates", "value": len(summary.get("passed_candidates", []))},
         {"item": "low_touch_recommendations", "value": len(summary.get("low_touch_recommendations", []))},

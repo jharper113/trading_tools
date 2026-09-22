@@ -1,0 +1,8 @@
+{
+  "status": "PASS",
+  "timezone": "America/Detroit",
+  "timeshift_seconds": 0,
+  "interval_seconds": 300,
+  "winter_sessions": ["2018-01-16"],
+  "summer_sessions": ["2018-07-17"]
+}
