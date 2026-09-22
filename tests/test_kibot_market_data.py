@@ -330,6 +330,26 @@ def test_reviewed_key_preserves_first_existing_candidate():
     assert result.summary["reviewed_selections"] == 1
 
 
+def test_reviewed_key_matches_reviewed_source_when_kibot_frame_is_first():
+    reviewed = pd.DataFrame(
+        [{
+            "symbol": "/ES",
+            "frequency": "5min",
+            "comparison_key": "2026-09-18T13:30:00Z",
+            "selected_source": "local",
+            "reviewed_at": "2026-09-22T12:00:00Z",
+        }]
+    )
+
+    result = merge_market_data_sources(
+        [frame("kibot", close=101), frame("reviewed_local", close=100)],
+        reviewed_bars=reviewed,
+    )
+
+    assert result.rows.iloc[0]["source"] == "reviewed_local"
+    assert result.summary["reviewed_selections"] == 1
+
+
 def test_zero_schwab_volume_does_not_lose_precedence():
     result = merge_market_data_sources(
         [frame("kibot", volume=50), frame("schwab", volume=0)]

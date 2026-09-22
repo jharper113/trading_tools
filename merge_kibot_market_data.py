@@ -218,6 +218,8 @@ def stage_kibot_merge(
 
     conflict_frames = []
     rejection_frames = []
+    reviewed_path = market_data_dir / "reviewed_bars.csv"
+    reviewed_bars = pd.read_csv(reviewed_path) if reviewed_path.exists() else None
     for metadata in (daily_meta, intraday_meta):
         output_dir = stage_root / metadata.frequency
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -239,7 +241,15 @@ def stage_kibot_merge(
             ticker = str(kibot.iloc[0]["symbol"]).lstrip("/") if len(kibot) else vendor
             imported_names.add(ticker)
             existing = _read_existing(market_data_dir / metadata.frequency / f"{ticker}.csv")
-            result = merge_market_data_sources([kibot, existing])
+            member_reviews = reviewed_bars
+            if reviewed_bars is not None:
+                member_reviews = reviewed_bars[
+                    reviewed_bars["symbol"].astype(str).eq(f"/{ticker}")
+                    & reviewed_bars["frequency"].astype(str).eq(metadata.frequency)
+                ]
+            result = merge_market_data_sources(
+                [kibot, existing], reviewed_bars=member_reviews
+            )
             _atomic_csv(result.rows, output_dir / f"{ticker}.csv")
             if len(result.conflicts):
                 conflict_frames.append(result.conflicts)

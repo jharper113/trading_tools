@@ -637,36 +637,49 @@ def merge_market_data_sources(frames, reviewed_bars=None) -> MergeResult:
     )
     selections = ranked.drop_duplicates(group_columns, keep="last")
 
-    reviewed = _reviewed_choices(reviewed_bars)
     reviewed_count = 0
-    if reviewed:
-        selection_by_key = {
-            tuple(str(row[column]) for column in group_columns): index
-            for index, row in selections.iterrows()
-        }
-        replacement_indices = {}
-        for group_key, reviewed_source in reviewed.items():
-            mask = pd.Series(True, index=candidates.index)
-            for column, value in zip(group_columns, group_key):
-                mask &= candidates[column].astype(str).eq(str(value))
-            group = candidates.loc[mask].sort_values(
-                ["_frame_order", "_row_order"], kind="stable"
+    if reviewed_bars is not None and len(reviewed_bars):
+        review_table = pd.DataFrame(reviewed_bars).copy()
+        if "comparison_key" in review_table and "_comparison_key" not in review_table:
+            review_table = review_table.rename(
+                columns={"comparison_key": "_comparison_key"}
             )
-            if group.empty:
-                continue
-            matching = group[group["source"].astype(str).eq(reviewed_source)]
-            replacement_indices[group_key] = int(
-                (matching if len(matching) else group).index[0]
+        for column in group_columns:
+            if column not in review_table:
+                review_table[column] = ""
+            review_table[column] = review_table[column].astype(str)
+        review_table = review_table.rename(
+            columns={"selected_source": "_reviewed_source"}
+        )
+        review_table = review_table[
+            [*group_columns, "_reviewed_source"]
+        ].drop_duplicates(group_columns, keep="last")
+        reviewed_candidates = candidates.merge(
+            review_table, on=group_columns, how="inner"
+        )
+        if len(reviewed_candidates):
+            desired = reviewed_candidates["_reviewed_source"].astype(str)
+            actual = reviewed_candidates["source"].astype(str)
+            matches = reviewed_candidates[
+                actual.eq(desired) | actual.eq("reviewed_" + desired)
+            ].sort_values([*group_columns, "_frame_order", "_row_order"], kind="stable")
+            matched = matches.drop_duplicates(group_columns, keep="first")
+            matched_keys = matched.set_index(group_columns).index
+            all_reviewed_keys = reviewed_candidates.set_index(group_columns).index
+            fallback = reviewed_candidates[
+                ~all_reviewed_keys.isin(matched_keys)
+            ].sort_values([*group_columns, "_frame_order", "_row_order"], kind="stable")
+            fallback = fallback.drop_duplicates(group_columns, keep="first")
+            reviewed_choices = pd.concat([matched, fallback], ignore_index=True)
+            reviewed_keys = reviewed_choices.set_index(group_columns).index
+            selection_keys = selections.set_index(group_columns).index
+            selections = selections.loc[~selection_keys.isin(reviewed_keys)]
+            choice_ids = set(reviewed_choices["_candidate_id"].astype(int))
+            selections = pd.concat(
+                [selections, candidates[candidates["_candidate_id"].isin(choice_ids)]],
+                ignore_index=True,
             )
-            reviewed_count += 1
-        if replacement_indices:
-            selected_indices = set(selections.index)
-            for key, replacement in replacement_indices.items():
-                previous = selection_by_key.get(key)
-                if previous is not None:
-                    selected_indices.discard(previous)
-                selected_indices.add(replacement)
-            selections = candidates.loc[sorted(selected_indices)]
+            reviewed_count = len(reviewed_choices)
 
     duplicate_candidates = candidates[
         candidates.duplicated(group_columns, keep=False)
