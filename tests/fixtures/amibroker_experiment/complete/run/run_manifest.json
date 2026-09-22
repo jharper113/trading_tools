@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "status": "COMPLETE",
+  "expected_symbols": ["ES", "NQ", "YM"],
+  "exports": [
+    {"symbol": "ES", "file": "ES.csv", "sha256": "f8a27bcf412d1eda7ae7dcb71d436882598778cce9ddf8ef9143777a85a2dc05"},
+    {"symbol": "NQ", "file": "NQ.csv", "sha256": "33ccf9d59648366c9da341dc4b284e5ca055385108889f09244a0387d644b64d"},
+    {"symbol": "YM", "file": "YM.csv", "sha256": "81f9c3f2b64521c239bc4543a80d3c17c20540459521498e22b7e38cdaade930"}
+  ],
+  "expected_audit_symbols": ["ES", "NQ", "YM"],
+  "audit_exports": [
+    {"symbol": "ES", "file": "entry_audit/ES.csv", "sha256": "da17ad92bb5c66fdf037784c346187a2af7c6aa5587ccf246248845e3ae2b3aa"},
+    {"symbol": "NQ", "file": "entry_audit/NQ.csv", "sha256": "da17ad92bb5c66fdf037784c346187a2af7c6aa5587ccf246248845e3ae2b3aa"},
+    {"symbol": "YM", "file": "entry_audit/YM.csv", "sha256": "da17ad92bb5c66fdf037784c346187a2af7c6aa5587ccf246248845e3ae2b3aa"}
+  ],
+  "experiment": {"source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "adapter": "native"},
+  "experiment_artifacts": []
+}

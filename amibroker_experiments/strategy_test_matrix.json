@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "matrix_id": "amibroker-research-v1",
+  "catalog_sha256": "67c7e89de74f469f0731f82e79ec009cf525968074eaffd78d38c9f105e1e9df",
+  "research_window": {
+    "start": "2009-01-01",
+    "end": "2019-01-01"
+  },
+  "timezone": "America/Detroit",
+  "strategy_root_windows": "Z:\\04_Code\\Amibroker\\Strategies\\2026 Strategy Testing",
+  "shared_policy_windows": "Z:\\04_Code\\Amibroker\\Strategies\\Include\\Harp_Strategy_Policy.afl",
+  "databases": {
+    "daily": "Z:\\04_Code\\Amibroker\\Databases\\Harp_daily",
+    "intraday": "Z:\\04_Code\\Amibroker\\Databases\\Harp_intraday"
+  },
+  "project_templates": {
+    "daily": "Z:\\04_Code\\Amibroker\\Amibroker_Settings\\2026_Tools_Daily_Optimization_Project.apx",
+    "intraday": "Z:\\04_Code\\Amibroker\\Amibroker_Settings\\2026_Tools_Intraday_15m_Optimization_Project.apx"
+  },
+  "symbol_sets": {
+    "daily": ["6A", "6B", "6C", "6E", "6J", "6M", "6N", "6S", "AUDUSD", "BTC", "BZ", "CL", "EMD", "ES", "ETH", "EURJPY", "EURUSD", "GBPUSD", "GC", "GE", "GF", "HE", "HG", "HO", "KE", "LB___CCB", "LE", "MBT", "MET", "MSL", "MXP", "NG", "NKD", "NQ", "NZDUSD", "PA", "PL", "RB", "RF___CCB", "RTY", "SI", "SOL", "SPY", "UB", "USDCAD", "USDCHF", "USDJPY", "VX", "XRP", "YM", "ZB", "ZC", "ZF", "ZL", "ZM", "ZN", "ZO", "ZS", "ZT", "ZW"],
+    "intraday": ["6A", "6B", "6C", "6E", "6J", "6M", "6N", "6S", "BTC", "BZ", "CL", "EMD", "ES", "ETH", "GC", "GF", "HE", "HG", "HO", "KE", "LE", "MBT", "MET", "MSL", "MXP", "NG", "NKD", "NQ", "PA", "PL", "RB", "RTY", "SI", "SOL", "SPY", "UB", "XRP", "YM", "ZB", "ZC", "ZF", "ZL", "ZM", "ZN", "ZO", "ZS", "ZT", "ZW"]
+  },
+  "modes": {
+    "pilot": [
+      "pilot-0001-daily-native",
+      "pilot-0063-15m-native",
+      "pilot-0063-15m-cutoff",
+      "pilot-0063-60m-native",
+      "pilot-0084-15m-fixed"
+    ],
+    "full": ["$catalog_supported"]
+  },
+  "jobs": {
+    "pilot-0001-daily-native": {
+      "job_id": "pilot-0001-daily-native",
+      "strategy_id": "0001_exhaustion_open_dislocation_fade",
+      "source_afl": "0001_exhaustion_open_dislocation_fade.afl",
+      "source_sha256": "47074c3d2b6bd7aa5ade7bc5a4ab510994072f757b4e4df7f09e1c72758ddc28",
+      "periodicity": "Daily",
+      "interval_seconds": 86400,
+      "database": "Z:\\04_Code\\Amibroker\\Databases\\Harp_daily",
+      "project_template": "Z:\\04_Code\\Amibroker\\Amibroker_Settings\\2026_Tools_Daily_Optimization_Project.apx",
+      "symbols": ["6A", "6B", "6C", "6E", "6J", "6M", "6N", "6S", "AUDUSD", "BTC", "BZ", "CL", "EMD", "ES", "ETH", "EURJPY", "EURUSD", "GBPUSD", "GC", "GE", "GF", "HE", "HG", "HO", "KE", "LB___CCB", "LE", "MBT", "MET", "MSL", "MXP", "NG", "NKD", "NQ", "NZDUSD", "PA", "PL", "RB", "RF___CCB", "RTY", "SI", "SOL", "SPY", "UB", "USDCAD", "USDCHF", "USDJPY", "VX", "XRP", "YM", "ZB", "ZC", "ZF", "ZL", "ZM", "ZN", "ZO", "ZS", "ZT", "ZW"],
+      "adapter": {"name": "native"},
+      "analysis_profile": "Analyzer_Profiles/Daily_Analyzer_Profile.json",
+      "enabled": true
+    },
+    "pilot-0063-15m-native": {
+      "job_id": "pilot-0063-15m-native",
+      "strategy_id": "0063_intraday_opening_range_breakout",
+      "source_afl": "0063_intraday_opening_range_breakout.afl",
+      "source_sha256": "83f4b5571278f485b0b183cdf9a8e0f3c3550903c5d6769bcf0b90a540c63d9e",
+      "periodicity": "15m",
+      "interval_seconds": 900,
+      "database": "Z:\\04_Code\\Amibroker\\Databases\\Harp_intraday",
+      "project_template": "Z:\\04_Code\\Amibroker\\Amibroker_Settings\\2026_Tools_Intraday_15m_Optimization_Project.apx",
+      "symbols": ["6A", "6B", "6C", "6E", "6J", "6M", "6N", "6S", "BTC", "BZ", "CL", "EMD", "ES", "ETH", "GC", "GF", "HE", "HG", "HO", "KE", "LE", "MBT", "MET", "MSL", "MXP", "NG", "NKD", "NQ", "PA", "PL", "RB", "RTY", "SI", "SOL", "SPY", "UB", "XRP", "YM", "ZB", "ZC", "ZF", "ZL", "ZM", "ZN", "ZO", "ZS", "ZT", "ZW"],
+      "adapter": {"name": "native"},
+      "analysis_profile": "Analyzer_Profiles/Intraday_15m_Analyzer_Profile.json",
+      "enabled": true
+    },
+    "pilot-0063-15m-cutoff": {
+      "job_id": "pilot-0063-15m-cutoff",
+      "strategy_id": "0063_intraday_opening_range_breakout",
+      "source_afl": "0063_intraday_opening_range_breakout.afl",
+      "source_sha256": "83f4b5571278f485b0b183cdf9a8e0f3c3550903c5d6769bcf0b90a540c63d9e",
+      "periodicity": "15m",
+      "interval_seconds": 900,
+      "database": "Z:\\04_Code\\Amibroker\\Databases\\Harp_intraday",
+      "project_template": "Z:\\04_Code\\Amibroker\\Amibroker_Settings\\2026_Tools_Intraday_15m_Optimization_Project.apx",
+      "symbols": ["6A", "6B", "6C", "6E", "6J", "6M", "6N", "6S", "BTC", "BZ", "CL", "EMD", "ES", "ETH", "GC", "GF", "HE", "HG", "HO", "KE", "LE", "MBT", "MET", "MSL", "MXP", "NG", "NKD", "NQ", "PA", "PL", "RB", "RTY", "SI", "SOL", "SPY", "UB", "XRP", "YM", "ZB", "ZC", "ZF", "ZL", "ZM", "ZN", "ZO", "ZS", "ZT", "ZW"],
+      "adapter": {"name": "entry_cutoff_110000"},
+      "analysis_profile": "Analyzer_Profiles/Intraday_15m_Analyzer_Profile.json",
+      "enabled": true
+    },
+    "pilot-0063-60m-native": {
+      "job_id": "pilot-0063-60m-native",
+      "strategy_id": "0063_intraday_opening_range_breakout",
+      "source_afl": "0063_intraday_opening_range_breakout.afl",
+      "source_sha256": "83f4b5571278f485b0b183cdf9a8e0f3c3550903c5d6769bcf0b90a540c63d9e",
+      "periodicity": "60m",
+      "interval_seconds": 3600,
+      "database": "Z:\\04_Code\\Amibroker\\Databases\\Harp_intraday",
+      "project_template": "Z:\\04_Code\\Amibroker\\Amibroker_Settings\\2026_Tools_Intraday_15m_Optimization_Project.apx",
+      "symbols": ["6A", "6B", "6C", "6E", "6J", "6M", "6N", "6S", "BTC", "BZ", "CL", "EMD", "ES", "ETH", "GC", "GF", "HE", "HG", "HO", "KE", "LE", "MBT", "MET", "MSL", "MXP", "NG", "NKD", "NQ", "PA", "PL", "RB", "RTY", "SI", "SOL", "SPY", "UB", "XRP", "YM", "ZB", "ZC", "ZF", "ZL", "ZM", "ZN", "ZO", "ZS", "ZT", "ZW"],
+      "adapter": {"name": "native"},
+      "analysis_profile": "Analyzer_Profiles/Intraday_60m_Analyzer_Profile.json",
+      "enabled": true
+    },
+    "pilot-0084-15m-fixed": {
+      "job_id": "pilot-0084-15m-fixed",
+      "strategy_id": "0084_ES_INTRADAY_PCTB",
+      "source_afl": "0084_ES_INTRADAY_PCTB.afl",
+      "source_sha256": "d93f3e95c8488debc8c38410979f48f9def2968f00d8faf1fa50d38abe0214e3",
+      "periodicity": "15m",
+      "interval_seconds": 900,
+      "database": "Z:\\04_Code\\Amibroker\\Databases\\Harp_intraday",
+      "project_template": "Z:\\04_Code\\Amibroker\\Amibroker_Settings\\2026_Tools_Intraday_15m_Optimization_Project.apx",
+      "symbols": ["6A", "6B", "6C", "6E", "6J", "6M", "6N", "6S", "BTC", "BZ", "CL", "EMD", "ES", "ETH", "GC", "GF", "HE", "HG", "HO", "KE", "LE", "MBT", "MET", "MSL", "MXP", "NG", "NKD", "NQ", "PA", "PL", "RB", "RTY", "SI", "SOL", "SPY", "UB", "XRP", "YM", "ZB", "ZC", "ZF", "ZL", "ZM", "ZN", "ZO", "ZS", "ZT", "ZW"],
+      "adapter": {"name": "fixed_110000"},
+      "analysis_profile": "Analyzer_Profiles/Intraday_15m_Analyzer_Profile.json",
+      "enabled": true
+    }
+  }
+}

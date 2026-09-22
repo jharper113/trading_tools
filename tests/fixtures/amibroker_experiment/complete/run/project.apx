@@ -1,0 +1,2 @@
+<AnalysisDoc><FormulaPath>formula.afl</FormulaPath><FormulaContent>Buy = 1; Short = 0;
+</FormulaContent><Periodicity>8</Periodicity><ChartInterval>900</ChartInterval><FromDate>2009-01-01</FromDate><ToDate>2019-01-01</ToDate><InitialEquity>100000</InitialEquity><CommissionMode>3</CommissionMode><CommissionAmount>3.76</CommissionAmount><PointsOnlyTest>1</PointsOnlyTest><MinShares>1</MinShares><AllowSameBarExit>1</AllowSameBarExit><ReverseSignalForcesExit>0</ReverseSignalForcesExit><UsePrevBarEquity>1</UsePrevBarEquity><OptTarget>CAR/MDD</OptTarget></AnalysisDoc>

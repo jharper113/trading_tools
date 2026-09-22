@@ -1,0 +1,11 @@
+// Blocking diagnostic for the Harp_intraday database.
+SetBarsRequired( sbrAll, sbrAll );
+TN = TimeNum();
+MonthNumber = Month();
+SessionSample = ( MonthNumber == 1 OR MonthNumber == 7 ) AND
+                ( TN == 93000 OR TN == 155500 );
+Filter = Name() == "ES" AND SessionSample;
+AddColumn( DateTime(), "DateTime", formatDateTime );
+AddColumn( TN, "TimeNum", 1.0 );
+AddColumn( Status("timeshift"), "TimeShiftSeconds", 1.0 );
+AddColumn( Interval(), "IntervalSeconds", 1.0 );

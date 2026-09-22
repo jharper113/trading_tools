@@ -1,0 +1,92 @@
+{
+  "schema_version": 2,
+  "economic_groups": {
+    "Crypto": [
+      "BTC",
+      "ETH",
+      "SOL",
+      "XRP"
+    ],
+    "Equity indexes": [
+      "ES",
+      "NQ",
+      "YM",
+      "RTY",
+      "EMD",
+      "NKD"
+    ],
+    "Rates": [
+      "ZT",
+      "ZF",
+      "ZN",
+      "ZB",
+      "UB"
+    ],
+    "Energy": [
+      "CL",
+      "BZ",
+      "RB",
+      "HO",
+      "NG"
+    ],
+    "Metals": [
+      "GC",
+      "SI",
+      "HG",
+      "PL",
+      "PA"
+    ],
+    "Grains and oilseeds": [
+      "ZC",
+      "ZW",
+      "ZS",
+      "ZM",
+      "ZL",
+      "ZO",
+      "KE"
+    ],
+    "Livestock": [
+      "HE",
+      "LE",
+      "GF"
+    ],
+    "Currencies": [
+      "6E",
+      "6A",
+      "6B",
+      "6C",
+      "6J",
+      "6M",
+      "6N",
+      "6S",
+      "DX"
+    ]
+  },
+  "correlation_window": 126,
+  "correlation_step": 63,
+  "min_windows": 4,
+  "min_return_observations": 504,
+  "min_calendar_coverage": 0.9,
+  "similar_correlation": 0.6,
+  "distinct_abs_correlation": 0.35,
+  "min_window_fraction": 0.75,
+  "min_peers": 3,
+  "min_peer_pass_fraction": 0.6666666666666666,
+  "min_grid_coverage": 1.0,
+  "min_region_fraction": 0.5,
+  "min_connected_points": 3,
+  "min_neighbor_fraction": 0.6666666666666666,
+  "min_neighbors": 2,
+  "min_distinct_references": 3,
+  "min_subperiods": 3,
+  "min_subperiod_trades": 20,
+  "research_periods": {
+    "Daily": {
+      "start": "2009-01-01",
+      "end": "2019-01-01"
+    }
+  },
+  "research_gate_mode": "sector_first",
+  "min_group_passes": 3,
+  "min_group_pass_fraction": 0.5
+}

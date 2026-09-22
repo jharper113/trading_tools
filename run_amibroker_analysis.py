@@ -30,18 +30,23 @@ def _sha256(path):
 
 
 def _profile_path(context):
-    name = (
-        "Daily_Analyzer_Profile.json"
-        if context.timeframe == "Daily"
-        else "Intraday_15m_Analyzer_Profile.json"
-    )
+    profiles = {
+        "Daily": "Daily_Analyzer_Profile.json",
+        "Intraday_5m": "Intraday_5m_Analyzer_Profile.json",
+        "Intraday_15m": "Intraday_15m_Analyzer_Profile.json",
+        "Intraday_60m": "Intraday_60m_Analyzer_Profile.json",
+    }
+    try:
+        name = profiles[context.timeframe]
+    except KeyError as exc:
+        raise ValueError(f"No analyzer profile for {context.timeframe}") from exc
     return HERE / "Analyzer_Profiles" / name
 
 
 def run_analysis(project_path, results_dir, output_root, registry_path=DEFAULT_REGISTRY, core_symbols=None):
     context = read_project_context(project_path)
     result_type = detect_result_type(results_dir)
-    if context.project_mode != result_type:
+    if context.project_mode != "unknown" and context.project_mode != result_type:
         raise ValueError(
             f"AmiBroker project is {context.project_mode}, but the exports are "
             f"{result_type}. Select the matching APX project and result folder."

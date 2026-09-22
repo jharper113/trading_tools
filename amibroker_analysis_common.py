@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,17 +40,13 @@ def read_project_context(project_path):
     interval = int(_text(root, "ChartInterval", "86400"))
     if periodicity == 0 or interval == 86400:
         timeframe = "Daily"
-    elif periodicity == 8 or interval == 900:
-        timeframe = "Intraday_15m"
+    elif periodicity == 8 and interval in {300, 900, 3600}:
+        timeframe = f"Intraday_{interval // 60}m"
     else:
         timeframe = f"Interval_{interval}s"
-    is_start = _text(root, "ISStartDate")
-    project_mode = (
-        "wfa"
-        if "wfa" in project_path.stem.lower()
-        or (is_start and is_start != "1970-01-01")
-        else "optimization"
-    )
+    labels = set(re.split(r"[^a-z0-9]+", project_path.stem.lower()))
+    modes = labels & {"wfa", "optimization"}
+    project_mode = modes.pop() if len(modes) == 1 else "unknown"
     return ProjectContext(
         project_path=project_path,
         formula_path=formula_path,
