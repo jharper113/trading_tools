@@ -196,6 +196,8 @@ def test_export_writes_completion_manifest_after_both_csv_files(tmp_path):
     assert manifest["timezone"] == "America/Detroit"
     assert manifest["daily"]["file"] == "daily.csv"
     assert manifest["intraday"]["file"] == "5min.csv"
+    assert manifest["daily"]["symbols"] == []
+    assert manifest["intraday"]["symbols"] == []
 
 
 def test_export_streams_small_chunks_in_deterministic_symbol_order(tmp_path):

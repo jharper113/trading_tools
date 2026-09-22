@@ -146,6 +146,8 @@ def _stream_frequency(source_dir, frequency, temporary_path, timezone_name, chun
     pd.DataFrame(columns=columns).to_csv(temporary_path, index=False)
     source_files = source_rows = exported_rows = 0
     market_tickers = set()
+    symbol_stats = {}
+    es_research_sessions = {"winter": False, "summer": False}
 
     for path in sorted(Path(source_dir).glob("*.csv")):
         source_files += 1
@@ -169,16 +171,46 @@ def _stream_frequency(source_dir, frequency, temporary_path, timezone_name, chun
                 exported.to_csv(temporary_path, mode="a", header=False, index=False)
                 exported_rows += len(exported)
                 market_tickers.add(ticker)
+                if frequency == "daily":
+                    keys_for_range = exported["date"].astype(str)
+                else:
+                    keys_for_range = exported["date"].astype(str) + " " + exported["time"].astype(str)
+                current = symbol_stats.setdefault(
+                    ticker, {"ticker": ticker, "rows": 0, "first": None, "last": None}
+                )
+                current["rows"] += len(exported)
+                chunk_first = keys_for_range.min()
+                chunk_last = keys_for_range.max()
+                current["first"] = chunk_first if current["first"] is None else min(current["first"], chunk_first)
+                current["last"] = chunk_last if current["last"] is None else max(current["last"], chunk_last)
+                if frequency == "5min" and ticker == "ES":
+                    research_dates = pd.to_datetime(exported["date"], errors="coerce")
+                    research_dates = research_dates[
+                        (research_dates >= pd.Timestamp("2009-01-01"))
+                        & (research_dates < pd.Timestamp("2019-01-01"))
+                    ]
+                    es_research_sessions["winter"] = bool(
+                        es_research_sessions["winter"]
+                        or research_dates.dt.month.isin([12, 1, 2]).any()
+                    )
+                    es_research_sessions["summer"] = bool(
+                        es_research_sessions["summer"]
+                        or research_dates.dt.month.isin([6, 7, 8]).any()
+                    )
         if not saw_chunk:
             header = pd.read_csv(path, nrows=0)
             _validate_source_columns(header, path)
 
-    return {
+    stats = {
         "source_files": source_files,
         "source_rows": source_rows,
         "exported_rows": exported_rows,
         "skipped_rows": source_rows - exported_rows,
-    }, market_tickers
+        "symbols": [symbol_stats[ticker] for ticker in sorted(symbol_stats)],
+    }
+    if frequency == "5min":
+        stats["es_research_sessions"] = es_research_sessions
+    return stats, market_tickers
 
 
 def _sha256(path):

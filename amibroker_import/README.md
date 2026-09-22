@@ -1,8 +1,8 @@
 # AmiBroker market-data import
 
 This directory contains the Windows-side importer for normalized market data.
-It imports long daily history into `Harp_daily` and 5-minute history into
-`Harp_intraday`. AmiBroker can display and analyze 60-minute bars by compressing
+It imports long daily history into `Harp_Daily` and 5-minute history into
+`Harp_Intraday`. AmiBroker can display and analyze 60-minute bars by compressing
 the 5-minute database, so the separate 60-minute CSV set is not imported.
 
 ## Prepare the files on Ubuntu
@@ -42,8 +42,8 @@ interest values are exported as zero because AmiBroker expects numeric fields.
 
 ## One-time AmiBroker database settings
 
-Configure `Harp_daily` as a local end-of-day database. Configure
-`Harp_intraday` as a local database with a 5-minute base interval and show all
+Configure `Harp_Daily` as a local end-of-day database. Configure
+`Harp_Intraday` as a local database with a 5-minute base interval and show all
 24 hours. The imported intraday timestamps are already Eastern time, so no
 additional AmiBroker time shift is needed.
 
@@ -87,18 +87,33 @@ The script is preconfigured with:
 
 - Market data: `Z:\04_code\python\trading_tools\data\market_data`
 - AmiBroker: `C:\Program Files (x86)\AmiBroker\Broker.exe`
-- Daily database: `Z:\04_code\amibroker\databases\Harp_daily`
-- Intraday database: `Z:\04_code\amibroker\databases\Harp_intraday`
+- Daily database: `Z:\04_Code\Amibroker\Databases\Harp_Daily`
+- Intraday database: `Z:\04_Code\Amibroker\Databases\Harp_Intraday`
 
 It verifies the export completion manifest, imports prices and instrument
 properties, loads and saves each database, and leaves AmiBroker open on
-`Harp_intraday`. Import logs are written to
+`Harp_Intraday`. Import logs are written to
 `data/market_data/amibroker/logs/`.
 
 Do not run an Analysis job while the script is switching databases. If any
 configured path changes, pass a different value using the corresponding
 PowerShell parameter or edit the defaults at the top of
 `Import-MarketData.ps1`.
+
+## Rebuild after the Kibot merge
+
+Close AmiBroker, then run `Archive-AmiBroker-Databases.ps1`. It refuses to run
+while Broker.exe is open, hashes both existing databases, and archives both or
+rolls the first move back if the second fails. Create fresh databases using the
+settings printed by the script: `Harp_Daily` as local end-of-day, and
+`Harp_Intraday` as local 5-minute with zero time shift, all sessions visible,
+and at least 2,000,000 bars.
+
+Run `Import-MarketData.ps1` only after the published Kibot merge summary says
+`PASS`. The importer verifies every export hash before opening AmiBroker. After
+the import, run `Verify-AmiBroker-Databases.ps1`; it compares each ticker's bar
+count and date range and requires ES winter and summer evidence in the research
+period. Do not start an experiment until the verification JSON says `PASS`.
 
 Official references:
 
