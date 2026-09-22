@@ -253,12 +253,15 @@ def read_kibot_member(
     member: str,
     frequency: str,
     acquired_at: str,
+    *,
+    reject_invalid_rows: bool = False,
 ) -> pd.DataFrame:
     path = Path(path)
     frequency = _validate_frequency(frequency)
     symbol = _canonical_symbol(path, member)
     expected_columns = 6 if frequency == "daily" else 7
     records = []
+    rejections = []
 
     try:
         archive = zipfile.ZipFile(path)
@@ -306,7 +309,36 @@ def read_kibot_member(
                 volume = _parse_number(
                     volume_field, path, member, row_number, "volume"
                 )
-                if low > min(open_, close) or high < max(open_, close) or low > high:
+                invalid_envelope = False
+                if frequency == "daily":
+                    if low > high:
+                        invalid_envelope = True
+                    elif not low <= open_ <= high:
+                        open_gap = max(open_ - high, low - open_)
+                        scale = max(abs(open_), abs(high), abs(low), 1.0)
+                        if open_gap / scale <= 0.002:
+                            high = max(high, open_)
+                            low = min(low, open_)
+                        else:
+                            invalid_envelope = True
+                elif low > min(open_, close) or high < max(open_, close) or low > high:
+                    invalid_envelope = True
+                if invalid_envelope:
+                    if reject_invalid_rows:
+                        rejections.append(
+                            {
+                                "symbol": symbol,
+                                "frequency": frequency,
+                                "comparison_key": timestamp.date().isoformat()
+                                if frequency == "daily"
+                                else timestamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                "source": "kibot",
+                                "reason": "vendor_invalid_daily_open"
+                                if frequency == "daily"
+                                else "invalid_ohlc_envelope",
+                            }
+                        )
+                        continue
                     _row_error(path, member, row_number, "invalid OHLC envelope")
 
                 records.append(
@@ -330,7 +362,9 @@ def read_kibot_member(
         raise KibotDataError(f"Unable to decode {member} from {path}: {error}") from error
 
     if not records:
-        return pd.DataFrame(columns=CANONICAL_COLUMNS)
+        empty = pd.DataFrame(columns=CANONICAL_COLUMNS)
+        empty.attrs["rejections"] = rejections
+        return empty
 
     working = pd.DataFrame.from_records(records)
     keys = ["symbol", "frequency", "timestamp"]
@@ -342,7 +376,9 @@ def read_kibot_member(
 
     working = working.drop_duplicates(subset=keys, keep="first")
     working = working.sort_values("timestamp").reset_index(drop=True)
-    return working[CANONICAL_COLUMNS].copy()
+    result = working[CANONICAL_COLUMNS].copy()
+    result.attrs["rejections"] = rejections
+    return result
 
 
 def source_priority(source) -> int:
@@ -393,7 +429,15 @@ def validate_price_rows(frame):
             reason = "invalid_ohlc_numeric"
         if reason is None:
             open_, high, low, close = prices.tolist()
-            if low > min(open_, close) or high < max(open_, close) or low > high:
+            if str(row.get("frequency", "")).lower() == "daily":
+                invalid_envelope = low > high or not low <= open_ <= high
+            else:
+                invalid_envelope = (
+                    low > min(open_, close)
+                    or high < max(open_, close)
+                    or low > high
+                )
+            if invalid_envelope:
                 reason = "invalid_ohlc_envelope"
 
         if reason is not None:

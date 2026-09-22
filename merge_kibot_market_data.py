@@ -220,7 +220,18 @@ def stage_kibot_merge(
         imported_names = set()
         for member in metadata.members:
             vendor = Path(member).stem.upper()
-            kibot = read_kibot_member(metadata.path, member, metadata.frequency, acquired_at)
+            kibot = read_kibot_member(
+                metadata.path,
+                member,
+                metadata.frequency,
+                acquired_at,
+                reject_invalid_rows=True,
+            )
+            parser_rejections = kibot.attrs.get("rejections", [])
+            if parser_rejections:
+                rejection_frames.append(
+                    pd.DataFrame(parser_rejections, columns=REJECTION_COLUMNS)
+                )
             ticker = str(kibot.iloc[0]["symbol"]).lstrip("/") if len(kibot) else vendor
             imported_names.add(ticker)
             existing = _read_existing(market_data_dir / metadata.frequency / f"{ticker}.csv")

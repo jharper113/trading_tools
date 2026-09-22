@@ -207,6 +207,45 @@ def test_negative_crude_price_is_preserved_when_ohlc_envelope_is_valid(tmp_path)
     assert frame.loc[0, "high"] == -8
 
 
+def test_daily_settlement_close_may_fall_outside_session_range(tmp_path):
+    archive = write_zip(
+        tmp_path / "daily.zip",
+        {"purchase/GC.txt": "04/26/2011,1507.2,1508.5,1492,1526.4,7129\n"},
+    )
+
+    parsed = read_kibot_member(archive, "purchase/GC.txt", "daily", ACQUIRED_AT)
+
+    assert parsed.iloc[0]["close"] == 1526.4
+
+
+def test_daily_small_open_rounding_is_repaired_and_bad_open_can_be_rejected(tmp_path):
+    archive = write_zip(
+        tmp_path / "daily.zip",
+        {"purchase/YM.txt": (
+            "01/19/2021,30628,30982,30629,30828,191002\n"
+            "01/20/2021,35000,30982,30629,30828,10\n"
+        )},
+    )
+
+    parsed = read_kibot_member(
+        archive, "purchase/YM.txt", "daily", ACQUIRED_AT,
+        reject_invalid_rows=True,
+    )
+
+    assert len(parsed) == 1
+    assert parsed.iloc[0]["low"] == 30628
+    assert parsed.attrs["rejections"][0]["reason"] == "vendor_invalid_daily_open"
+
+
+def test_merge_accepts_daily_settlement_outside_session_range():
+    result = merge_market_data_sources(
+        [frame("kibot", frequency="daily", high=102, close=110)]
+    )
+
+    assert len(result.rows) == 1
+    assert result.rejections.empty
+
+
 def test_conflicting_duplicate_is_rejected(tmp_path):
     archive = write_zip(
         tmp_path / "intraday.zip",
