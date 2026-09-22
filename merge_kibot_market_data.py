@@ -175,9 +175,16 @@ def _multi_day_outage_rows(stage_root: Path) -> list[dict[str, object]]:
 
 
 RESEARCH_WINDOWS = {
-    "daily": (pd.Timestamp("2009-01-05", tz="UTC"), pd.Timestamp("2018-12-28", tz="UTC")),
-    "5min": (pd.Timestamp("2009-10-01", tz="UTC"), pd.Timestamp("2018-12-28", tz="UTC")),
+    "daily": (
+        pd.Timestamp("2009-01-05", tz="UTC"),
+        pd.Timestamp("2018-12-28 23:59:59", tz="UTC"),
+    ),
+    "5min": (
+        pd.Timestamp("2009-10-01", tz="UTC"),
+        pd.Timestamp("2018-12-28 23:59:59", tz="UTC"),
+    ),
 }
+MINIMUM_RESEARCH_ROWS = {"daily": 2_000, "5min": 100_000}
 
 
 def _timestamp_bounds(path: Path) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
@@ -194,6 +201,7 @@ def _validate_staged_coverage(
     stage_root: Path,
     market_data_dir: Path,
     required_tickers: dict[str, set[str]],
+    minimum_research_rows: dict[str, int],
 ) -> None:
     for frequency, tickers in required_tickers.items():
         research_start, research_end = RESEARCH_WINDOWS[frequency]
@@ -204,9 +212,26 @@ def _validate_staged_coverage(
                 raise KibotDataError(
                     f"Required {ticker} {frequency} series has no usable rows"
                 )
-            if staged_first > research_start or staged_last < research_end:
+            if (
+                staged_first.date() > research_start.date()
+                or staged_last.date() < research_end.date()
+            ):
                 raise KibotDataError(
                     f"Required {ticker} {frequency} series does not cover the research window"
+                )
+            timestamps = pd.to_datetime(
+                pd.read_csv(staged_path, usecols=["timestamp"])["timestamp"],
+                utc=True,
+                errors="coerce",
+            )
+            research_rows = int(
+                timestamps.between(research_start, research_end, inclusive="both").sum()
+            )
+            minimum_rows = int(minimum_research_rows[frequency])
+            if research_rows < minimum_rows:
+                raise KibotDataError(
+                    f"Required {ticker} {frequency} series has insufficient "
+                    f"research-window observations: {research_rows} < {minimum_rows}"
                 )
 
             active_first, active_last = _timestamp_bounds(
@@ -228,6 +253,7 @@ def stage_kibot_merge(
     acquired_at: str,
     *,
     free_bytes: int | None = None,
+    minimum_research_rows: dict[str, int] | None = None,
 ) -> MigrationPaths:
     """Build and audit a merged repository without changing active data."""
     market_data_dir = Path(market_data_dir)
@@ -236,6 +262,10 @@ def stage_kibot_merge(
     intraday_zip = Path(intraday_zip)
     daily_meta = inventory_kibot_zip(daily_zip, "daily")
     intraday_meta = inventory_kibot_zip(intraday_zip, "5min")
+    minimum_research_rows = {
+        **MINIMUM_RESEARCH_ROWS,
+        **(minimum_research_rows or {}),
+    }
 
     uncompressed = 0
     import zipfile
@@ -316,7 +346,9 @@ def stage_kibot_merge(
                 if existing_path.stem not in imported_names:
                     shutil.copy2(existing_path, output_dir / existing_path.name)
 
-    _validate_staged_coverage(stage_root, market_data_dir, required_tickers)
+    _validate_staged_coverage(
+        stage_root, market_data_dir, required_tickers, minimum_research_rows
+    )
 
     quality_stage.mkdir(parents=True, exist_ok=True)
     coverage_columns = ["symbol", "frequency", "rows", "first_timestamp", "last_timestamp", "sources"]
@@ -349,6 +381,7 @@ def stage_kibot_merge(
             },
             "required_free_bytes": required,
             "available_free_bytes": available,
+            "minimum_research_rows": minimum_research_rows,
         },
     )
     return paths

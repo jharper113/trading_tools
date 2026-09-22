@@ -25,9 +25,9 @@ def write_purchase(path, frequency, missing=None, empty=None, truncated=None):
             if symbol in empty:
                 content = ""
             elif frequency == "daily":
-                content = "01/02/2009,100,102,99,101,10\n12/31/2018,101,103,100,102,11\n01/02/2020,102,104,101,103,12\n"
+                content = "01/05/2009,100,102,99,101,10\n12/28/2018,101,103,100,102,11\n01/02/2020,102,104,101,103,12\n"
             else:
-                content = "09/28/2009,09:30,100,102,99,101,10\n12/31/2018,09:30,101,103,100,102,11\n01/02/2020,09:30,102,104,101,103,12\n"
+                content = "10/01/2009,09:30,100,102,99,101,10\n12/28/2018,09:30,101,103,100,102,11\n01/02/2020,09:30,102,104,101,103,12\n"
                 if symbol == "ES":
                     content += "01/02/2020,09:35,103,105,102,104,13\n"
             if symbol in truncated:
@@ -88,6 +88,7 @@ def arrange_repository(tmp_path):
 
 def stage_fixture(tmp_path, **kwargs):
     market, archive_root, daily_zip, intraday_zip = arrange_repository(tmp_path)
+    kwargs.setdefault("minimum_research_rows", {"daily": 2, "5min": 2})
     paths = stage_kibot_merge(
         daily_zip=daily_zip,
         intraday_zip=intraday_zip,
@@ -181,6 +182,20 @@ def test_stage_rejects_required_series_without_research_window(tmp_path):
             market,
             tmp_path / "archives",
             "2026-09-22T12:00:00Z",
+            minimum_research_rows={"daily": 2, "5min": 2},
+        )
+
+
+def test_stage_rejects_sparse_required_series_even_when_endpoints_span_window(tmp_path):
+    market, archive_root, daily_zip, intraday_zip = arrange_repository(tmp_path)
+
+    with pytest.raises(ValueError, match="insufficient research-window observations"):
+        stage_kibot_merge(
+            daily_zip,
+            intraday_zip,
+            market,
+            archive_root,
+            "2026-09-22T12:00:00Z",
         )
 
 
@@ -202,6 +217,7 @@ def test_stage_rejects_coverage_regression_from_active_repository(tmp_path):
             market,
             archive_root,
             "2026-09-22T12:00:00Z",
+            minimum_research_rows={"daily": 2, "5min": 2},
         )
 
 

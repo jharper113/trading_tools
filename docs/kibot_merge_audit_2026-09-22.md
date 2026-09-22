@@ -31,6 +31,10 @@ repository is under
 - 66 daily files, 452,411 rows total.
 - 66 five-minute files, 26,482,761 rows total.
 - All 24 purchased symbols are present at both frequencies, including `RP`.
+- Every purchased symbol spans its required research window and exceeds the
+  blocking minimum of 2,000 daily or 100,000 five-minute observations in that
+  window. The lowest observed counts were 2,518 daily (`PA`) and 258,134
+  five-minute (`RP`).
 - ES daily: 1997-09-09 through 2026-09-21, 7,400 rows.
 - ES 5-minute: 2009-09-27 22:00 UTC through 2026-09-22 07:20 UTC,
   1,198,105 rows.

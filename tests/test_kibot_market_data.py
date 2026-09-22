@@ -359,6 +359,41 @@ def test_zero_schwab_volume_does_not_lose_precedence():
     assert result.rows.iloc[0]["volume"] == 0
 
 
+def test_zero_schwab_price_is_rejected_and_valid_kibot_row_wins():
+    schwab = frame("schwab", close=0)
+    schwab.loc[0, ["open", "high", "low"]] = 0
+
+    result = merge_market_data_sources([frame("kibot", close=101), schwab])
+
+    assert len(result.rows) == 1
+    assert result.rows.iloc[0]["source"] == "kibot"
+    assert result.rows.iloc[0]["close"] == 101
+    assert result.rejections.to_dict("records") == [{
+        "symbol": "/ES",
+        "frequency": "5min",
+        "comparison_key": "2026-09-18T13:30:00Z",
+        "source": "schwab",
+        "reason": "invalid_ohlc_zero",
+    }]
+
+
+def test_conflicting_same_source_duplicate_is_blocking():
+    first = frame("schwab", close=101)
+    second = frame("schwab", close=105, high=106)
+
+    with pytest.raises(KibotDataError, match="conflicting duplicate.*schwab"):
+        merge_market_data_sources([first, second])
+
+
+def test_identical_same_source_duplicate_collapses():
+    result = merge_market_data_sources(
+        [frame("schwab", close=101), frame("schwab", close=101)]
+    )
+
+    assert len(result.rows) == 1
+    assert result.rows.iloc[0]["source"] == "schwab"
+
+
 def test_daily_merge_keys_by_trading_date_and_orders_stably():
     result = merge_market_data_sources(
         [

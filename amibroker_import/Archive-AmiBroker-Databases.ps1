@@ -11,7 +11,7 @@ $IntradayDatabase = Join-Path $DatabaseRoot "Harp_Intraday"
 $ArchiveRoot = Join-Path $DatabaseRoot "Archive"
 $DailyArchive = Join-Path $ArchiveRoot ("Harp_Daily_before_kibot_merge_{0}" -f $ArchiveDate)
 $IntradayArchive = Join-Path $ArchiveRoot ("Harp_Intraday_before_kibot_merge_{0}" -f $ArchiveDate)
-$ManifestPath = Join-Path $ArchiveRoot "archive_manifest.json"
+$ManifestPath = Join-Path $ArchiveRoot ("archive_manifest_{0}.json" -f $ArchiveDate)
 
 function Get-DirectoryEvidence([string]$Path) {
     $root = (Resolve-Path -LiteralPath $Path).Path
@@ -69,7 +69,12 @@ catch {
     }
     $manifest.status = "FAIL"
     $manifest.error = $_.Exception.Message
-    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
+    $failedStamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssfffZ")
+    $failedManifest = Join-Path $ArchiveRoot ("archive_manifest_{0}_failed_{1}.json" -f $ArchiveDate, $failedStamp)
+    $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $failedManifest -Encoding UTF8
+    if (Test-Path -LiteralPath $ManifestPath) {
+        Remove-Item -LiteralPath $ManifestPath -Force
+    }
     throw
 }
 

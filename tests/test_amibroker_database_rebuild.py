@@ -16,7 +16,9 @@ def test_archive_script_guards_hashes_moves_and_rollback():
 
     assert "Get-Process" in script and '"Broker"' in script
     assert "Get-FileHash" in script
-    assert "archive_manifest.json" in script
+    assert 'archive_manifest_{0}.json' in script
+    assert "failed_" in script
+    assert "Remove-Item -LiteralPath $ManifestPath" in script
     assert 'ArchiveDate = "2026-09-22"' in script
     assert "Harp_Daily_before_kibot_merge_{0}" in script
     assert "Harp_Intraday_before_kibot_merge_{0}" in script

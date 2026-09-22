@@ -514,6 +514,7 @@ def validate_price_rows(frame):
         pd.to_numeric, errors="coerce"
     )
     finite = prices.notna().all(axis=1) & np.isfinite(prices).all(axis=1)
+    nonzero = prices.ne(0).all(axis=1)
     daily_envelope = (
         prices["low"].le(prices["high"])
         & prices["open"].ge(prices["low"])
@@ -528,6 +529,7 @@ def validate_price_rows(frame):
     reasons = pd.Series(pd.NA, index=working.index, dtype="object")
     reasons.loc[comparison_keys.eq("") | timestamps.isna()] = "invalid_timestamp"
     reasons.loc[reasons.isna() & ~finite] = "invalid_ohlc_numeric"
+    reasons.loc[reasons.isna() & ~nonzero] = "invalid_ohlc_zero"
     reasons.loc[reasons.isna() & ~envelope] = "invalid_ohlc_envelope"
 
     rejected_mask = reasons.notna()
@@ -625,6 +627,18 @@ def merge_market_data_sources(frames, reviewed_bars=None) -> MergeResult:
 
     candidates = pd.concat(accepted_frames, ignore_index=True)
     group_columns = ["symbol", "frequency", "_comparison_key"]
+    source_group_columns = [*group_columns, "source"]
+    value_columns = ["open", "high", "low", "close", "volume"]
+    for key, group in candidates.groupby(source_group_columns, dropna=False, sort=False):
+        if len(group) > 1 and len(group[value_columns].drop_duplicates()) > 1:
+            symbol, frequency, comparison_key, source = key
+            raise KibotDataError(
+                "Unresolved conflicting duplicate from "
+                f"{source} for {symbol} {frequency} at {comparison_key}"
+            )
+    candidates = candidates.sort_values(
+        [*source_group_columns, "_frame_order", "_row_order"], kind="stable"
+    ).drop_duplicates(source_group_columns, keep="last")
     candidates = candidates.reset_index(drop=True)
     candidates["_candidate_id"] = range(len(candidates))
     candidates["_retrieved_sort"] = pd.to_datetime(
