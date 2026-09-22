@@ -131,40 +131,44 @@ def _transition_rows(stage_root: Path) -> list[dict[str, object]]:
     for frequency in ("daily", "5min"):
         for path in sorted((stage_root / frequency).glob("*.csv")):
             frame = pd.read_csv(path, usecols=["timestamp", "source"]).sort_values("timestamp")
-            previous = None
-            for row in frame.itertuples(index=False):
-                if previous is not None and row.source != previous:
-                    records.append(
-                        {
-                            "symbol": path.stem,
-                            "frequency": frequency,
-                            "timestamp": row.timestamp,
-                            "from_source": previous,
-                            "to_source": row.source,
-                        }
-                    )
-                previous = row.source
+            previous = frame["source"].shift()
+            changed = previous.notna() & frame["source"].ne(previous)
+            if changed.any():
+                transitions = pd.DataFrame(
+                    {
+                        "symbol": path.stem,
+                        "frequency": frequency,
+                        "timestamp": frame.loc[changed, "timestamp"],
+                        "from_source": previous.loc[changed],
+                        "to_source": frame.loc[changed, "source"],
+                    }
+                )
+                records.extend(transitions.to_dict("records"))
     return records
 
 
 def _gap_rows(stage_root: Path) -> list[dict[str, object]]:
     records = []
     for frequency in ("daily", "5min"):
-        threshold = pd.Timedelta(days=3) if frequency == "daily" else pd.Timedelta(minutes=5)
+        threshold = pd.Timedelta(days=3)
         for path in sorted((stage_root / frequency).glob("*.csv")):
             frame = pd.read_csv(path, usecols=["timestamp"])
             times = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce").dropna().sort_values()
-            for previous, current in zip(times.iloc[:-1], times.iloc[1:]):
-                if current - previous > threshold:
-                    records.append(
-                        {
-                            "symbol": path.stem,
-                            "frequency": frequency,
-                            "previous_timestamp": previous.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                            "timestamp": current.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                            "gap_minutes": (current - previous).total_seconds() / 60,
-                        }
-                    )
+            gaps = times.diff()
+            selected = gaps.gt(threshold)
+            if selected.any():
+                current = times.loc[selected]
+                previous = times.shift().loc[selected]
+                gap_frame = pd.DataFrame(
+                    {
+                        "symbol": path.stem,
+                        "frequency": frequency,
+                        "previous_timestamp": previous.dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "timestamp": current.dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "gap_minutes": gaps.loc[selected].dt.total_seconds() / 60,
+                    }
+                )
+                records.extend(gap_frame.to_dict("records"))
     return records
 
 
