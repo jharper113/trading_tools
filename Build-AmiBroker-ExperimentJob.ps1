@@ -154,6 +154,7 @@ AddColumn( Short, "Short", 1.0 );
             analysis_profile = $profilePath
             analysis_profile_sha256 = File-Hash $profilePath
             build_manifest = (Join-Path $Destination 'build_manifest.json')
+            shared_policy = $(if ($null -ne $matrixObject.PSObject.Properties['shared_policy_windows']) { [string]$matrixObject.shared_policy_windows } else { '' })
         }
     }
     Save-Json $config (Join-Path $temporary 'batch.archive.json')

@@ -8,6 +8,7 @@
   },
   "timezone": "America/Detroit",
   "strategy_root_windows": "Z:\\04_Code\\Amibroker\\Strategies\\2026 Strategy Testing",
+  "shared_policy_windows": "Z:\\04_Code\\Amibroker\\Strategies\\Include\\Harp_Strategy_Policy.afl",
   "databases": {
     "daily": "Z:\\04_Code\\Amibroker\\Databases\\Harp_daily",
     "intraday": "Z:\\04_Code\\Amibroker\\Databases\\Harp_intraday"
