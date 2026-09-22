@@ -750,102 +750,64 @@ def build_integrity_report(bars):
         utc=True,
         errors="coerce",
     )
-    rows = []
+    prices = working[["open", "high", "low", "close"]].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    base = pd.DataFrame(
+        {
+            "symbol": working["symbol"].map(normalize_symbol),
+            "frequency": working["frequency"].map(normalize_frequency),
+            "timestamp": timestamps.dt.strftime("%Y-%m-%dT%H:%M:%SZ").fillna(""),
+            "date": working["date"].astype(str).str[:10],
+        },
+        index=working.index,
+    )
+    issue_frames = []
 
-    for index, row in working.iterrows():
-        symbol = normalize_symbol(row.get("symbol"))
-        frequency = normalize_frequency(row.get("frequency"))
-        timestamp = (
-            timestamps.loc[index].strftime("%Y-%m-%dT%H:%M:%SZ")
-            if not pd.isna(timestamps.loc[index])
-            else ""
+    def add_issues(mask, issue_type, field, value, expected, auto_fix):
+        if not mask.any():
+            return
+        issue = base.loc[mask].copy()
+        issue["issue_type"] = issue_type
+        issue["field"] = field
+        issue["value"] = value.loc[mask] if isinstance(value, pd.Series) else value
+        issue["expected"] = expected.loc[mask] if isinstance(expected, pd.Series) else expected
+        issue["severity"] = "error"
+        issue["auto_fix"] = auto_fix
+        issue_frames.append(issue)
+
+    for field in ["open", "high", "low", "close"]:
+        add_issues(
+            prices[field].isna(), "missing_ohlc", field, prices[field],
+            "numeric OHLC value", "drop_bar",
         )
-        date = str(row.get("date", ""))[:10]
-        prices = {
-            field: pd.to_numeric(row.get(field), errors="coerce")
-            for field in ["open", "high", "low", "close"]
-        }
+        add_issues(
+            prices[field].eq(0), "non_positive_price", field, prices[field],
+            "non-zero price", "drop_bar",
+        )
 
-        for field, value in prices.items():
-            if pd.isna(value):
-                rows.append(
-                    {
-                        "symbol": symbol,
-                        "frequency": frequency,
-                        "timestamp": timestamp,
-                        "date": date,
-                        "issue_type": "missing_ohlc",
-                        "field": field,
-                        "value": value,
-                        "expected": "numeric OHLC value",
-                        "severity": "error",
-                        "auto_fix": "drop_bar",
-                    }
-                )
-            elif value <= 0:
-                rows.append(
-                    {
-                        "symbol": symbol,
-                        "frequency": frequency,
-                        "timestamp": timestamp,
-                        "date": date,
-                        "issue_type": "non_positive_price",
-                        "field": field,
-                        "value": value,
-                        "expected": "> 0",
-                        "severity": "error",
-                        "auto_fix": "drop_bar",
-                    }
-                )
+    valid = prices.notna().all(axis=1) & prices.ne(0).all(axis=1)
+    is_daily = base["frequency"].eq("daily")
+    daily_fields = prices[["open", "high", "low"]]
+    intraday_fields = prices[["open", "high", "low", "close"]]
+    expected_high = intraday_fields.max(axis=1).where(
+        ~is_daily, daily_fields.max(axis=1)
+    )
+    expected_low = intraday_fields.min(axis=1).where(
+        ~is_daily, daily_fields.min(axis=1)
+    )
+    add_issues(
+        valid & prices["high"].lt(expected_high), "high_below_ohlc", "high",
+        prices["high"], expected_high, "set_high_to_max_ohlc",
+    )
+    add_issues(
+        valid & prices["low"].gt(expected_low), "low_above_ohlc", "low",
+        prices["low"], expected_low, "set_low_to_min_ohlc",
+    )
 
-        clean_prices = [
-            value
-            for value in prices.values()
-            if pd.notna(value) and value > 0
-        ]
-
-        if len(clean_prices) != 4:
-            continue
-
-        expected_high = max(clean_prices)
-        expected_low = min(clean_prices)
-
-        if prices["high"] < expected_high:
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "frequency": frequency,
-                    "timestamp": timestamp,
-                    "date": date,
-                    "issue_type": "high_below_ohlc",
-                    "field": "high",
-                    "value": prices["high"],
-                    "expected": expected_high,
-                    "severity": "error",
-                    "auto_fix": "set_high_to_max_ohlc",
-                }
-            )
-
-        if prices["low"] > expected_low:
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "frequency": frequency,
-                    "timestamp": timestamp,
-                    "date": date,
-                    "issue_type": "low_above_ohlc",
-                    "field": "low",
-                    "value": prices["low"],
-                    "expected": expected_low,
-                    "severity": "error",
-                    "auto_fix": "set_low_to_min_ohlc",
-                }
-            )
-
-    if not rows:
+    if not issue_frames:
         return pd.DataFrame(columns=INTEGRITY_COLUMNS)
-
-    return pd.DataFrame(rows).reindex(columns=INTEGRITY_COLUMNS)
+    return pd.concat(issue_frames, ignore_index=True).reindex(columns=INTEGRITY_COLUMNS)
 
 
 def auto_fix_integrity_issues(bars):
@@ -859,12 +821,15 @@ def auto_fix_integrity_issues(bars):
         fixed[column] = pd.to_numeric(fixed[column], errors="coerce")
 
     invalid_mask = fixed[["open", "high", "low", "close"]].isna().any(axis=1)
-    invalid_mask = invalid_mask | (fixed[["open", "high", "low", "close"]] <= 0).any(axis=1)
+    invalid_mask = invalid_mask | (fixed[["open", "high", "low", "close"]] == 0).any(axis=1)
     fixed = fixed[~invalid_mask].copy()
 
     if len(fixed) > 0:
-        fixed["high"] = fixed[["open", "high", "low", "close"]].max(axis=1)
-        fixed["low"] = fixed[["open", "high", "low", "close"]].min(axis=1)
+        daily = fixed["frequency"].astype(str).str.lower().eq("daily")
+        fixed.loc[daily, "high"] = fixed.loc[daily, ["open", "high", "low"]].max(axis=1)
+        fixed.loc[daily, "low"] = fixed.loc[daily, ["open", "high", "low"]].min(axis=1)
+        fixed.loc[~daily, "high"] = fixed.loc[~daily, ["open", "high", "low", "close"]].max(axis=1)
+        fixed.loc[~daily, "low"] = fixed.loc[~daily, ["open", "high", "low", "close"]].min(axis=1)
 
     return fixed[CANONICAL_COLUMNS].reset_index(drop=True), before_report
 

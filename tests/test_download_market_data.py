@@ -766,6 +766,32 @@ def test_build_integrity_report_flags_invalid_ohlc():
     assert set(report["issue_type"]) == {"high_below_ohlc", "low_above_ohlc"}
 
 
+def test_integrity_allows_negative_crude_and_daily_settlement_outside_range():
+    bars = normalize_bar_frame(
+        pd.DataFrame([
+            {
+                "timestamp": "2020-04-20T00:00:00Z",
+                "open": -10,
+                "high": -8,
+                "low": -12,
+                "close": -37.63,
+            }
+        ]),
+        symbol="/CL",
+        frequency="daily",
+        source="kibot",
+        retrieved_at="2026-09-22T00:00:00Z",
+    )
+
+    fixed, report = auto_fix_integrity_issues(bars)
+
+    assert report.empty
+    assert len(fixed) == 1
+    assert fixed.loc[0, "close"] == -37.63
+    assert fixed.loc[0, "high"] == -8
+    assert fixed.loc[0, "low"] == -12
+
+
 def test_auto_fix_integrity_issues_repairs_high_low_and_drops_bad_prices():
     bars = normalize_bar_frame(
         pd.DataFrame(
