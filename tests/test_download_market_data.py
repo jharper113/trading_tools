@@ -112,6 +112,21 @@ def test_normalize_frequency_aliases():
     assert normalize_frequency("1h") == "60min"
 
 
+def test_default_frequencies_are_daily_and_5min(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["download_market_data.py", "--quality-only"])
+
+    assert parse_args().frequencies == ["daily", "5min"]
+
+
+def test_explicit_60min_remains_supported(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["download_market_data.py", "--quality-only", "--frequencies", "60min"],
+    )
+
+    assert parse_args().frequencies == ["60min"]
+
+
 def test_elapsed_text_formats_seconds_minutes_and_hours():
     assert elapsed_text(9) == "9s"
     assert elapsed_text(61) == "1m 1s"

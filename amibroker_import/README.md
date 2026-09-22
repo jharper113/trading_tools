@@ -13,7 +13,7 @@ market-data run refreshes the two import files:
 ```bash
 .venv/bin/python download_market_data.py \
   --provider schwab \
-  --frequencies daily 5min 60min \
+  --frequencies daily 5min \
   --all \
   --continue-on-error \
   --export-amibroker \

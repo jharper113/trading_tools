@@ -1,6 +1,6 @@
 # download_market_data.py
 
-Download or ingest market data and store normalized daily, 5-minute, and 60-minute bars locally.
+Download or ingest market data and store normalized daily and 5-minute bars locally. A 60-minute output remains available when explicitly requested.
 
 ## Typical Uses
 
@@ -10,7 +10,7 @@ Ingest vendor CSV data for the full default futures universe:
 python download_market_data.py \
   --provider csv \
   --input-dir data/vendor_market_data \
-  --frequencies daily 5min 60min
+  --frequencies daily 5min
 ```
 
 Run quality checks against already-saved market data without fetching new bars:
@@ -25,7 +25,7 @@ Request Schwab's maximum supported history window:
 python download_market_data.py \
   --provider schwab \
   --all \
-  --frequencies daily 5min 60min
+  --frequencies daily 5min
 ```
 
 Download or ingest only a subset:
@@ -35,7 +35,7 @@ python download_market_data.py \
   --provider csv \
   --input-dir data/vendor_market_data \
   --symbols /ES /NQ /ZN /CL \
-  --frequencies daily 5min 60min
+  --frequencies daily 5min
 ```
 
 Download daily SPY data for the buy-and-hold benchmark:
@@ -62,7 +62,7 @@ when Schwab rejects one symbol/frequency:
 ```bash
 python download_market_data.py \
   --provider schwab \
-  --frequencies daily 5min 60min \
+  --frequencies daily 5min \
   --continue-on-error \
   --notify
 ```
@@ -117,7 +117,7 @@ results are in `data/market_data/daily/etc/schwab_symbol_mapping.csv`.
 : Symbols to download, such as futures roots/contracts (`/ES`, `/6E`, `/GC`) or equities/ETFs (`SPY`). Omit this flag to use the full configured default universe.
 
 `--frequencies FREQUENCIES [FREQUENCIES ...]`
-: Frequencies to download or check. Supported values are `daily`, `5min`, and `60min`.
+: Frequencies to download or check. The default is `daily 5min`. `60min` remains supported as an explicit optional output outside the canonical active repository.
 
 `--provider {csv,schwab}`
 : Data provider. Use `csv` for vendor/exported bars and `schwab` for Schwab API price history.
@@ -204,5 +204,5 @@ Example daily cron entry for all configured symbols:
 ```cron
 SHELL=/bin/bash
 CRON_TZ=America/New_York
-15 17 * * * cd /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools && . /home/jon/.schwab_env && /home/jon/anaconda3/bin/python download_market_data.py --provider schwab --frequencies daily 5min 60min --continue-on-error --notify >> /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/logs/market_data.log 2>&1
+15 17 * * * cd /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools && . /home/jon/.schwab_env && /home/jon/anaconda3/bin/python download_market_data.py --provider schwab --frequencies daily 5min --continue-on-error --export-amibroker --notify >> /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/logs/market_data.log 2>&1
 ```

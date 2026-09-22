@@ -1172,7 +1172,7 @@ def write_quality_reports(
     min_intraday_bars=50,
 ):
     output_dir = Path(output_dir)
-    frequencies = frequencies or ["daily", "5min", "60min"]
+    frequencies = frequencies or ["daily", "5min"]
     quality_dir = output_dir / QUALITY_DIR
     quality_dir.mkdir(parents=True, exist_ok=True)
     integrity_reports = []
@@ -1924,7 +1924,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Download or ingest market data and store normalized "
-            "daily, 5-minute, and 60-minute bars locally."
+            "daily and 5-minute bars locally (with optional 60-minute output)."
         )
     )
     parser.add_argument(
@@ -1939,7 +1939,7 @@ def parse_args():
     parser.add_argument(
         "--frequencies",
         nargs="+",
-        default=["daily", "5min", "60min"],
+        default=["daily", "5min"],
         help="One or more frequencies: daily, 5min, 60min",
     )
     parser.add_argument(

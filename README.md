@@ -29,13 +29,13 @@ Analyze performance by strategy:
 python analyze_strategy_performance.py
 ```
 
-Ingest futures market data into local daily, 5-minute, and 60-minute files:
+Ingest futures market data into the canonical daily and 5-minute files:
 
 ```bash
 python download_market_data.py \
   --provider csv \
   --input-dir data/vendor_market_data \
-  --frequencies daily 5min 60min
+  --frequencies daily 5min
 ```
 
 Schwab API access can be tested interactively with:
@@ -43,7 +43,7 @@ Schwab API access can be tested interactively with:
 ```bash
 python download_market_data.py \
   --provider schwab \
-  --frequencies daily 5min 60min
+  --frequencies daily 5min
 ```
 
 To create or replace the saved Schwab tokens without downloading data, run:
@@ -65,7 +65,7 @@ To request as much Schwab history as the script can ask for, add `--all`:
 python download_market_data.py \
   --provider schwab \
   --all \
-  --frequencies daily 5min 60min
+  --frequencies daily 5min
 ```
 
 The script prompts for `client_id`, hides `client_secret`, prints the Schwab
@@ -92,7 +92,7 @@ error. Desktop notifications are best effort and require the user to be logged
 in to the graphical desktop session.
 
 ```cron
-15 17 * * * cd /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools && . /home/jon/.schwab_env && /home/jon/anaconda3/bin/python download_market_data.py --provider schwab --frequencies daily 5min 60min --continue-on-error --notify >> /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/logs/market_data.log 2>&1
+15 17 * * * cd /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools && . /home/jon/.schwab_env && /home/jon/anaconda3/bin/python download_market_data.py --provider schwab --frequencies daily 5min --continue-on-error --export-amibroker --notify >> /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/logs/market_data.log 2>&1
 ```
 
 Each download/ingest run also writes local quality reports under
@@ -106,7 +106,7 @@ integrity problems, compares daily bars against daily OHLC aggregated from
 python download_market_data.py \
   --provider csv \
   --input-dir data/vendor_market_data \
-  --frequencies daily 5min 60min \
+  --frequencies daily 5min \
   --apply-daily-intraday-fixes
 ```
 
@@ -115,7 +115,7 @@ Validate locally stored futures bars against Yahoo Finance continuous futures da
 ```bash
 python validate_market_data.py \
   --source-dir data/market_data \
-  --frequencies daily 5min 60min \
+  --frequencies daily 5min \
   --threshold-pct 0.25 \
   --serve-dashboard
 ```
