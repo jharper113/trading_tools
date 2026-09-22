@@ -1,0 +1,22 @@
+{
+  "profile_name": "Intraday 5-minute",
+  "initial_equity": 100000,
+  "futures_mode": true,
+  "min_shares": 1,
+  "allow_same_bar_exit": true,
+  "reverse_signal_forces_exit": false,
+  "positions": "Long and short",
+  "commission_mode": 3,
+  "commission_per_contract_side": 3.76,
+  "use_previous_bar_equity": true,
+  "fitness": "CAR/MDD",
+  "periodicity": {"label": "5-minute", "apx_code": 8, "seconds": 300, "base_database_seconds": 300},
+  "optimization_window": {"start": "2009-01-01", "end": "2019-01-01"},
+  "wfa": {"mode": "Rolling", "in_sample_start": "2014-01-01", "in_sample_end": "2018-12-31", "in_sample_last": "2025-12-31", "out_sample_start": "2019-01-01", "out_sample_end": "2019-12-31", "out_sample_last": "2026-09-20", "step_months": 12},
+  "last_research_date": "2026-09-20",
+  "sealed_start": "2026-09-21",
+  "sealed_end": "2027-09-20",
+  "thresholds": {"core": {"profitable_paramsets_pct": 70, "median_profit_factor": 1.1, "median_trades": 120}, "family": {"profitable_paramsets_pct": 60, "median_profit_factor": 1.05, "median_trades": 90}, "broad": {"profitable_paramsets_pct": 50, "median_profit_factor": 1.0, "median_trades": 60}},
+  "holdout_status": "planned_forward_only; unseen status must be verified before use",
+  "research_cutoff_mode": "fixed snapshot as of 2026-09-20; extending WFA requires revising the holdout"
+}
