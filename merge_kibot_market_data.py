@@ -443,6 +443,7 @@ def publish_staged_repository(
     *,
     rename: Callable[[os.PathLike, os.PathLike], None] = os.replace,
     fault_hook: Callable[[str], None] | None = None,
+    cleanup_empty_stage: Callable[[Path], None] | None = None,
 ) -> dict[str, object]:
     """Publish staged data as one recoverable directory transaction."""
     destinations = [
@@ -512,6 +513,12 @@ def publish_staged_repository(
     quality_moved = False
     completion_archived = False
     fault_hook = fault_hook or (lambda _point: None)
+    if cleanup_empty_stage is None:
+        def cleanup_empty_stage(stage_root: Path) -> None:
+            stage_root.rmdir()
+            stage_parent = stage_root.parent
+            if stage_parent.exists() and not any(stage_parent.iterdir()):
+                stage_parent.rmdir()
     try:
         paths.canonical_archive_dir.mkdir(parents=True)
         for frequency in ("daily", "5min"):
@@ -555,10 +562,11 @@ def publish_staged_repository(
             paths.quality_destination / "stage_complete.json",
         )
         completion_archived = True
-        paths.stage_root.rmdir()
-        stage_parent = paths.stage_root.parent
-        if stage_parent.exists() and not any(stage_parent.iterdir()):
-            stage_parent.rmdir()
+        try:
+            cleanup_empty_stage(paths.stage_root)
+        except OSError:
+            # Publication is already complete; empty-directory cleanup is best effort.
+            pass
         return {"status": "PASS", "market_data_dir": str(paths.market_data_dir)}
     except Exception as error:
         try:

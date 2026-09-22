@@ -248,6 +248,22 @@ def test_publish_moves_vendor_zips_archives_60min_and_swaps_data(tmp_path):
     assert not paths.stage_root.exists()
 
 
+def test_cleanup_failure_does_not_roll_back_successful_publish(tmp_path):
+    paths, market, *_ = stage_fixture(tmp_path)
+
+    def fail_cleanup(_stage_root):
+        raise OSError("injected cleanup failure")
+
+    result = publish_staged_repository(
+        paths,
+        cleanup_empty_stage=fail_cleanup,
+    )
+
+    assert result["status"] == "PASS"
+    assert len(pd.read_csv(market / "5min" / "ES.csv")) == 4
+    assert (paths.quality_destination / "stage_complete.json").exists()
+
+
 def test_publish_refuses_existing_archive_destination(tmp_path):
     paths, *_ = stage_fixture(tmp_path)
     paths.vendor_archive_dir.mkdir(parents=True)
