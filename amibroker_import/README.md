@@ -115,6 +115,26 @@ the import, run `Verify-AmiBroker-Databases.ps1`; it compares each ticker's bar
 count and date range and requires ES winter and summer evidence in the research
 period. Do not start an experiment until the verification JSON says `PASS`.
 
+Run the scripts in this order from PowerShell:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Archive-AmiBroker-Databases.ps1"
+
+# Create both databases with the settings printed by the archive script.
+
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Import-MarketData.ps1"
+
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Verify-AmiBroker-Databases.ps1"
+```
+
+The verifier writes
+`data/market_data/amibroker/amibroker_database_verification.json`. If it reports
+truncation, increase the database bar capacity, recreate the database, import
+again, and rerun verification.
+
 Official references:
 
 - [AmiBroker OLE object model](https://www.amibroker.com/guide/objects.html)

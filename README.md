@@ -159,3 +159,24 @@ The default list is defined in `download_market_data.py`; each run also writes
 the symbols requested for that run to `data/market_data/symbols.csv`.
 
 Generated files are written to `output/`. Raw brokerage exports in `data/` and generated outputs are intentionally ignored by Git.
+
+## Rebuild AmiBroker after the Kibot merge
+
+On the Windows VM, close AmiBroker and run these commands in order:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Archive-AmiBroker-Databases.ps1"
+
+# Create Harp_Daily and Harp_Intraday using the settings printed by the script.
+
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Import-MarketData.ps1"
+
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Verify-AmiBroker-Databases.ps1"
+```
+
+Do not run an optimization or WFA batch until the verification JSON says
+`PASS`. If verification reports truncation, recreate `Harp_Intraday` with a
+higher bar capacity, reimport, and verify again.

@@ -88,6 +88,9 @@ the quality checks finish:
 The daily file preserves the supplied trading date. The 5-minute file converts
 UTC timestamps to `America/Detroit` by default. The Windows importer and setup
 instructions are in `amibroker_import/README.md`.
+After a full historical merge, archive and recreate both AmiBroker databases,
+import these files, and run `Verify-AmiBroker-Databases.ps1`. A passing export
+manifest alone does not prove that AmiBroker retained the full history.
 The export validates and uses the maintained contract-property table at
 `amibroker_import/instrument_settings.csv`. The Windows importer applies the
 available full names, currencies, round-lot sizes, point values, tick sizes,

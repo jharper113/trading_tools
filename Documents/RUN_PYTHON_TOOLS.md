@@ -134,3 +134,23 @@ The FX_6E optimization can be run now. The complete all-strategy WFA package
 still needs formula-specific projects, unique result folders, and removal of
 the internal 2018/2019 date gates before all 138 AFLs can be processed safely.
 Do not launch the full all-strategy WFA yet.
+
+## Required market-data rebuild on Windows
+
+Close AmiBroker. Run the archive script, create the two fresh databases using
+the settings it prints, run the importer, and then run the verifier:
+
+~~~powershell
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Archive-AmiBroker-Databases.ps1"
+
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Import-MarketData.ps1"
+
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Verify-AmiBroker-Databases.ps1"
+~~~
+
+`Harp_Daily` must be a local end-of-day database. `Harp_Intraday` must be a
+local 5-minute database with zero time shift, all sessions visible, and at
+least 2,000,000 bars. Do not start an experiment until verification is `PASS`.

@@ -78,3 +78,7 @@ the local audit.
 Before running any optimization or WFA batch on Windows, archive/recreate the
 two AmiBroker databases, import the generated files, and require
 `Verify-AmiBroker-Databases.ps1` to write a `PASS` result.
+
+Windows status: **pending operator execution**. The Ubuntu audit cannot exercise
+the AmiBroker OLE API or prove that the configured bar capacity retained all
+26,482,761 five-minute rows.
