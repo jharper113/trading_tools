@@ -17,7 +17,9 @@ import pandas as pd
 from download_market_data import CANONICAL_COLUMNS
 from kibot_market_data import (
     CONFLICT_COLUMNS,
+    KIBOT_SYMBOL_MAP,
     REJECTION_COLUMNS,
+    KibotDataError,
     inventory_kibot_zip,
     merge_market_data_sources,
     read_kibot_member,
@@ -147,7 +149,7 @@ def _transition_rows(stage_root: Path) -> list[dict[str, object]]:
     return records
 
 
-def _gap_rows(stage_root: Path) -> list[dict[str, object]]:
+def _multi_day_outage_rows(stage_root: Path) -> list[dict[str, object]]:
     records = []
     for frequency in ("daily", "5min"):
         threshold = pd.Timedelta(days=3)
@@ -170,6 +172,52 @@ def _gap_rows(stage_root: Path) -> list[dict[str, object]]:
                 )
                 records.extend(gap_frame.to_dict("records"))
     return records
+
+
+RESEARCH_WINDOWS = {
+    "daily": (pd.Timestamp("2009-01-05", tz="UTC"), pd.Timestamp("2018-12-28", tz="UTC")),
+    "5min": (pd.Timestamp("2009-10-01", tz="UTC"), pd.Timestamp("2018-12-28", tz="UTC")),
+}
+
+
+def _timestamp_bounds(path: Path) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    if not path.exists():
+        return None, None
+    frame = pd.read_csv(path, usecols=["timestamp"])
+    timestamps = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce").dropna()
+    if timestamps.empty:
+        return None, None
+    return timestamps.min(), timestamps.max()
+
+
+def _validate_staged_coverage(
+    stage_root: Path,
+    market_data_dir: Path,
+    required_tickers: dict[str, set[str]],
+) -> None:
+    for frequency, tickers in required_tickers.items():
+        research_start, research_end = RESEARCH_WINDOWS[frequency]
+        for ticker in sorted(tickers):
+            staged_path = stage_root / frequency / f"{ticker}.csv"
+            staged_first, staged_last = _timestamp_bounds(staged_path)
+            if staged_first is None:
+                raise KibotDataError(
+                    f"Required {ticker} {frequency} series has no usable rows"
+                )
+            if staged_first > research_start or staged_last < research_end:
+                raise KibotDataError(
+                    f"Required {ticker} {frequency} series does not cover the research window"
+                )
+
+            active_first, active_last = _timestamp_bounds(
+                market_data_dir / frequency / f"{ticker}.csv"
+            )
+            if active_first is not None and (
+                staged_first > active_first or staged_last < active_last
+            ):
+                raise KibotDataError(
+                    f"Required {ticker} {frequency} coverage regressed from the active repository"
+                )
 
 
 def stage_kibot_merge(
@@ -220,12 +268,15 @@ def stage_kibot_merge(
     rejection_frames = []
     reviewed_path = market_data_dir / "reviewed_bars.csv"
     reviewed_bars = pd.read_csv(reviewed_path) if reviewed_path.exists() else None
+    required_tickers: dict[str, set[str]] = {"daily": set(), "5min": set()}
     for metadata in (daily_meta, intraday_meta):
         output_dir = stage_root / metadata.frequency
         output_dir.mkdir(parents=True, exist_ok=True)
         imported_names = set()
         for member in metadata.members:
             vendor = Path(member).stem.upper()
+            ticker = KIBOT_SYMBOL_MAP.get(vendor, vendor)
+            required_tickers[metadata.frequency].add(ticker)
             kibot = read_kibot_member(
                 metadata.path,
                 member,
@@ -238,7 +289,10 @@ def stage_kibot_merge(
                 rejection_frames.append(
                     pd.DataFrame(parser_rejections, columns=REJECTION_COLUMNS)
                 )
-            ticker = str(kibot.iloc[0]["symbol"]).lstrip("/") if len(kibot) else vendor
+            if kibot.empty:
+                raise KibotDataError(
+                    f"Kibot member {vendor} mapped to {ticker} has no usable rows"
+                )
             imported_names.add(ticker)
             existing = _read_existing(market_data_dir / metadata.frequency / f"{ticker}.csv")
             member_reviews = reviewed_bars
@@ -262,6 +316,8 @@ def stage_kibot_merge(
                 if existing_path.stem not in imported_names:
                     shutil.copy2(existing_path, output_dir / existing_path.name)
 
+    _validate_staged_coverage(stage_root, market_data_dir, required_tickers)
+
     quality_stage.mkdir(parents=True, exist_ok=True)
     coverage_columns = ["symbol", "frequency", "rows", "first_timestamp", "last_timestamp", "sources"]
     transition_columns = ["symbol", "frequency", "timestamp", "from_source", "to_source"]
@@ -270,7 +326,9 @@ def stage_kibot_merge(
     pd.concat(conflict_frames, ignore_index=True).to_csv(quality_stage / "conflicts.csv", index=False) if conflict_frames else pd.DataFrame(columns=CONFLICT_COLUMNS).to_csv(quality_stage / "conflicts.csv", index=False)
     pd.concat(rejection_frames, ignore_index=True).to_csv(quality_stage / "rejections.csv", index=False) if rejection_frames else pd.DataFrame(columns=REJECTION_COLUMNS).to_csv(quality_stage / "rejections.csv", index=False)
     pd.DataFrame(_transition_rows(stage_root), columns=transition_columns).to_csv(quality_stage / "source_transitions.csv", index=False)
-    pd.DataFrame(_gap_rows(stage_root), columns=gap_columns).to_csv(quality_stage / "interval_gaps.csv", index=False)
+    pd.DataFrame(_multi_day_outage_rows(stage_root), columns=gap_columns).to_csv(
+        quality_stage / "multi_day_outages.csv", index=False
+    )
     _write_json(
         quality_stage / "source_manifest.json",
         {"archives": [
@@ -284,6 +342,11 @@ def stage_kibot_merge(
             "status": "PASS",
             "timezone": "America/Detroit",
             "dst": {"ambiguous_rows": 0, "nonexistent_rows": 0},
+            "gap_audit": {
+                "kind": "multi_day_outage",
+                "threshold_days": 3,
+                "session_aware": False,
+            },
             "required_free_bytes": required,
             "available_free_bytes": available,
         },
@@ -295,6 +358,7 @@ def publish_staged_repository(
     paths: MigrationPaths,
     *,
     rename: Callable[[os.PathLike, os.PathLike], None] = os.replace,
+    fault_hook: Callable[[str], None] | None = None,
 ) -> dict[str, object]:
     """Publish staged data as one recoverable directory transaction."""
     destinations = [
@@ -314,6 +378,7 @@ def publish_staged_repository(
     vendor_moves = []
     sixty_moved = False
     quality_moved = False
+    fault_hook = fault_hook or (lambda _point: None)
     try:
         paths.canonical_archive_dir.mkdir(parents=True)
         for frequency in ("daily", "5min"):
@@ -326,6 +391,7 @@ def publish_staged_repository(
             rename(staged, active)
             installed_new.append((active, staged))
         _write_json(paths.canonical_archive_dir / "archive_manifest.json", _directory_manifest(paths.canonical_archive_dir))
+        fault_hook("after_canonical_manifest")
 
         active_sixty = paths.market_data_dir / "60min"
         if active_sixty.exists():
@@ -333,15 +399,20 @@ def publish_staged_repository(
             rename(active_sixty, paths.sixty_archive_dir)
             sixty_moved = True
             _write_json(paths.sixty_archive_dir / "archive_manifest.json", _directory_manifest(paths.sixty_archive_dir))
+        fault_hook("after_sixty_archive")
 
         paths.vendor_archive_dir.mkdir(parents=True)
-        for source, name in ((paths.daily_zip, "daily.zip"), (paths.intraday_zip, "intraday.zip")):
+        for source, name, point in (
+            (paths.daily_zip, "daily.zip", "after_daily_zip"),
+            (paths.intraday_zip, "intraday.zip", "after_intraday_zip"),
+        ):
             destination = paths.vendor_archive_dir / name
             shutil.copy2(source, destination)
             if _sha256(source) != _sha256(destination):
                 raise PublishError(f"Hash mismatch while archiving {source}")
             source.unlink()
             vendor_moves.append((destination, source))
+            fault_hook(point)
 
         paths.quality_destination.parent.mkdir(parents=True, exist_ok=True)
         rename(paths.quality_stage, paths.quality_destination)
@@ -355,6 +426,7 @@ def publish_staged_repository(
                 if archived_zip.exists() and not source_zip.exists():
                     shutil.copy2(archived_zip, source_zip)
             if sixty_moved and paths.sixty_archive_dir.exists():
+                (paths.sixty_archive_dir / "archive_manifest.json").unlink(missing_ok=True)
                 rename(paths.sixty_archive_dir, paths.market_data_dir / "60min")
             for active, staged in reversed(installed_new):
                 if active.exists():
@@ -363,6 +435,16 @@ def publish_staged_repository(
             for archived, active in reversed(moved_old):
                 if archived.exists():
                     rename(archived, active)
+            if paths.vendor_archive_dir.exists():
+                shutil.rmtree(paths.vendor_archive_dir)
+            manifest = paths.canonical_archive_dir / "archive_manifest.json"
+            manifest.unlink(missing_ok=True)
+            if paths.canonical_archive_dir.exists():
+                shutil.rmtree(paths.canonical_archive_dir)
+            if paths.sixty_archive_dir.exists():
+                shutil.rmtree(paths.sixty_archive_dir)
+            if paths.quality_destination.exists():
+                shutil.rmtree(paths.quality_destination)
         except Exception as rollback_error:
             raise PublishError(f"{error}; rollback also failed: {rollback_error}") from error
         raise PublishError(str(error)) from error

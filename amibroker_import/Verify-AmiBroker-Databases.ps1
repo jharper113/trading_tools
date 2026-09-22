@@ -38,6 +38,7 @@ function Read-LiveDatabase([object]$Ab, [string]$Path, [object]$Expected, [bool]
                 if ($date -ge [datetime]"2009-01-01" -and $date -lt [datetime]"2019-01-01") {
                     if ($date.Month -in @(12, 1, 2)) { $winter = $true }
                     if ($date.Month -in @(6, 7, 8)) { $summer = $true }
+                    if ($winter -and $summer) { break }
                 }
             }
         }

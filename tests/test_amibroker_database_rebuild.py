@@ -42,6 +42,7 @@ def test_verifier_contract_checks_counts_ranges_and_es_seasons():
     assert "truncated" in script.lower()
     assert "winter" in script.lower()
     assert "summer" in script.lower()
+    assert "if ($winter -and $summer) { break }" in script
     assert "FixturePath" in script
 
 

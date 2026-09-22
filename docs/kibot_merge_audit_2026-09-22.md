@@ -42,6 +42,10 @@ repository is under
   ZN (Kibot TY) on 1995-12-19. Daily settlement closes outside the session
   high/low were retained because that is valid futures data.
 - DST conversion used `America/Detroit`; ambiguous and nonexistent rows: zero.
+- The gap report is a coarse **multi-day outage** report (more than three
+  calendar days). It is not a session-aware test of every expected 5-minute
+  bar; exchange calendars and instrument-specific sessions require a separate
+  audit.
 
 Detailed evidence is in
 `data/market_data/quality/kibot_merge_2026-09-22/`.

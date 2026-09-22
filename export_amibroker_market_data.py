@@ -149,11 +149,46 @@ def _stream_frequency(source_dir, frequency, temporary_path, timezone_name, chun
     symbol_stats = {}
     es_research_sessions = {"winter": False, "summer": False}
 
+    def write_rows(exported, ticker):
+        nonlocal exported_rows
+        if exported.empty:
+            return
+        exported.to_csv(temporary_path, mode="a", header=False, index=False)
+        exported_rows += len(exported)
+        market_tickers.add(ticker)
+        if frequency == "daily":
+            keys_for_range = exported["date"].astype(str)
+        else:
+            keys_for_range = exported["date"].astype(str) + " " + exported["time"].astype(str)
+        current = symbol_stats.setdefault(
+            ticker, {"ticker": ticker, "rows": 0, "first": None, "last": None}
+        )
+        current["rows"] += len(exported)
+        chunk_first = keys_for_range.min()
+        chunk_last = keys_for_range.max()
+        current["first"] = chunk_first if current["first"] is None else min(current["first"], chunk_first)
+        current["last"] = chunk_last if current["last"] is None else max(current["last"], chunk_last)
+        if frequency == "5min" and ticker == "ES":
+            research_dates = pd.to_datetime(exported["date"], errors="coerce")
+            research_dates = research_dates[
+                (research_dates >= pd.Timestamp("2009-01-01"))
+                & (research_dates < pd.Timestamp("2019-01-01"))
+            ]
+            es_research_sessions["winter"] = bool(
+                es_research_sessions["winter"]
+                or research_dates.dt.month.isin([12, 1, 2]).any()
+            )
+            es_research_sessions["summer"] = bool(
+                es_research_sessions["summer"]
+                or research_dates.dt.month.isin([6, 7, 8]).any()
+            )
+
     for path in sorted(Path(source_dir).glob("*.csv")):
         source_files += 1
         ticker = path.stem.upper()
         reader = pd.read_csv(path, chunksize=chunk_size)
         saw_chunk = False
+        pending = pd.DataFrame(columns=columns)
         for source in reader:
             saw_chunk = True
             _validate_source_columns(source, path)
@@ -168,38 +203,24 @@ def _stream_frequency(source_dir, frequency, temporary_path, timezone_name, chun
                 raise ValueError("AmiBroker export supports only daily and 5min")
             exported = exported.sort_values(keys, kind="stable").drop_duplicates(keys, keep="last")
             if len(exported):
-                exported.to_csv(temporary_path, mode="a", header=False, index=False)
-                exported_rows += len(exported)
-                market_tickers.add(ticker)
-                if frequency == "daily":
-                    keys_for_range = exported["date"].astype(str)
-                else:
-                    keys_for_range = exported["date"].astype(str) + " " + exported["time"].astype(str)
-                current = symbol_stats.setdefault(
-                    ticker, {"ticker": ticker, "rows": 0, "first": None, "last": None}
+                if not pending.empty:
+                    prior_key = tuple(str(pending.iloc[-1][key]) for key in keys)
+                    current_key = tuple(str(exported.iloc[0][key]) for key in keys)
+                    if current_key < prior_key:
+                        raise ValueError(f"{path} is not sorted by timestamp")
+                combined = (
+                    exported.reset_index(drop=True)
+                    if pending.empty
+                    else pd.concat([pending, exported], ignore_index=True)
                 )
-                current["rows"] += len(exported)
-                chunk_first = keys_for_range.min()
-                chunk_last = keys_for_range.max()
-                current["first"] = chunk_first if current["first"] is None else min(current["first"], chunk_first)
-                current["last"] = chunk_last if current["last"] is None else max(current["last"], chunk_last)
-                if frequency == "5min" and ticker == "ES":
-                    research_dates = pd.to_datetime(exported["date"], errors="coerce")
-                    research_dates = research_dates[
-                        (research_dates >= pd.Timestamp("2009-01-01"))
-                        & (research_dates < pd.Timestamp("2019-01-01"))
-                    ]
-                    es_research_sessions["winter"] = bool(
-                        es_research_sessions["winter"]
-                        or research_dates.dt.month.isin([12, 1, 2]).any()
-                    )
-                    es_research_sessions["summer"] = bool(
-                        es_research_sessions["summer"]
-                        or research_dates.dt.month.isin([6, 7, 8]).any()
-                    )
+                combined = combined.sort_values(keys, kind="stable").drop_duplicates(keys, keep="last")
+                if len(combined) > 1:
+                    write_rows(combined.iloc[:-1], ticker)
+                pending = combined.iloc[-1:].copy()
         if not saw_chunk:
             header = pd.read_csv(path, nrows=0)
             _validate_source_columns(header, path)
+        write_rows(pending, ticker)
 
     stats = {
         "source_files": source_files,

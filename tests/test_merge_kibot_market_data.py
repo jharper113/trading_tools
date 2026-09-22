@@ -16,16 +16,22 @@ from merge_kibot_market_data import (
 )
 
 
-def write_purchase(path, frequency, missing=None):
+def write_purchase(path, frequency, missing=None, empty=None, truncated=None):
     missing = set(missing or [])
+    empty = set(empty or [])
+    truncated = set(truncated or [])
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for symbol in sorted(KIBOT_REQUIRED_SYMBOLS - missing):
-            if frequency == "daily":
-                content = "01/02/2020,100,102,99,101,10\n"
+            if symbol in empty:
+                content = ""
+            elif frequency == "daily":
+                content = "01/02/2009,100,102,99,101,10\n12/31/2018,101,103,100,102,11\n01/02/2020,102,104,101,103,12\n"
             else:
-                content = "01/02/2020,09:30,100,102,99,101,10\n"
+                content = "09/28/2009,09:30,100,102,99,101,10\n12/31/2018,09:30,101,103,100,102,11\n01/02/2020,09:30,102,104,101,103,12\n"
                 if symbol == "ES":
-                    content += "01/02/2020,09:35,101,103,100,102,11\n"
+                    content += "01/02/2020,09:35,103,105,102,104,13\n"
+            if symbol in truncated:
+                content = content.splitlines(keepends=True)[-1]
             archive.writestr(f"purchase/{symbol}.txt", content)
     return path
 
@@ -115,7 +121,7 @@ def test_stage_writes_coverage_conflict_gap_and_transition_audits(tmp_path):
     coverage = pd.read_csv(paths.quality_stage / "coverage.csv")
     conflicts = pd.read_csv(paths.quality_stage / "conflicts.csv")
     transitions = pd.read_csv(paths.quality_stage / "source_transitions.csv")
-    gaps = pd.read_csv(paths.quality_stage / "interval_gaps.csv")
+    gaps = pd.read_csv(paths.quality_stage / "multi_day_outages.csv")
     merged_es = pd.read_csv(paths.stage_root / "5min" / "ES.csv")
 
     assert {"ES", "SPY"}.issubset(set(coverage["symbol"]))
@@ -125,7 +131,13 @@ def test_stage_writes_coverage_conflict_gap_and_transition_audits(tmp_path):
     assert list(gaps.columns) == [
         "symbol", "frequency", "previous_timestamp", "timestamp", "gap_minutes"
     ]
-    assert merged_es["source"].tolist() == ["kibot", "schwab"]
+    assert merged_es["source"].tolist() == ["kibot", "kibot", "kibot", "schwab"]
+    summary = json.loads((paths.quality_stage / "merge_summary.json").read_text())
+    assert summary["gap_audit"] == {
+        "kind": "multi_day_outage",
+        "session_aware": False,
+        "threshold_days": 3,
+    }
 
 
 def test_stage_rejects_missing_required_member(tmp_path):
@@ -139,6 +151,56 @@ def test_stage_rejects_missing_required_member(tmp_path):
             intraday_zip,
             market,
             tmp_path / "archives",
+            "2026-09-22T12:00:00Z",
+        )
+
+
+def test_stage_rejects_empty_required_member_under_canonical_ticker(tmp_path):
+    market = tmp_path / "market_data"
+    daily_zip = write_purchase(tmp_path / "daily.zip", "daily", empty={"TY"})
+    intraday_zip = write_purchase(tmp_path / "intraday.zip", "5min")
+
+    with pytest.raises(ValueError, match=r"TY.*ZN.*no usable rows"):
+        stage_kibot_merge(
+            daily_zip,
+            intraday_zip,
+            market,
+            tmp_path / "archives",
+            "2026-09-22T12:00:00Z",
+        )
+
+def test_stage_rejects_required_series_without_research_window(tmp_path):
+    market = tmp_path / "market_data"
+    daily_zip = write_purchase(tmp_path / "daily.zip", "daily", truncated={"ES"})
+    intraday_zip = write_purchase(tmp_path / "intraday.zip", "5min")
+
+    with pytest.raises(ValueError, match=r"ES.*daily.*research window"):
+        stage_kibot_merge(
+            daily_zip,
+            intraday_zip,
+            market,
+            tmp_path / "archives",
+            "2026-09-22T12:00:00Z",
+        )
+
+
+def test_stage_rejects_coverage_regression_from_active_repository(tmp_path):
+    market, archive_root, daily_zip, intraday_zip = arrange_repository(tmp_path)
+    write_canonical(
+        market / "daily" / "ES.csv",
+        [canonical_row("/ES", "daily", "2000-01-03T00:00:00Z")],
+    )
+    # Force the active row to be unusable so it cannot be copied into the stage.
+    frame = pd.read_csv(market / "daily" / "ES.csv")
+    frame["close"] = pd.NA
+    frame.to_csv(market / "daily" / "ES.csv", index=False)
+
+    with pytest.raises(ValueError, match=r"ES.*coverage regressed"):
+        stage_kibot_merge(
+            daily_zip,
+            intraday_zip,
+            market,
+            archive_root,
             "2026-09-22T12:00:00Z",
         )
 
@@ -164,7 +226,7 @@ def test_publish_moves_vendor_zips_archives_60min_and_swaps_data(tmp_path):
     assert manifest["files"][0]["sha256"]
     assert manifest["files"][0]["rows"] == 1
     assert not (market / "60min").exists()
-    assert len(pd.read_csv(market / "5min" / "ES.csv")) == 2
+    assert len(pd.read_csv(market / "5min" / "ES.csv")) == 4
 
 
 def test_publish_refuses_existing_archive_destination(tmp_path):
@@ -196,3 +258,34 @@ def test_publish_rolls_back_both_directories_on_second_stage_move_failure(tmp_pa
     assert len(pd.read_csv(market / "5min" / "ES.csv")) == 1
     assert (market / "60min" / "ES.csv").exists()
     assert daily_zip.exists() and intraday_zip.exists()
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    [
+        "after_canonical_manifest",
+        "after_sixty_archive",
+        "after_daily_zip",
+        "after_intraday_zip",
+    ],
+)
+def test_publish_failure_leaves_no_destinations_and_can_retry(tmp_path, failure_point):
+    paths, market, _, daily_zip, intraday_zip = stage_fixture(tmp_path)
+
+    def fail_at(point):
+        if point == failure_point:
+            raise OSError(f"injected failure at {point}")
+
+    with pytest.raises(PublishError, match="injected failure"):
+        publish_staged_repository(paths, fault_hook=fail_at)
+
+    assert len(pd.read_csv(market / "daily" / "ES.csv")) == 1
+    assert len(pd.read_csv(market / "5min" / "ES.csv")) == 1
+    assert (market / "60min" / "ES.csv").exists()
+    assert daily_zip.exists() and intraday_zip.exists()
+    assert not paths.vendor_archive_dir.exists()
+    assert not paths.sixty_archive_dir.exists()
+    assert not paths.canonical_archive_dir.exists()
+    assert not paths.quality_destination.exists()
+
+    assert publish_staged_repository(paths)["status"] == "PASS"

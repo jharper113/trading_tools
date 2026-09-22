@@ -233,6 +233,31 @@ def test_export_streams_small_chunks_in_deterministic_symbol_order(tmp_path):
     assert result["manifest"]["daily"]["exported_rows"] == 4
 
 
+def test_export_deduplicates_a_timestamp_split_across_chunks(tmp_path):
+    market_data = tmp_path / "market_data"
+    rows = []
+    for close in (100, 101):
+        rows.append({
+            "timestamp": "2026-01-02T00:00:00Z",
+            "date": "2026-01-02",
+            "symbol": "/ES",
+            "frequency": "daily",
+            "open": close - 1,
+            "high": close + 1,
+            "low": close - 2,
+            "close": close,
+        })
+    write_market_data(market_data / "daily" / "ES.csv", rows)
+
+    result = export_amibroker_market_data(market_data, chunk_size=1)
+
+    exported = pd.read_csv(result["daily_path"])
+    assert len(exported) == 1
+    assert exported.iloc[0]["close"] == 101
+    assert result["manifest"]["daily"]["source_rows"] == 2
+    assert result["manifest"]["daily"]["exported_rows"] == 1
+
+
 def test_failed_stream_leaves_no_completion_manifest(tmp_path, monkeypatch):
     market_data = tmp_path / "market_data"
     write_market_data(
