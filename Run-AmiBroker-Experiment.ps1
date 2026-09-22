@@ -21,6 +21,17 @@ function Save-Json($Value, [string]$Path) {
     Move-Item -LiteralPath $temporary -Destination $Path -Force
 }
 function File-Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Invoke-AmiBrokerBatch([string]$BrokerPath, [string]$BatchPath) {
+    # Broker.exe is a Windows GUI process, so invoking it with '&' does not
+    # reliably populate $LASTEXITCODE or wait for the batch to finish.
+    $quotedBatchPath = '"' + $BatchPath + '"'
+    $brokerProcess = Start-Process -FilePath $BrokerPath `
+        -ArgumentList @('/runbatch', $quotedBatchPath, '/exit') `
+        -Wait -PassThru
+    if ($brokerProcess.ExitCode -ne 0) {
+        throw "AmiBroker exited $($brokerProcess.ExitCode)"
+    }
+}
 function Assert-SameMembers($Actual, $Expected, [string]$Label) {
     $difference = @(Compare-Object @($Actual | Sort-Object) @($Expected | Sort-Object))
     if ($difference.Count) { throw "$Label does not match the experiment matrix" }
@@ -192,8 +203,7 @@ try {
         try {
             & (Join-Path $PSScriptRoot 'Build-AmiBroker-ExperimentJob.ps1') -Matrix $matrixPath -JobId ([string]$state.job_id) -Destination $attemptDir -ReportsRoot $ReportsRoot -AttemptId $attemptId
             $state.build_manifest_path = Join-Path $attemptDir 'build_manifest.json'
-            & $Broker '/runbatch' (Join-Path $attemptDir 'batch.abb') '/exit'
-            if ($LASTEXITCODE -ne 0) { throw "AmiBroker exited $LASTEXITCODE" }
+            Invoke-AmiBrokerBatch $Broker (Join-Path $attemptDir 'batch.abb')
             $archiveConfig = Read-Json (Join-Path $attemptDir 'batch.archive.json')
             $contextPath = Join-Path ([string]$archiveConfig.staging_dir) 'context.json'
             if (-not (Test-Path -LiteralPath $contextPath -PathType Leaf)) { throw 'AmiBroker did not publish archive context' }

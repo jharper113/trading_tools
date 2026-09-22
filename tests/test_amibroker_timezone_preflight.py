@@ -42,6 +42,12 @@ def test_preflight_files_exist():
     text = SCRIPT.read_text(encoding="utf-8")
     assert "'Explore'" in text
     assert "Remove-Item -LiteralPath $csvPath" in text
+    assert "Start-Process" in text
+    assert "-Wait" in text
+    assert "-PassThru" in text
+    assert ".ExitCode" in text
+    assert "& $Broker '/runbatch'" not in text
+    assert "Harp_Intraday has no qualifying ES data" in text
 
 
 @pytest.mark.parametrize("shift,interval", [(3600, 300), (0, 900)])

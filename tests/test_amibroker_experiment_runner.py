@@ -18,8 +18,11 @@ def test_runner_and_archive_contract_are_present():
     runner = RUNNER.read_text(encoding="utf-8")
     archiver = ARCHIVER.read_text(encoding="utf-8")
     assert "'PENDING','RUNNING','COMPLETE','FAILED','INTERRUPTED'" in runner
-    assert "& $Broker '/runbatch'" in runner
-    assert "Start-Process" not in runner
+    assert "Start-Process" in runner
+    assert "-Wait" in runner
+    assert "-PassThru" in runner
+    assert ".ExitCode" in runner
+    assert "& $Broker '/runbatch'" not in runner
     assert "PublishAudit" in archiver
     assert "audit_exports" in archiver
     assert "experiment_artifacts" in archiver

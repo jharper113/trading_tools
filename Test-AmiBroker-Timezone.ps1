@@ -1,4 +1,4 @@
-# Windows PowerShell 5.1+. Verifies that Harp_intraday is already Eastern time.
+# Windows PowerShell 5.1+. Verifies that Harp_Intraday is already Eastern time.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][string]$Broker,
@@ -30,6 +30,17 @@ function Set-XmlValues($Document, [string[]]$Names, [string]$Value) {
 function Test-SessionPair($Rows) {
     $times = @($Rows | ForEach-Object { [int]$_.TimeNum })
     return ($times -contains 93000) -and ($times -contains 155500)
+}
+function Invoke-AmiBrokerBatch([string]$BrokerPath, [string]$BatchPath) {
+    # Broker.exe is a Windows GUI process, so invoking it with '&' does not
+    # reliably populate $LASTEXITCODE or wait for the batch to finish.
+    $quotedBatchPath = '"' + $BatchPath + '"'
+    $brokerProcess = Start-Process -FilePath $BrokerPath `
+        -ArgumentList @('/runbatch', $quotedBatchPath, '/exit') `
+        -Wait -PassThru
+    if ($brokerProcess.ExitCode -ne 0) {
+        throw "AmiBroker timezone preflight exited $($brokerProcess.ExitCode)"
+    }
 }
 
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
@@ -73,13 +84,16 @@ try {
         Add-BatchStep $batch $root 'Export' $csvPath
         $batchPath = Join-Path $WorkDir 'timezone_preflight.abb'
         $batch.Save($batchPath)
-        & $Broker '/runbatch' $batchPath '/exit'
-        if ($LASTEXITCODE -ne 0) { throw "AmiBroker timezone preflight exited $LASTEXITCODE" }
+        Invoke-AmiBrokerBatch $Broker $batchPath
     }
 
-    if (-not (Test-Path -LiteralPath $csvPath -PathType Leaf)) { throw 'Timezone preflight did not create a CSV' }
+    if (-not (Test-Path -LiteralPath $csvPath -PathType Leaf)) {
+        throw 'Timezone preflight did not create a CSV. Verify that Harp_Intraday contains ES data in the 2009-01-01 through 2019-01-01 research window.'
+    }
     $rows = @(Import-Csv -LiteralPath $csvPath)
-    if (-not $rows) { throw 'Timezone preflight CSV is empty' }
+    if (-not $rows) {
+        throw 'Timezone preflight CSV is empty. Harp_Intraday has no qualifying ES data in the 2009-01-01 through 2019-01-01 research window.'
+    }
     $requiredColumns = @('DateTime','TimeNum','TimeShiftSeconds','IntervalSeconds')
     foreach ($column in $requiredColumns) {
         if ($rows[0].PSObject.Properties.Name -notcontains $column) { throw "Timezone CSV is missing $column" }
