@@ -30,11 +30,16 @@ def _sha256(path):
 
 
 def _profile_path(context):
-    name = (
-        "Daily_Analyzer_Profile.json"
-        if context.timeframe == "Daily"
-        else "Intraday_15m_Analyzer_Profile.json"
-    )
+    profiles = {
+        "Daily": "Daily_Analyzer_Profile.json",
+        "Intraday_5m": "Intraday_5m_Analyzer_Profile.json",
+        "Intraday_15m": "Intraday_15m_Analyzer_Profile.json",
+        "Intraday_60m": "Intraday_60m_Analyzer_Profile.json",
+    }
+    try:
+        name = profiles[context.timeframe]
+    except KeyError as exc:
+        raise ValueError(f"No analyzer profile for {context.timeframe}") from exc
     return HERE / "Analyzer_Profiles" / name
 
 

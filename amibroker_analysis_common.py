@@ -39,8 +39,8 @@ def read_project_context(project_path):
     interval = int(_text(root, "ChartInterval", "86400"))
     if periodicity == 0 or interval == 86400:
         timeframe = "Daily"
-    elif periodicity == 8 or interval == 900:
-        timeframe = "Intraday_15m"
+    elif periodicity == 8 and interval in {300, 900, 3600}:
+        timeframe = f"Intraday_{interval // 60}m"
     else:
         timeframe = f"Interval_{interval}s"
     is_start = _text(root, "ISStartDate")
