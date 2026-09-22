@@ -86,11 +86,21 @@ function Compare-Snapshot([string]$Label, [object]$Expected, [object]$Actual) {
         elseif ([int64]$actualSymbol.rows -ne [int64]$expectedSymbol.rows) {
             $failures += "$Label $($expectedSymbol.ticker) row count differs: expected $($expectedSymbol.rows), found $($actualSymbol.rows)"
         }
-        if ($expectedSymbol.first -and ([datetime]$actualSymbol.first -gt [datetime]$expectedSymbol.first)) {
-            $failures += "$Label $($expectedSymbol.ticker) first date is truncated"
+        if ($expectedSymbol.first) {
+            if (-not $actualSymbol.first) {
+                $failures += "$Label $($expectedSymbol.ticker) first date is unavailable"
+            }
+            elseif ([datetime]$actualSymbol.first -gt [datetime]$expectedSymbol.first) {
+                $failures += "$Label $($expectedSymbol.ticker) first date is truncated"
+            }
         }
-        if ($expectedSymbol.last -and ([datetime]$actualSymbol.last -lt [datetime]$expectedSymbol.last)) {
-            $failures += "$Label $($expectedSymbol.ticker) last date is truncated"
+        if ($expectedSymbol.last) {
+            if (-not $actualSymbol.last) {
+                $failures += "$Label $($expectedSymbol.ticker) last date is unavailable"
+            }
+            elseif ([datetime]$actualSymbol.last -lt [datetime]$expectedSymbol.last) {
+                $failures += "$Label $($expectedSymbol.ticker) last date is truncated"
+            }
         }
     }
     foreach ($season in @("winter", "summer")) {

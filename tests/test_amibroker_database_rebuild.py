@@ -126,3 +126,46 @@ $actual = Read-LiveDatabase $broker 'fixture-daily' $expected $false
     assert "fixture-daily" in output["failures"][0]
     assert "ES" in output["failures"][0]
     assert "quotation 0" in output["failures"][0]
+
+
+@pytest.mark.skipif(_powershell() is None, reason="PowerShell is unavailable")
+def test_verifier_writes_failure_report_for_unavailable_quote_dates(tmp_path):
+    expected = {
+        "daily": {
+            "symbols": [{
+                "ticker": "ES", "rows": 1,
+                "first": "2009-01-01 09:30:00",
+                "last": "2009-01-01 09:30:00",
+            }],
+        },
+        "intraday": {"symbols": []},
+    }
+    fixture = {
+        "daily": {
+            "symbols": [{"ticker": "ES", "rows": 1, "first": None, "last": None}],
+            "diagnostics": ["Harp_Daily ticker ES: quotation 0 is null"],
+        },
+        "intraday": {"symbols": []},
+    }
+    manifest = tmp_path / "manifest.json"
+    snapshot = tmp_path / "snapshot.json"
+    report = tmp_path / "verification.json"
+    manifest.write_text(json.dumps(expected))
+    snapshot.write_text(json.dumps(fixture))
+
+    result = subprocess.run(
+        [
+            _powershell(), "-NoProfile", "-File", str(VERIFY.resolve()),
+            "-ExportManifest", str(manifest), "-FixturePath", str(snapshot),
+            "-OutputPath", str(report),
+        ],
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode != 0
+    output = json.loads(report.read_text())
+    assert output["status"] == "FAIL"
+    assert "quotation 0 is null" in " ".join(output["failures"])
+    assert "first date is unavailable" in " ".join(output["failures"])
+    assert "last date is unavailable" in " ".join(output["failures"])
+    assert "Cannot convert null" not in result.stderr
