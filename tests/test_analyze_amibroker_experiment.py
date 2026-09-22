@@ -1,6 +1,8 @@
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pandas as pd
 import pytest
@@ -44,6 +46,58 @@ def valid_job(tmp_path):
         "project_path": project,
         "core_symbols": [],
     }
+
+
+@pytest.fixture
+def cli_experiment_fixture(tmp_path):
+    matrix = {
+        "schema_version": 1,
+        "matrix_id": "cli-fixture",
+        "research_window": {"start": "2009-01-01", "end": "2019-01-01"},
+        "timezone": "America/Detroit",
+        "jobs": {},
+    }
+    states = []
+    for job_id in ("valid", "tampered"):
+        run = tmp_path / job_id
+        run.mkdir()
+        result = run / "ES.csv"
+        pd.DataFrame(
+            [{"Net Profit": 100, "Profit Factor": 1.3, "# Trades": 100,
+              "CAR/MDD": .5, "Max. Sys % Drawdown": -10, "Opt X": 1}]
+        ).to_csv(result, index=False)
+        project = run / "project.apx"
+        project.write_text(
+            "<AnalysisDoc><FormulaPath>Z:\\Strategies\\Demo.afl</FormulaPath>"
+            "<Periodicity>0</Periodicity><ChartInterval>86400</ChartInterval>"
+            "<FromDate>2009-01-01</FromDate><ToDate>2019-01-01</ToDate></AnalysisDoc>"
+        )
+        run_manifest = run / "run_manifest.json"
+        run_manifest.write_text(json.dumps({
+            "status": "COMPLETE", "expected_symbols": ["ES"],
+            "exports": [{"symbol": "ES", "file": "ES.csv", "sha256": _sha(result)}],
+        }))
+        matrix["jobs"][job_id] = {
+            "job_id": job_id, "strategy_id": "Demo", "periodicity": "Daily",
+            "adapter": {"name": "native"},
+            "analysis_profile": "Analyzer_Profiles/Daily_Analyzer_Profile.json",
+            "symbols": ["ES"], "source_sha256": "a" * 64,
+        }
+        states.append({
+            "job_id": job_id, "status": "COMPLETE",
+            "run_manifest_path": str(run_manifest),
+            "run_manifest_sha256": _sha(run_manifest),
+        })
+        if job_id == "tampered":
+            result.write_text(result.read_text() + "\n")
+    matrix_path = tmp_path / "matrix.json"
+    matrix_path.write_text(json.dumps(matrix))
+    manifest = tmp_path / "experiment_manifest.json"
+    manifest.write_text(json.dumps({
+        "schema_version": 1, "experiment_id": "experiment-1", "mode": "pilot",
+        "matrix_path": str(matrix_path), "matrix_sha256": _sha(matrix_path), "jobs": states,
+    }))
+    return type("Fixture", (), {"manifest": manifest})
 
 
 def test_analyze_job_writes_detailed_reports_inside_run_without_browser(valid_job, monkeypatch):
@@ -91,3 +145,24 @@ def test_project_context_names_supported_intraday_intervals(tmp_path, seconds, t
         f"<AnalysisDoc><FormulaPath>Z:\\Strategies\\Demo.afl</FormulaPath><Periodicity>8</Periodicity><ChartInterval>{seconds}</ChartInterval></AnalysisDoc>"
     )
     assert read_project_context(project).timeframe == timeframe
+
+
+def test_cli_is_rerunnable_and_never_promotes_corrupt_job(cli_experiment_fixture, tmp_path):
+    output = tmp_path / "analysis"
+    command = [
+        sys.executable,
+        str(Path(__file__).parents[1] / "analyze_amibroker_experiment.py"),
+        str(cli_experiment_fixture.manifest),
+        "--output-dir",
+        str(output),
+    ]
+    first = subprocess.run(command, capture_output=True, text=True)
+    second = subprocess.run(command, capture_output=True, text=True)
+    assert (first.returncode, first.stderr) == (0, "")
+    assert (second.returncode, second.stderr) == (0, "")
+    summary = json.loads((output / "experiment_summary.json").read_text())
+    assert summary["job_counts"]["invalid"] == 1
+    assert all(row["job_id"] != "tampered" for row in summary["passed_candidates"])
+    assert (output / "all_symbol_results.csv").is_file()
+    assert (output / "schedule_comparisons.csv").is_file()
+    assert (output / "experiment-1_Optimization_Review.xlsx").is_file()
