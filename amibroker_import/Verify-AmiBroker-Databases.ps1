@@ -14,44 +14,66 @@ if (-not $ExportManifest) { $ExportManifest = Join-Path $MarketDataDirectory "am
 if (-not $OutputPath) { $OutputPath = Join-Path $MarketDataDirectory "amibroker\amibroker_database_verification.json" }
 
 function Quote-Date([object]$Quote) {
-    if ($Quote.PSObject.Properties.Name -contains "DateTime") { return [datetime]$Quote.DateTime }
-    return [datetime]$Quote.Date
+    if ($null -eq $Quote) { throw "quotation is null" }
+    $value = if ($Quote.PSObject.Properties.Name -contains "DateTime") { $Quote.DateTime } else { $Quote.Date }
+    if ($null -eq $value) { throw "quotation has no date" }
+    return [datetime]$value
 }
 
 function Read-LiveDatabase([object]$Ab, [string]$Path, [object]$Expected, [bool]$CheckSeasons) {
     if (-not $Ab.LoadDatabase($Path)) { throw "AmiBroker could not load database: $Path" }
     $symbols = @()
+    $diagnostics = @()
     $winter = $false
     $summer = $false
     foreach ($item in @($Expected.symbols)) {
-        $stock = $Ab.Stocks.Item([string]$item.ticker)
-        $count = [int]$stock.Quotations.Count
+        $ticker = [string]$item.ticker
+        $count = 0
         $first = $null
         $last = $null
-        if ($count -gt 0) {
-            $first = (Quote-Date $stock.Quotations.Item(0)).ToString("yyyy-MM-dd HH:mm:ss")
-            $last = (Quote-Date $stock.Quotations.Item($count - 1)).ToString("yyyy-MM-dd HH:mm:ss")
-        }
-        if ($CheckSeasons -and $item.ticker -eq "ES") {
-            for ($index = 0; $index -lt $count; $index++) {
-                $date = Quote-Date $stock.Quotations.Item($index)
-                if ($date -ge [datetime]"2009-01-01" -and $date -lt [datetime]"2019-01-01") {
-                    if ($date.Month -in @(12, 1, 2)) { $winter = $true }
-                    if ($date.Month -in @(6, 7, 8)) { $summer = $true }
-                    if ($winter -and $summer) { break }
+        try {
+            $stock = $Ab.Stocks.Item($ticker)
+            if ($null -eq $stock) { throw "stock lookup returned null" }
+            $quotations = $stock.Quotations
+            if ($null -eq $quotations) { throw "quotation collection is null" }
+            $count = [int]$quotations.Count
+            if ($count -gt 0) {
+                $firstQuote = $quotations.Item(0)
+                if ($null -eq $firstQuote) { throw "quotation 0 is null" }
+                $first = (Quote-Date $firstQuote).ToString("yyyy-MM-dd HH:mm:ss")
+                $lastIndex = $count - 1
+                $lastQuote = $quotations.Item($lastIndex)
+                if ($null -eq $lastQuote) { throw "quotation $lastIndex is null" }
+                $last = (Quote-Date $lastQuote).ToString("yyyy-MM-dd HH:mm:ss")
+            }
+            if ($CheckSeasons -and $ticker -eq "ES") {
+                for ($index = 0; $index -lt $count; $index++) {
+                    $quote = $quotations.Item($index)
+                    if ($null -eq $quote) { throw "quotation $index is null" }
+                    $date = Quote-Date $quote
+                    if ($date -ge [datetime]"2009-01-01" -and $date -lt [datetime]"2019-01-01") {
+                        if ($date.Month -in @(12, 1, 2)) { $winter = $true }
+                        if ($date.Month -in @(6, 7, 8)) { $summer = $true }
+                        if ($winter -and $summer) { break }
+                    }
                 }
             }
         }
-        $symbols += [ordered]@{ ticker = [string]$item.ticker; rows = $count; first = $first; last = $last }
+        catch {
+            $diagnostics += "$Path ticker ${ticker}: $($_.Exception.Message)"
+        }
+        $symbols += [ordered]@{ ticker = $ticker; rows = $count; first = $first; last = $last }
     }
     return [ordered]@{
         symbols = $symbols
+        diagnostics = $diagnostics
         es_research_sessions = [ordered]@{ winter = $winter; summer = $summer }
     }
 }
 
 function Compare-Snapshot([string]$Label, [object]$Expected, [object]$Actual) {
     $failures = @()
+    $failures += @($Actual.diagnostics | Where-Object { $_ })
     foreach ($expectedSymbol in @($Expected.symbols)) {
         $actualSymbol = @($Actual.symbols | Where-Object { $_.ticker -eq $expectedSymbol.ticker }) | Select-Object -First 1
         if (-not $actualSymbol) {

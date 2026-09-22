@@ -40,7 +40,6 @@ def test_verifier_contract_checks_counts_ranges_and_es_seasons():
     script = VERIFY.read_text()
 
     assert "amibroker_database_verification.json" in script
-    assert "Quotations.Count" in script
     assert "truncated" in script.lower()
     assert "winter" in script.lower()
     assert "summer" in script.lower()
@@ -97,3 +96,33 @@ def test_verifier_rejects_truncated_intraday_fixture(tmp_path):
     assert result.returncode != 0
     assert "truncated" in (result.stdout + result.stderr).lower()
     assert json.loads(output.read_text())["status"] == "FAIL"
+
+
+@pytest.mark.skipif(_powershell() is None, reason="PowerShell is unavailable")
+def test_verifier_reports_null_live_quote_with_ticker_and_database(tmp_path):
+    harness = tmp_path / "null_quote.ps1"
+    harness.write_text(r'''
+$script = Get-Content -LiteralPath $args[0] -Raw
+$functions = ($script -split '(?m)^\$manifest =', 2)[0]
+$functions = $functions.Substring($functions.IndexOf('function Quote-Date'))
+Invoke-Expression $functions
+$quotes = [pscustomobject]@{ Count = 1 }
+$quotes | Add-Member -MemberType ScriptMethod -Name Item -Value { param($index) $null }
+$global:fakeStock = [pscustomobject]@{ Quotations = $quotes }
+$stocks = [pscustomobject]@{}
+$stocks | Add-Member -MemberType ScriptMethod -Name Item -Value { param($ticker) $global:fakeStock }
+$broker = [pscustomobject]@{ Stocks = $stocks }
+$broker | Add-Member -MemberType ScriptMethod -Name LoadDatabase -Value { param($path) $true }
+$expected = '{"symbols":[{"ticker":"ES","rows":1,"first":"2009-01-01 09:30:00","last":"2009-01-01 09:30:00"}],"es_research_sessions":{"winter":false,"summer":false}}' | ConvertFrom-Json
+$actual = Read-LiveDatabase $broker 'fixture-daily' $expected $false
+@{ actual = $actual; failures = @(Compare-Snapshot 'daily' $expected $actual) } | ConvertTo-Json -Depth 10
+''')
+    result = subprocess.run(
+        [_powershell(), "-NoProfile", "-File", str(harness), str(VERIFY.resolve())],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert "fixture-daily" in output["failures"][0]
+    assert "ES" in output["failures"][0]
+    assert "quotation 0" in output["failures"][0]
