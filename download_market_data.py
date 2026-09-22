@@ -720,64 +720,14 @@ def normalize_bar_frame(
 
 
 def append_market_data(existing, incoming, reviewed_bars=None):
-    reviewed_keys = reviewed_key_set(reviewed_bars)
+    # Import lazily to avoid a module cycle: Kibot normalization reuses the
+    # canonical schema defined in this module.
+    from kibot_market_data import merge_market_data_sources
 
-    if existing is None or len(existing) == 0:
-        combined = incoming.copy()
-    elif incoming is None or len(incoming) == 0:
-        combined = existing.copy()
-    else:
-        if reviewed_keys:
-            existing_keys = set(
-                zip(
-                    existing["symbol"].map(normalize_symbol),
-                    existing["frequency"].map(normalize_frequency),
-                    comparison_keys_for_bars(existing),
-                )
-            )
-            incoming = incoming.copy()
-            incoming_keys = list(
-                zip(
-                    incoming["symbol"].map(normalize_symbol),
-                    incoming["frequency"].map(normalize_frequency),
-                    comparison_keys_for_bars(incoming),
-                )
-            )
-            incoming = incoming[
-                [
-                    key not in reviewed_keys or key not in existing_keys
-                    for key in incoming_keys
-                ]
-            ].copy()
-
-        combined = pd.concat(
-            [existing, incoming],
-            ignore_index=True,
-        )
-
-    if len(combined) == 0:
-        return empty_bars_frame()
-
-    combined["timestamp"] = pd.to_datetime(
-        combined["timestamp"],
-        utc=True,
-        errors="coerce",
-    )
-    combined = combined[combined["timestamp"].notna()].copy()
-    combined = combined.sort_values(
-        ["symbol", "frequency", "timestamp", "retrieved_at"],
-        na_position="last",
-    )
-    combined = combined.drop_duplicates(
-        subset=["symbol", "frequency", "timestamp"],
-        keep="last",
-    )
-    combined["date"] = combined["timestamp"].dt.date.astype(str)
-    combined["timestamp"] = combined["timestamp"].dt.strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-
-    return combined[CANONICAL_COLUMNS].reset_index(drop=True)
+    return merge_market_data_sources(
+        [existing, incoming],
+        reviewed_bars=reviewed_bars,
+    ).rows
 
 
 def build_integrity_report(bars):
@@ -1142,6 +1092,24 @@ def save_market_data(output_dir, symbol, frequency, bars):
         if output_path.exists()
         else empty_bars_frame()
     )
+    # Preserve the historical repair behavior for lower-priority local and
+    # CSV sources. Preferred vendor rows remain unmodified so an invalid
+    # Schwab row can fall back to Kibot instead of being manufactured into a
+    # valid-looking replacement.
+    repaired_inputs = []
+    for frame in (existing, bars):
+        if frame is None or len(frame) == 0:
+            repaired_inputs.append(frame)
+            continue
+        frame = frame.copy()
+        preferred = frame["source"].astype(str).str.lower().isin(
+            {"schwab", "kibot"}
+        )
+        lower_priority, _ = auto_fix_integrity_issues(frame[~preferred])
+        repaired_inputs.append(
+            pd.concat([frame[preferred], lower_priority], ignore_index=True)
+        )
+    existing, bars = repaired_inputs
     reviewed_bars = load_reviewed_bars(output_dir)
     combined = append_market_data(existing, bars, reviewed_bars=reviewed_bars)
     combined, _ = auto_fix_integrity_issues(combined)

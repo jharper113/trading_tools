@@ -9,7 +9,9 @@ from kibot_market_data import (
     KIBOT_SYMBOL_MAP,
     KibotDataError,
     inventory_kibot_zip,
+    merge_market_data_sources,
     read_kibot_member,
+    source_priority,
 )
 
 
@@ -21,6 +23,39 @@ def write_zip(path, members):
         for name, content in members.items():
             archive.writestr(name, content)
     return path
+
+
+def frame(
+    source,
+    *,
+    timestamp="2026-09-18T13:30:00Z",
+    frequency="5min",
+    open=100,
+    high=102,
+    low=99,
+    close=101,
+    volume=10,
+    retrieved_at="2026-09-22T12:00:00Z",
+):
+    return pd.DataFrame(
+        [
+            {
+                "timestamp": timestamp,
+                "date": timestamp[:10],
+                "symbol": "/ES",
+                "frequency": frequency,
+                "open": open,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume": volume,
+                "open_interest": pd.NA,
+                "source": source,
+                "retrieved_at": retrieved_at,
+            }
+        ],
+        columns=CANONICAL_COLUMNS,
+    )
 
 
 def test_read_intraday_member_maps_symbol_and_converts_eastern(tmp_path):
@@ -190,3 +225,130 @@ def test_conflicting_duplicate_is_rejected(tmp_path):
             "5min",
             ACQUIRED_AT,
         )
+
+
+def test_valid_schwab_price_and_volume_win_and_conflict_is_reported():
+    result = merge_market_data_sources(
+        [
+            frame("kibot", close=100, volume=10),
+            frame("schwab", close=112, high=113, volume=99),
+        ]
+    )
+
+    assert result.rows.iloc[0]["close"] == 112
+    assert result.rows.iloc[0]["volume"] == 99
+    assert result.rows.iloc[0]["source"] == "schwab"
+    assert result.conflicts.iloc[0]["selected_source"] == "schwab"
+    assert result.conflicts.iloc[0]["other_source"] == "kibot"
+
+
+def test_invalid_schwab_falls_back_to_kibot():
+    result = merge_market_data_sources(
+        [
+            frame("kibot"),
+            frame("schwab", high=98),
+        ]
+    )
+
+    assert result.rows.iloc[0]["source"] == "kibot"
+    assert result.rejections.iloc[0]["source"] == "schwab"
+    assert result.rejections.iloc[0]["reason"] == "invalid_ohlc_envelope"
+
+
+def test_source_precedence_places_kibot_above_yahoo_and_legacy():
+    result = merge_market_data_sources(
+        [
+            frame("reviewed_yahoo", close=98),
+            frame("Prices_Daily_Futures.csv#ES", close=99),
+            frame("kibot", close=100),
+        ]
+    )
+
+    assert source_priority("schwab") > source_priority("kibot")
+    assert source_priority("kibot") > source_priority("reviewed_yahoo")
+    assert result.rows.iloc[0]["source"] == "kibot"
+
+
+def test_reviewed_key_preserves_first_existing_candidate():
+    reviewed = pd.DataFrame(
+        [
+            {
+                "symbol": "/ES",
+                "frequency": "5min",
+                "comparison_key": "2026-09-18T13:30:00Z",
+                "selected_source": "local",
+                "reviewed_at": "2026-09-22T12:00:00Z",
+            }
+        ]
+    )
+
+    result = merge_market_data_sources(
+        [frame("reviewed_local", close=100), frame("schwab", close=101)],
+        reviewed_bars=reviewed,
+    )
+
+    assert result.rows.iloc[0]["source"] == "reviewed_local"
+    assert result.summary["reviewed_selections"] == 1
+
+
+def test_zero_schwab_volume_does_not_lose_precedence():
+    result = merge_market_data_sources(
+        [frame("kibot", volume=50), frame("schwab", volume=0)]
+    )
+
+    assert result.rows.iloc[0]["source"] == "schwab"
+    assert result.rows.iloc[0]["volume"] == 0
+
+
+def test_daily_merge_keys_by_trading_date_and_orders_stably():
+    result = merge_market_data_sources(
+        [
+            frame(
+                "kibot",
+                timestamp="2026-09-19T00:00:00Z",
+                frequency="daily",
+            ),
+            frame(
+                "schwab",
+                timestamp="2026-09-18T05:00:00Z",
+                frequency="daily",
+                close=102,
+            ),
+            frame(
+                "schwab",
+                timestamp="2026-09-19T05:00:00Z",
+                frequency="daily",
+                close=103,
+                high=104,
+            ),
+        ]
+    )
+
+    assert result.rows["date"].tolist() == ["2026-09-18", "2026-09-19"]
+    assert result.rows["source"].tolist() == ["schwab", "schwab"]
+
+
+def test_large_rollover_difference_is_reported_without_rejecting_schwab():
+    result = merge_market_data_sources(
+        [frame("kibot", close=100), frame("schwab", open=120, high=123, low=119, close=122)]
+    )
+
+    assert result.rows.iloc[0]["close"] == 122
+    assert result.conflicts.iloc[0]["close_abs_diff"] == 22
+    assert result.rejections.empty
+
+
+def test_merge_is_idempotent_and_ordered():
+    inputs = [
+        frame("kibot", timestamp="2026-09-18T13:35:00Z"),
+        frame("schwab", timestamp="2026-09-18T13:30:00Z"),
+    ]
+
+    once = merge_market_data_sources(inputs).rows
+    twice = merge_market_data_sources([once, once]).rows
+
+    pd.testing.assert_frame_equal(once, twice)
+    assert once["timestamp"].tolist() == [
+        "2026-09-18T13:30:00Z",
+        "2026-09-18T13:35:00Z",
+    ]

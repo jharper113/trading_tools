@@ -684,6 +684,36 @@ def test_append_market_data_preserves_reviewed_existing_bar():
     assert combined.loc[0, "source"] == "reviewed"
 
 
+def test_append_market_data_uses_source_precedence_over_retrieval_time():
+    existing = normalize_bar_frame(
+        pd.DataFrame([{
+            "timestamp": "2026-01-01T00:00:00Z",
+            "open": 100, "high": 105, "low": 99, "close": 104,
+            "volume": 10,
+        }]),
+        symbol="/ES",
+        frequency="daily",
+        source="schwab",
+        retrieved_at="2026-01-01T00:00:00Z",
+    )
+    incoming = normalize_bar_frame(
+        pd.DataFrame([{
+            "timestamp": "2026-01-01T00:00:00Z",
+            "open": 101, "high": 106, "low": 100, "close": 105,
+            "volume": 20,
+        }]),
+        symbol="/ES",
+        frequency="daily",
+        source="kibot",
+        retrieved_at="2026-09-22T00:00:00Z",
+    )
+
+    combined = append_market_data(existing, incoming)
+
+    assert combined.loc[0, "source"] == "schwab"
+    assert combined.loc[0, "volume"] == 10
+
+
 def test_build_integrity_report_flags_invalid_ohlc():
     bars = normalize_bar_frame(
         pd.DataFrame(
