@@ -22,6 +22,13 @@ function Quote-Date([object]$Quote) {
 
 function Read-LiveDatabase([object]$Ab, [string]$Path, [object]$Expected, [bool]$CheckSeasons) {
     if (-not $Ab.LoadDatabase($Path)) { throw "AmiBroker could not load database: $Path" }
+    $stocks = $Ab.Stocks
+    if ($null -eq $stocks) {
+        throw "AmiBroker Stocks collection is unavailable after loading $Path (active database: $($Ab.DatabasePath))"
+    }
+    if ([int]$stocks.Count -eq 0) {
+        throw "AmiBroker Stocks collection is empty after loading $Path (active database: $($Ab.DatabasePath))"
+    }
     $symbols = @()
     $diagnostics = @()
     $winter = $false
@@ -32,21 +39,27 @@ function Read-LiveDatabase([object]$Ab, [string]$Path, [object]$Expected, [bool]
         $first = $null
         $last = $null
         try {
-            $stock = $Ab.Stocks.Item($ticker)
+            $stage = "stock lookup"
+            $stock = $stocks.Item($ticker)
             if ($null -eq $stock) { throw "stock lookup returned null" }
+            $stage = "quotation collection"
             $quotations = $stock.Quotations
             if ($null -eq $quotations) { throw "quotation collection is null" }
+            $stage = "quotation count"
             $count = [int]$quotations.Count
             if ($count -gt 0) {
+                $stage = "first quotation"
                 $firstQuote = $quotations.Item(0)
                 if ($null -eq $firstQuote) { throw "quotation 0 is null" }
                 $first = (Quote-Date $firstQuote).ToString("yyyy-MM-dd HH:mm:ss")
                 $lastIndex = $count - 1
+                $stage = "last quotation"
                 $lastQuote = $quotations.Item($lastIndex)
                 if ($null -eq $lastQuote) { throw "quotation $lastIndex is null" }
                 $last = (Quote-Date $lastQuote).ToString("yyyy-MM-dd HH:mm:ss")
             }
             if ($CheckSeasons -and $ticker -eq "ES") {
+                $stage = "ES season quotations"
                 for ($index = 0; $index -lt $count; $index++) {
                     $quote = $quotations.Item($index)
                     if ($null -eq $quote) { throw "quotation $index is null" }
@@ -60,7 +73,7 @@ function Read-LiveDatabase([object]$Ab, [string]$Path, [object]$Expected, [bool]
             }
         }
         catch {
-            $diagnostics += "$Path ticker ${ticker}: $($_.Exception.Message)"
+            $diagnostics += "$Path ticker ${ticker} at ${stage}: $($_.Exception.Message)"
         }
         $symbols += [ordered]@{ ticker = $ticker; rows = $count; first = $first; last = $last }
     }
@@ -119,6 +132,7 @@ try {
     }
     else {
         $ab = New-Object -ComObject "Broker.Application"
+        $ab.Visible = 1
         $actual = [ordered]@{
             daily = Read-LiveDatabase $ab $DailyDatabase $manifest.daily $false
             intraday = Read-LiveDatabase $ab $IntradayDatabase $manifest.intraday $true
@@ -136,7 +150,10 @@ try {
     $parent = Split-Path -Parent $OutputPath
     if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $OutputPath -Encoding UTF8
-    if ($failures.Count -gt 0) { throw ($failures -join "; ") }
+    if ($failures.Count -gt 0) {
+        $preview = @($failures | Select-Object -First 5) -join "; "
+        throw "AmiBroker verification FAIL ($($failures.Count) findings). Report: $OutputPath. First findings: $preview"
+    }
     Write-Host "AmiBroker database verification PASS: $OutputPath"
 }
 finally {
