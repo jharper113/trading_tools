@@ -13,6 +13,7 @@ from typing import Literal
 import zipfile
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 
 from download_market_data import CANONICAL_COLUMNS
@@ -413,54 +414,60 @@ def validate_price_rows(frame):
             pd.DataFrame(columns=REJECTION_COLUMNS),
         )
 
-    accepted = []
-    rejected = []
-    for _, original in pd.DataFrame(frame).iterrows():
-        row = original.copy()
-        key = _comparison_key(row)
-        reason = None
-        if not key:
-            reason = "invalid_timestamp"
-        prices = pd.to_numeric(
-            pd.Series([row.get(name) for name in ("open", "high", "low", "close")]),
-            errors="coerce",
-        )
-        if reason is None and (prices.isna().any() or not all(math.isfinite(value) for value in prices)):
-            reason = "invalid_ohlc_numeric"
-        if reason is None:
-            open_, high, low, close = prices.tolist()
-            if str(row.get("frequency", "")).lower() == "daily":
-                invalid_envelope = low > high or not low <= open_ <= high
-            else:
-                invalid_envelope = (
-                    low > min(open_, close)
-                    or high < max(open_, close)
-                    or low > high
-                )
-            if invalid_envelope:
-                reason = "invalid_ohlc_envelope"
+    working = pd.DataFrame(frame).copy()
+    for column in CANONICAL_COLUMNS:
+        if column not in working:
+            working[column] = pd.NA
+    frequency = working["frequency"].astype(str).str.lower()
+    is_daily = frequency.eq("daily")
+    timestamps = pd.to_datetime(working["timestamp"], utc=True, errors="coerce")
+    dates = pd.to_datetime(working["date"], errors="coerce")
+    timestamp_date_keys = timestamps.dt.strftime("%Y-%m-%d")
+    daily_keys = dates.dt.strftime("%Y-%m-%d").fillna(timestamp_date_keys)
+    intraday_keys = timestamps.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    comparison_keys = daily_keys.where(is_daily, intraday_keys).fillna("")
 
-        if reason is not None:
-            rejected.append(
-                {
-                    "symbol": row.get("symbol"),
-                    "frequency": row.get("frequency"),
-                    "comparison_key": key,
-                    "source": row.get("source"),
-                    "reason": reason,
-                }
-            )
-            continue
-
-        timestamp = pd.to_datetime(row.get("timestamp"), utc=True)
-        row["timestamp"] = timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
-        row["date"] = key if str(row.get("frequency")).lower() == "daily" else timestamp.date().isoformat()
-        accepted.append({column: row.get(column, pd.NA) for column in CANONICAL_COLUMNS})
-
-    return (
-        pd.DataFrame(accepted, columns=CANONICAL_COLUMNS),
-        pd.DataFrame(rejected, columns=REJECTION_COLUMNS),
+    prices = working[["open", "high", "low", "close"]].apply(
+        pd.to_numeric, errors="coerce"
     )
+    finite = prices.notna().all(axis=1) & np.isfinite(prices).all(axis=1)
+    daily_envelope = (
+        prices["low"].le(prices["high"])
+        & prices["open"].ge(prices["low"])
+        & prices["open"].le(prices["high"])
+    )
+    intraday_envelope = (
+        prices["low"].le(prices["high"])
+        & prices["low"].le(prices[["open", "close"]].min(axis=1))
+        & prices["high"].ge(prices[["open", "close"]].max(axis=1))
+    )
+    envelope = daily_envelope.where(is_daily, intraday_envelope)
+    reasons = pd.Series(pd.NA, index=working.index, dtype="object")
+    reasons.loc[comparison_keys.eq("") | timestamps.isna()] = "invalid_timestamp"
+    reasons.loc[reasons.isna() & ~finite] = "invalid_ohlc_numeric"
+    reasons.loc[reasons.isna() & ~envelope] = "invalid_ohlc_envelope"
+
+    rejected_mask = reasons.notna()
+    rejected = pd.DataFrame(
+        {
+            "symbol": working.loc[rejected_mask, "symbol"],
+            "frequency": working.loc[rejected_mask, "frequency"],
+            "comparison_key": comparison_keys.loc[rejected_mask],
+            "source": working.loc[rejected_mask, "source"],
+            "reason": reasons.loc[rejected_mask],
+        },
+        columns=REJECTION_COLUMNS,
+    ).reset_index(drop=True)
+
+    accepted = working.loc[~rejected_mask, CANONICAL_COLUMNS].copy()
+    accepted_timestamps = timestamps.loc[~rejected_mask]
+    accepted["timestamp"] = accepted_timestamps.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    accepted["date"] = comparison_keys.loc[~rejected_mask].where(
+        is_daily.loc[~rejected_mask], accepted_timestamps.dt.strftime("%Y-%m-%d")
+    )
+    for column in ("open", "high", "low", "close"):
+        accepted[column] = prices.loc[~rejected_mask, column]
+    return accepted.reset_index(drop=True), rejected
 
 
 def _reviewed_choices(reviewed_bars):
@@ -505,7 +512,11 @@ def merge_market_data_sources(frames, reviewed_bars=None) -> MergeResult:
             accepted = accepted.copy()
             accepted["_frame_order"] = frame_order
             accepted["_row_order"] = range(len(accepted))
-            accepted["_comparison_key"] = accepted.apply(_comparison_key, axis=1)
+            accepted["_comparison_key"] = accepted["timestamp"].astype(str)
+            daily_mask = accepted["frequency"].astype(str).str.lower().eq("daily")
+            accepted.loc[daily_mask, "_comparison_key"] = accepted.loc[
+                daily_mask, "date"
+            ].astype(str)
             accepted["_priority"] = accepted["source"].map(source_priority)
             accepted_frames.append(accepted)
         if len(rejected):
@@ -530,56 +541,91 @@ def merge_market_data_sources(frames, reviewed_bars=None) -> MergeResult:
         )
 
     candidates = pd.concat(accepted_frames, ignore_index=True)
-    reviewed = _reviewed_choices(reviewed_bars)
-    selections = []
-    conflicts = []
-    reviewed_count = 0
     group_columns = ["symbol", "frequency", "_comparison_key"]
-    for group_key, group in candidates.groupby(group_columns, sort=False, dropna=False):
-        reviewed_source = reviewed.get(tuple(str(value) for value in group_key))
-        if reviewed_source is not None:
-            matching = group[group["source"].astype(str) == reviewed_source]
-            selected = (
-                matching.sort_values(["_frame_order", "_row_order"]).iloc[0]
-                if len(matching)
-                else group.sort_values(["_frame_order", "_row_order"]).iloc[0]
+    candidates = candidates.reset_index(drop=True)
+    candidates["_candidate_id"] = range(len(candidates))
+    candidates["_retrieved_sort"] = pd.to_datetime(
+        candidates["retrieved_at"], utc=True, errors="coerce"
+    )
+    ranked = candidates.sort_values(
+        [*group_columns, "_priority", "_retrieved_sort", "_frame_order", "_row_order"],
+        na_position="first",
+        kind="stable",
+    )
+    selections = ranked.drop_duplicates(group_columns, keep="last")
+
+    reviewed = _reviewed_choices(reviewed_bars)
+    reviewed_count = 0
+    if reviewed:
+        selection_by_key = {
+            tuple(str(row[column]) for column in group_columns): index
+            for index, row in selections.iterrows()
+        }
+        replacement_indices = {}
+        for group_key, reviewed_source in reviewed.items():
+            mask = pd.Series(True, index=candidates.index)
+            for column, value in zip(group_columns, group_key):
+                mask &= candidates[column].astype(str).eq(str(value))
+            group = candidates.loc[mask].sort_values(
+                ["_frame_order", "_row_order"], kind="stable"
+            )
+            if group.empty:
+                continue
+            matching = group[group["source"].astype(str).eq(reviewed_source)]
+            replacement_indices[group_key] = int(
+                (matching if len(matching) else group).index[0]
             )
             reviewed_count += 1
-        else:
-            ranked = group.copy()
-            ranked["_retrieved_sort"] = pd.to_datetime(
-                ranked["retrieved_at"], utc=True, errors="coerce"
-            )
-            selected = ranked.sort_values(
-                ["_priority", "_retrieved_sort", "_frame_order", "_row_order"],
-                na_position="first",
-            ).iloc[-1]
-        selections.append(selected)
+        if replacement_indices:
+            selected_indices = set(selections.index)
+            for key, replacement in replacement_indices.items():
+                previous = selection_by_key.get(key)
+                if previous is not None:
+                    selected_indices.discard(previous)
+                selected_indices.add(replacement)
+            selections = candidates.loc[sorted(selected_indices)]
 
-        for _, other in group.iterrows():
-            if int(other["_frame_order"]) == int(selected["_frame_order"]) and int(other["_row_order"]) == int(selected["_row_order"]):
-                continue
-            if not _different(selected, other):
-                continue
-            conflict = {
-                "symbol": selected["symbol"],
-                "frequency": selected["frequency"],
-                "comparison_key": selected["_comparison_key"],
-                "selected_source": selected["source"],
-                "other_source": other["source"],
-            }
-            for column in ["open", "high", "low", "close", "volume"]:
-                conflict[f"selected_{column}"] = selected[column]
-                conflict[f"other_{column}"] = other[column]
-                conflict[f"{column}_abs_diff"] = _absolute_difference(
-                    selected[column], other[column]
-                )
-            conflicts.append(conflict)
+    duplicate_candidates = candidates[
+        candidates.duplicated(group_columns, keep=False)
+    ]
+    selected_for_join = selections[
+        selections.duplicated(group_columns, keep=False)
+        | selections.set_index(group_columns).index.isin(
+            duplicate_candidates.set_index(group_columns).index
+        )
+    ][
+        [*group_columns, "_candidate_id", "source", "open", "high", "low", "close", "volume"]
+    ].rename(
+        columns={
+            "_candidate_id": "_selected_id",
+            "source": "selected_source",
+            **{column: f"selected_{column}" for column in ("open", "high", "low", "close", "volume")},
+        }
+    )
+    other_for_join = duplicate_candidates[
+        [*group_columns, "_candidate_id", "source", "open", "high", "low", "close", "volume"]
+    ].rename(
+        columns={
+            "_candidate_id": "_other_id",
+            "source": "other_source",
+            **{column: f"other_{column}" for column in ("open", "high", "low", "close", "volume")},
+        }
+    )
+    comparisons = selected_for_join.merge(other_for_join, on=group_columns, how="inner")
+    comparisons = comparisons[comparisons["_selected_id"] != comparisons["_other_id"]].copy()
+    different = pd.Series(False, index=comparisons.index)
+    for column in ("open", "high", "low", "close", "volume"):
+        left = comparisons[f"selected_{column}"]
+        right = comparisons[f"other_{column}"]
+        different |= ~(left.eq(right) | (left.isna() & right.isna()))
+        comparisons[f"{column}_abs_diff"] = (left - right).abs()
+    comparisons = comparisons.loc[different].copy()
+    comparisons = comparisons.rename(columns={"_comparison_key": "comparison_key"})
+    conflict_frame = comparisons.reindex(columns=CONFLICT_COLUMNS)
 
-    rows = pd.DataFrame(selections)
+    rows = selections.copy()
     rows = rows.sort_values(["symbol", "frequency", "timestamp"])
     rows = rows[CANONICAL_COLUMNS].reset_index(drop=True)
-    conflict_frame = pd.DataFrame(conflicts, columns=CONFLICT_COLUMNS)
     return MergeResult(
         rows=rows,
         conflicts=conflict_frame,
