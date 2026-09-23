@@ -54,7 +54,7 @@ def _profile(path: Path, seconds=900):
                 "commission_per_contract_side": 3.76,
                 "use_previous_bar_equity": True,
                 "fitness": "CAR/MDD",
-                "periodicity": {"apx_code": 11, "seconds": seconds},
+                "periodicity": {"apx_code": 2 if seconds == 3600 else 3, "seconds": seconds},
                 "optimization_window": {"start": "2009-01-01", "end": "2019-01-01"},
             }
         ),
@@ -163,7 +163,7 @@ def test_builder_sets_interval_dates_and_embeds_generated_formula(tmp_path, ps_b
     assert result.returncode == 0, result.stdout + result.stderr
     root = ET.parse(built / "project.apx").getroot()
     assert root.findtext(".//ChartInterval") == "3600"
-    assert root.findtext(".//Periodicity") == "11"
+    assert root.findtext(".//Periodicity") == "2"
     assert root.findtext(".//FromDate")[:10] == "2009-01-01"
     assert root.findtext(".//ToDate")[:10] == "2019-01-01"
     assert root.findtext(".//FormulaContent") == (built / "formula.afl").read_text(encoding="utf-8-sig")
@@ -175,6 +175,26 @@ def test_builder_sets_interval_dates_and_embeds_generated_formula(tmp_path, ps_b
     assert load_database.findtext("Param") == str(tmp_path / "database" / "broker.workspace").replace("\\", "\\\\")
     load_project = next(node for node in batch if node.findtext("Action") == "LoadProject")
     assert load_project.findtext("Param") == str(built / "project.apx").replace("\\", "\\\\")
+
+
+def test_builder_rejects_mismatched_analysis_periodicity(tmp_path):
+    if not PWSH:
+        pytest.skip("Set AMIBROKER_TEST_PWSH to exercise the PowerShell job builder")
+    matrix, _ = _matrix(tmp_path, adapter="native", seconds=900)
+    profile = tmp_path / "profile.json"
+    data = json.loads(profile.read_text())
+    data["periodicity"]["apx_code"] = 11
+    profile.write_text(json.dumps(data))
+    destination = tmp_path / "built"
+    result = subprocess.run(
+        [PWSH, "-NoProfile", "-File", str(BUILDER), "-Matrix", str(matrix),
+         "-JobId", "test-job", "-Destination", str(destination),
+         "-ReportsRoot", str(tmp_path / "reports"), "-AttemptId", "pilot-1-attempt-1"],
+        text=True, capture_output=True,
+    )
+    assert result.returncode != 0
+    assert "periodicity code" in result.stdout + result.stderr
+    assert not (destination / "batch.abb").exists()
 
 
 @pytest.mark.parametrize("mutation", ["stale_hash", "missing_anchor", "duplicate_anchor"])

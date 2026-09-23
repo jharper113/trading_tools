@@ -45,10 +45,10 @@ def _write_fixture(path, shift=0, interval=300, omit=None, malformed=False, dupl
 
 
 @pytest.mark.parametrize("minutes", [5, 15, 60])
-def test_intraday_profiles_select_custom_interval(minutes):
+def test_intraday_profiles_select_analysis_interval(minutes):
     profile = ROOT / "Analyzer_Profiles" / f"Intraday_{minutes}m_Analyzer_Profile.json"
     periodicity = json.loads(profile.read_text(encoding="utf-8"))["periodicity"]
-    assert periodicity["apx_code"] == 11
+    assert periodicity["apx_code"] == {5: 4, 15: 3, 60: 2}[minutes]
     assert periodicity["seconds"] == minutes * 60
     assert periodicity["base_database_seconds"] == 300
 
@@ -173,5 +173,5 @@ function Start-Process {
     load_project = next(node for node in batch if node.findtext("Action") == "LoadProject")
     assert load_project.findtext("Param") == str(work / "timezone_preflight.apx").replace("\\", "\\\\")
     generated = ET.parse(work / "timezone_preflight.apx").getroot()
-    assert generated.findtext(".//Periodicity") == "11"
+    assert generated.findtext(".//Periodicity") == "4"
     assert generated.findtext(".//ChartInterval") == "300"

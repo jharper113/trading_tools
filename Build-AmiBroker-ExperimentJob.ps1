@@ -107,6 +107,11 @@ AddColumn( Short, "Short", 1.0 );
     if ([int]$profile.periodicity.seconds -ne [int]$job.interval_seconds) {
         throw 'Analysis profile interval does not match matrix job'
     }
+    $periodicityCodes = @{ '300' = 4; '900' = 3; '3600' = 2; '86400' = 0 }
+    $expectedCode = $periodicityCodes[[string]$job.interval_seconds]
+    if ($null -eq $expectedCode -or [int]$profile.periodicity.apx_code -ne $expectedCode) {
+        throw "Analysis profile periodicity code does not match $($job.interval_seconds)-second job"
+    }
     $project = New-Object System.Xml.XmlDocument
     $project.XmlResolver = $null
     $project.Load($projectTemplate)

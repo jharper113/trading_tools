@@ -76,7 +76,7 @@ try {
         $project.Load($ProjectTemplate)
         Set-XmlValues $project @('FormulaPath') $formulaPath
         Set-XmlValues $project @('FormulaContent') $formula
-        Set-XmlValues $project @('Periodicity') '11'
+        Set-XmlValues $project @('Periodicity') '4'
         Set-XmlValues $project @('ChartInterval') '300'
         Set-XmlValues $project @('RangeType','BacktestRangeType') '3'
         Set-XmlValues $project @('FromDate','RangeFromDate','BacktestRangeFromDate') '2009-01-01'
