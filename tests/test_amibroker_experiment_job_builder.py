@@ -171,7 +171,9 @@ def test_builder_sets_interval_dates_and_embeds_generated_formula(tmp_path, ps_b
     assert actions.count("Optimize") == 2
     assert actions.count("Explore") == 2
     load_database = next(node for node in batch if node.findtext("Action") == "LoadDatabase")
-    assert load_database.findtext("Param") == str(tmp_path / "database" / "broker.workspace")
+    assert load_database.findtext("Param") == str(tmp_path / "database" / "broker.workspace").replace("\\", "\\\\")
+    load_project = next(node for node in batch if node.findtext("Action") == "LoadProject")
+    assert load_project.findtext("Param") == str(built / "project.apx").replace("\\", "\\\\")
 
 
 @pytest.mark.parametrize("mutation", ["stale_hash", "missing_anchor", "duplicate_anchor"])

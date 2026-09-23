@@ -144,4 +144,6 @@ function Start-Process {
     import xml.etree.ElementTree as ET
     batch = ET.parse(work / "timezone_preflight.abb").getroot()
     load_database = next(node for node in batch if node.findtext("Action") == "LoadDatabase")
-    assert load_database.findtext("Param") == str(database / "broker.workspace")
+    assert load_database.findtext("Param") == str(database / "broker.workspace").replace("\\", "\\\\")
+    load_project = next(node for node in batch if node.findtext("Action") == "LoadProject")
+    assert load_project.findtext("Param") == str(work / "timezone_preflight.apx").replace("\\", "\\\\")

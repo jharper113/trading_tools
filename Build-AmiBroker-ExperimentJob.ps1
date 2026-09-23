@@ -42,7 +42,7 @@ function Add-BatchStep($Document, $Root, [string]$Action, [string]$Param='') {
     $actionNode.InnerText = $Action
     [void]$step.AppendChild($actionNode)
     $paramNode = $Document.CreateElement('Param')
-    $paramNode.InnerText = $Param
+    $paramNode.InnerText = $Param.Replace('\', '\\')
     [void]$step.AppendChild($paramNode)
     [void]$Root.AppendChild($step)
 }

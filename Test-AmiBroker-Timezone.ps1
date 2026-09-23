@@ -18,7 +18,13 @@ function Save-Json($Value, [string]$Path) {
 function Add-BatchStep($Document, $Root, [string]$Action, [string]$Param='') {
     $step = $Document.CreateElement('Step')
     foreach ($pair in @(@('Action', $Action), @('Param', $Param))) {
-        $node = $Document.CreateElement($pair[0]); $node.InnerText = $pair[1]; [void]$step.AppendChild($node)
+        $node = $Document.CreateElement($pair[0])
+        if ($pair[0] -eq 'Param') {
+            $node.InnerText = ([string]$pair[1]).Replace('\', '\\')
+        } else {
+            $node.InnerText = $pair[1]
+        }
+        [void]$step.AppendChild($node)
     }
     [void]$Root.AppendChild($step)
 }
