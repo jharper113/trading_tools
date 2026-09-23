@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('pilot','full')][string]$Mode = 'pilot',
-    [string]$Matrix = (Join-Path $PSScriptRoot 'amibroker_experiments\strategy_test_matrix.json'),
+    [string]$Matrix,
     [Parameter(Mandatory=$true)][string]$Broker,
     [Parameter(Mandatory=$true)][string]$ReportsRoot,
     [string]$ExperimentId,
@@ -10,6 +10,8 @@ param(
     [string]$Unlock,
     [switch]$ContinueDailyAfterIntradayPreflightFailure
 )
+$RunnerDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $Matrix) { $Matrix = Join-Path $RunnerDirectory 'amibroker_experiments\strategy_test_matrix.json' }
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $AllowedStates = 'PENDING','RUNNING','COMPLETE','FAILED','INTERRUPTED'
@@ -161,7 +163,7 @@ try {
     if ($intraday.Count -and ($null -eq $experiment.preflight -or $experiment.preflight.status -ne 'PASS')) {
         $firstJob = $matrixValue.jobs.PSObject.Properties[[string]$intraday[0].job_id].Value
         $preflightDir = Join-Path (Split-Path -Parent $manifestPath) 'Timezone_Preflight'
-        & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Test-AmiBroker-Timezone.ps1') -Broker $Broker -Database ([string]$firstJob.database) -ProjectTemplate ([string]$firstJob.project_template) -WorkDir $preflightDir
+        & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $RunnerDirectory 'Test-AmiBroker-Timezone.ps1') -Broker $Broker -Database ([string]$firstJob.database) -ProjectTemplate ([string]$firstJob.project_template) -WorkDir $preflightDir
         $preflightExit = $LASTEXITCODE
         $preflightReport = Join-Path $preflightDir 'timezone_preflight.json'
         if (Test-Path -LiteralPath $preflightReport) {
@@ -201,7 +203,7 @@ try {
         $state.attempts = @($state.attempts) + @($attempt)
         $state.status = 'RUNNING'; $state.error = $null; $experiment.updated_utc = [DateTime]::UtcNow.ToString('o'); Save-Json $experiment $manifestPath
         try {
-            & (Join-Path $PSScriptRoot 'Build-AmiBroker-ExperimentJob.ps1') -Matrix $matrixPath -JobId ([string]$state.job_id) -Destination $attemptDir -ReportsRoot $ReportsRoot -AttemptId $attemptId
+            & (Join-Path $RunnerDirectory 'Build-AmiBroker-ExperimentJob.ps1') -Matrix $matrixPath -JobId ([string]$state.job_id) -Destination $attemptDir -ReportsRoot $ReportsRoot -AttemptId $attemptId
             $state.build_manifest_path = Join-Path $attemptDir 'build_manifest.json'
             Invoke-AmiBrokerBatch $Broker (Join-Path $attemptDir 'batch.abb')
             $archiveConfig = Read-Json (Join-Path $attemptDir 'batch.archive.json')
