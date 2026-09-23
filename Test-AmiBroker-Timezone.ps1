@@ -35,7 +35,9 @@ function Set-XmlValues($Document, [string[]]$Names, [string]$Value) {
 }
 function Test-SessionPair($Rows) {
     $times = @($Rows | ForEach-Object { [int]$_.TimeNum })
-    return ($times -contains 93000) -and ($times -contains 155500)
+    $openBar = @($times | Where-Object { $_ -ge 93000 -and $_ -lt 93500 }).Count -gt 0
+    $closeBar = @($times | Where-Object { $_ -ge 155500 -and $_ -lt 160000 }).Count -gt 0
+    return $openBar -and $closeBar
 }
 function Invoke-AmiBrokerBatch([string]$BrokerPath, [string]$BatchPath) {
     # Broker.exe is a Windows GUI process, so invoking it with '&' does not
@@ -99,7 +101,7 @@ try {
     }
     $rows = @(Import-Csv -LiteralPath $csvPath)
     if (-not $rows) {
-        throw 'Timezone preflight CSV is empty. Harp_Intraday has no qualifying ES data in the 2009-01-01 through 2019-01-01 research window.'
+        throw 'Timezone preflight exploration returned no ES rows. Check the project interval, symbol selection, and 2009-01-01 through 2019-01-01 range.'
     }
     $requiredColumns = @('DateTime','TimeNum','TimeShiftSeconds','IntervalSeconds')
     foreach ($column in $requiredColumns) {
@@ -125,8 +127,8 @@ try {
     $pairs = @($rows | Group-Object { $_.ParsedDate.ToString('yyyy-MM-dd') })
     $winter = @($pairs | Where-Object { ([datetime]$_.Name).Month -eq 1 -and (Test-SessionPair $_.Group) } | ForEach-Object Name | Sort-Object)
     $summer = @($pairs | Where-Object { ([datetime]$_.Name).Month -eq 7 -and (Test-SessionPair $_.Group) } | ForEach-Object Name | Sort-Object)
-    if (-not $winter) { throw 'Timezone export has no complete winter 09:30/15:55 session' }
-    if (-not $summer) { throw 'Timezone export has no complete summer 09:30/15:55 session' }
+    if (-not $winter) { throw 'Timezone export has no complete winter 09:30-09:34/15:55-15:59 session' }
+    if (-not $summer) { throw 'Timezone export has no complete summer 09:30-09:34/15:55-15:59 session' }
     $baseReport.status = 'PASS'; $baseReport.timeshift_seconds = 0; $baseReport.interval_seconds = 300
     $baseReport.winter_sessions = $winter; $baseReport.summer_sessions = $summer; $baseReport.rows = $rows.Count
     $baseReport.csv_sha256 = (Get-FileHash -LiteralPath $csvPath -Algorithm SHA256).Hash.ToLowerInvariant()

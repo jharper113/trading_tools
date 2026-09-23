@@ -16,13 +16,21 @@ SCRIPT = ROOT / "Test-AmiBroker-Timezone.ps1"
 PWSH = os.environ.get("AMIBROKER_TEST_PWSH") or shutil.which("pwsh") or shutil.which("powershell")
 
 
-def _write_fixture(path, shift=0, interval=300, omit=None, malformed=False, duplicate=False):
+def _write_fixture(path, shift=0, interval=300, omit=None, malformed=False, duplicate=False, end_stamped=False):
     rows = [
         ["2018-01-16 09:30:00", 93000, shift, interval],
         ["2018-01-16 15:55:00", 155500, shift, interval],
         ["2018-07-17 09:30:00", 93000, shift, interval],
         ["2018-07-17 15:55:00", 155500, shift, interval],
     ]
+    if end_stamped:
+        for row in rows:
+            if row[1] == 93000:
+                row[0] = row[0].replace("09:30:00", "09:34:59")
+                row[1] = 93459
+            else:
+                row[0] = row[0].replace("15:55:00", "15:59:59")
+                row[1] = 155959
     labels = ["winter_0930", "winter_1555", "summer_0930", "summer_1555"]
     rows = [row for row, label in zip(rows, labels) if label != omit]
     if malformed:
@@ -56,7 +64,7 @@ def test_preflight_files_exist():
     assert "-PassThru" in text
     assert ".ExitCode" in text
     assert "& $Broker '/runbatch'" not in text
-    assert "Harp_Intraday has no qualifying ES data" in text
+    assert "Timezone preflight exploration returned no ES rows" in text
 
 
 @pytest.mark.parametrize("shift,interval", [(3600, 300), (0, 900)])
@@ -64,6 +72,14 @@ def test_preflight_rejects_shift_or_wrong_base_interval(tmp_path, shift, interva
     csv_path = _write_fixture(tmp_path / "preflight.csv", shift=shift, interval=interval)
     with pytest.raises(ValueError, match="shift|5-minute"):
         validate_timezone_export(csv_path, "database")
+
+
+def test_preflight_accepts_five_minute_end_stamped_sessions(tmp_path):
+    csv_path = _write_fixture(tmp_path / "preflight.csv", end_stamped=True)
+    report = validate_timezone_export(csv_path, "database")
+    assert report["status"] == "PASS"
+    assert report["winter_sessions"] == ["2018-01-16"]
+    assert report["summer_sessions"] == ["2018-07-17"]
 
 
 def test_preflight_requires_winter_and_summer_0930_1555_pairs(tmp_path):
