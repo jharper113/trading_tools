@@ -74,7 +74,7 @@ try {
         $project.Load($ProjectTemplate)
         Set-XmlValues $project @('FormulaPath') $formulaPath
         Set-XmlValues $project @('FormulaContent') $formula
-        Set-XmlValues $project @('Periodicity') '8'
+        Set-XmlValues $project @('Periodicity') '11'
         Set-XmlValues $project @('ChartInterval') '300'
         Set-XmlValues $project @('RangeType','BacktestRangeType') '3'
         Set-XmlValues $project @('FromDate','RangeFromDate','BacktestRangeFromDate') '2009-01-01'
@@ -119,7 +119,7 @@ try {
         if ($seen.ContainsKey($key)) { throw 'Timezone CSV contains duplicate rows' }
         $seen[$key] = $true
         if ($shiftValue -ne 0) { throw 'AmiBroker database time shift is not zero' }
-        if ($intervalValue -ne 300) { throw 'AmiBroker intraday database is not 5-minute' }
+        if ($intervalValue -ne 300) { throw "AmiBroker analysis interval is $intervalValue seconds; expected 300 (5-minute)" }
         $row | Add-Member -NotePropertyName ParsedDate -NotePropertyValue $parsed
     }
     $pairs = @($rows | Group-Object { $_.ParsedDate.ToString('yyyy-MM-dd') })

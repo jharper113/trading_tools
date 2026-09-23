@@ -54,7 +54,7 @@ def _profile(path: Path, seconds=900):
                 "commission_per_contract_side": 3.76,
                 "use_previous_bar_equity": True,
                 "fitness": "CAR/MDD",
-                "periodicity": {"apx_code": 8, "seconds": seconds},
+                "periodicity": {"apx_code": 11, "seconds": seconds},
                 "optimization_window": {"start": "2009-01-01", "end": "2019-01-01"},
             }
         ),
@@ -163,6 +163,7 @@ def test_builder_sets_interval_dates_and_embeds_generated_formula(tmp_path, ps_b
     assert result.returncode == 0, result.stdout + result.stderr
     root = ET.parse(built / "project.apx").getroot()
     assert root.findtext(".//ChartInterval") == "3600"
+    assert root.findtext(".//Periodicity") == "11"
     assert root.findtext(".//FromDate")[:10] == "2009-01-01"
     assert root.findtext(".//ToDate")[:10] == "2019-01-01"
     assert root.findtext(".//FormulaContent") == (built / "formula.afl").read_text(encoding="utf-8-sig")

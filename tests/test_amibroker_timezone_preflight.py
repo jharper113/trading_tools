@@ -36,6 +36,15 @@ def _write_fixture(path, shift=0, interval=300, omit=None, malformed=False, dupl
     return path
 
 
+@pytest.mark.parametrize("minutes", [5, 15, 60])
+def test_intraday_profiles_select_custom_interval(minutes):
+    profile = ROOT / "Analyzer_Profiles" / f"Intraday_{minutes}m_Analyzer_Profile.json"
+    periodicity = json.loads(profile.read_text(encoding="utf-8"))["periodicity"]
+    assert periodicity["apx_code"] == 11
+    assert periodicity["seconds"] == minutes * 60
+    assert periodicity["base_database_seconds"] == 300
+
+
 def test_preflight_files_exist():
     assert AFL.is_file()
     assert SCRIPT.is_file()
@@ -147,3 +156,6 @@ function Start-Process {
     assert load_database.findtext("Param") == str(database / "broker.workspace").replace("\\", "\\\\")
     load_project = next(node for node in batch if node.findtext("Action") == "LoadProject")
     assert load_project.findtext("Param") == str(work / "timezone_preflight.apx").replace("\\", "\\\\")
+    generated = ET.parse(work / "timezone_preflight.apx").getroot()
+    assert generated.findtext(".//Periodicity") == "11"
+    assert generated.findtext(".//ChartInterval") == "300"

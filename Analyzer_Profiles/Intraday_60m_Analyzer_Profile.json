@@ -10,7 +10,7 @@
   "commission_per_contract_side": 3.76,
   "use_previous_bar_equity": true,
   "fitness": "CAR/MDD",
-  "periodicity": {"label": "60-minute (built from 5-minute database)", "apx_code": 8, "seconds": 3600, "base_database_seconds": 300},
+  "periodicity": {"label": "60-minute (built from 5-minute database)", "apx_code": 11, "seconds": 3600, "base_database_seconds": 300},
   "optimization_window": {"start": "2009-01-01", "end": "2019-01-01"},
   "wfa": {"mode": "Rolling", "in_sample_start": "2014-01-01", "in_sample_end": "2018-12-31", "in_sample_last": "2025-12-31", "out_sample_start": "2019-01-01", "out_sample_end": "2019-12-31", "out_sample_last": "2026-09-20", "step_months": 12},
   "last_research_date": "2026-09-20",
