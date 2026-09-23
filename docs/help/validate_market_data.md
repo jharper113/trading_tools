@@ -9,7 +9,7 @@ Validate the full default futures universe and write static reports:
 ```bash
 python -u validate_market_data.py \
   --source-dir data/market_data \
-  --frequencies daily 5min 60min \
+  --frequencies daily 5min \
   --threshold-pct 0.25
 ```
 
@@ -22,7 +22,7 @@ Serve the dashboard locally so selected decisions can be applied directly:
 ```bash
 python -u validate_market_data.py \
   --source-dir data/market_data \
-  --frequencies daily 5min 60min \
+  --frequencies daily 5min \
   --threshold-pct 0.25 \
   --serve-dashboard
 ```
@@ -32,7 +32,7 @@ Automatically apply non-review auto decisions and regenerate the post-apply dash
 ```bash
 python -u validate_market_data.py \
   --source-dir data/market_data \
-  --frequencies daily 5min 60min \
+  --frequencies daily 5min \
   --auto-apply-decisions \
   --review-new-only
 ```
@@ -51,7 +51,7 @@ Validation reports are written under `output/market_data_validation/` by default
 - `market_data_difference_heatmap.png`
 - `validation_dashboard.html`
 
-Validated and repaired market data is stored in `data/market_data/<frequency>/<symbol>.csv`, for example `data/market_data/daily/ES.csv`, `data/market_data/5min/ES.csv`, and `data/market_data/60min/ES.csv`. These normalized CSV files are the files to import into AmiBroker.
+Validated and repaired market data is stored in `data/market_data/<frequency>/<symbol>.csv`, for example `data/market_data/daily/ES.csv` and `data/market_data/5min/ES.csv`. These normalized CSV files are the files to import into AmiBroker.
 
 Applied decisions update `data/market_data/`, write reviewed keys to `data/market_data/reviewed_bars.csv`, and write the latest auto-applied decision rows to `output/market_data_validation/auto_review_applied_decisions.csv`.
 

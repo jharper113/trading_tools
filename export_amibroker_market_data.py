@@ -2,8 +2,10 @@
 """Create AmiBroker-ready daily and intraday CSV files."""
 
 import argparse
+import hashlib
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -107,6 +109,137 @@ def _intraday_rows(path, target_timezone):
     exported.insert(0, "date", local_timestamps.dt.strftime("%Y-%m-%d"))
     exported.insert(0, "ticker", path.stem.upper())
     return exported[INTRADAY_COLUMNS], len(source)
+
+
+def _daily_chunk(source, ticker):
+    working = _numeric_prices(source)
+    source_dates = working["date"] if "date" in working.columns else working["timestamp"]
+    dates = pd.to_datetime(source_dates, errors="coerce")
+    valid = dates.notna() & working[PRICE_COLUMNS].notna().all(axis=1)
+    exported = working.loc[valid, [*PRICE_COLUMNS, "volume", "open_interest"]].copy()
+    exported.insert(0, "date", dates.loc[valid].dt.strftime("%Y-%m-%d"))
+    exported.insert(0, "ticker", ticker)
+    return exported[DAILY_COLUMNS]
+
+
+def _intraday_chunk(source, ticker, target_timezone):
+    working = _numeric_prices(source)
+    timestamps = pd.to_datetime(working["timestamp"], utc=True, errors="coerce")
+    valid = timestamps.notna() & working[PRICE_COLUMNS].notna().all(axis=1)
+    local_timestamps = timestamps.loc[valid].dt.tz_convert(target_timezone)
+    exported = working.loc[valid, [*PRICE_COLUMNS, "volume", "open_interest"]].copy()
+    exported.insert(0, "time", local_timestamps.dt.strftime("%H:%M:%S"))
+    exported.insert(0, "date", local_timestamps.dt.strftime("%Y-%m-%d"))
+    exported.insert(0, "ticker", ticker)
+    return exported[INTRADAY_COLUMNS]
+
+
+def _validate_source_columns(frame, path):
+    missing = sorted({"timestamp", *PRICE_COLUMNS} - set(frame.columns))
+    if missing:
+        raise ValueError(f"{path} is missing required column(s): {', '.join(missing)}")
+
+
+def _stream_frequency(source_dir, frequency, temporary_path, timezone_name, chunk_size):
+    columns = DAILY_COLUMNS if frequency == "daily" else INTRADAY_COLUMNS
+    target_timezone = ZoneInfo(timezone_name)
+    pd.DataFrame(columns=columns).to_csv(temporary_path, index=False)
+    source_files = source_rows = exported_rows = 0
+    market_tickers = set()
+    symbol_stats = {}
+    es_research_sessions = {"winter": False, "summer": False}
+
+    def write_rows(exported, ticker):
+        nonlocal exported_rows
+        if exported.empty:
+            return
+        exported.to_csv(temporary_path, mode="a", header=False, index=False)
+        exported_rows += len(exported)
+        market_tickers.add(ticker)
+        if frequency == "daily":
+            keys_for_range = exported["date"].astype(str)
+        else:
+            keys_for_range = exported["date"].astype(str) + " " + exported["time"].astype(str)
+        current = symbol_stats.setdefault(
+            ticker, {"ticker": ticker, "rows": 0, "first": None, "last": None}
+        )
+        current["rows"] += len(exported)
+        chunk_first = keys_for_range.min()
+        chunk_last = keys_for_range.max()
+        current["first"] = chunk_first if current["first"] is None else min(current["first"], chunk_first)
+        current["last"] = chunk_last if current["last"] is None else max(current["last"], chunk_last)
+        if frequency == "5min" and ticker == "ES":
+            research_dates = pd.to_datetime(exported["date"], errors="coerce")
+            research_dates = research_dates[
+                (research_dates >= pd.Timestamp("2009-01-01"))
+                & (research_dates < pd.Timestamp("2019-01-01"))
+            ]
+            es_research_sessions["winter"] = bool(
+                es_research_sessions["winter"]
+                or research_dates.dt.month.isin([12, 1, 2]).any()
+            )
+            es_research_sessions["summer"] = bool(
+                es_research_sessions["summer"]
+                or research_dates.dt.month.isin([6, 7, 8]).any()
+            )
+
+    for path in sorted(Path(source_dir).glob("*.csv")):
+        source_files += 1
+        ticker = path.stem.upper()
+        reader = pd.read_csv(path, chunksize=chunk_size)
+        saw_chunk = False
+        pending = pd.DataFrame(columns=columns)
+        for source in reader:
+            saw_chunk = True
+            _validate_source_columns(source, path)
+            source_rows += len(source)
+            if frequency == "daily":
+                exported = _daily_chunk(source, ticker)
+                keys = ["ticker", "date"]
+            elif frequency == "5min":
+                exported = _intraday_chunk(source, ticker, target_timezone)
+                keys = ["ticker", "date", "time"]
+            else:
+                raise ValueError("AmiBroker export supports only daily and 5min")
+            exported = exported.sort_values(keys, kind="stable").drop_duplicates(keys, keep="last")
+            if len(exported):
+                if not pending.empty:
+                    prior_key = tuple(str(pending.iloc[-1][key]) for key in keys)
+                    current_key = tuple(str(exported.iloc[0][key]) for key in keys)
+                    if current_key < prior_key:
+                        raise ValueError(f"{path} is not sorted by timestamp")
+                combined = (
+                    exported.reset_index(drop=True)
+                    if pending.empty
+                    else pd.concat([pending, exported], ignore_index=True)
+                )
+                combined = combined.sort_values(keys, kind="stable").drop_duplicates(keys, keep="last")
+                if len(combined) > 1:
+                    write_rows(combined.iloc[:-1], ticker)
+                pending = combined.iloc[-1:].copy()
+        if not saw_chunk:
+            header = pd.read_csv(path, nrows=0)
+            _validate_source_columns(header, path)
+        write_rows(pending, ticker)
+
+    stats = {
+        "source_files": source_files,
+        "source_rows": source_rows,
+        "exported_rows": exported_rows,
+        "skipped_rows": source_rows - exported_rows,
+        "symbols": [symbol_stats[ticker] for ticker in sorted(symbol_stats)],
+    }
+    if frequency == "5min":
+        stats["es_research_sessions"] = es_research_sessions
+    return stats, market_tickers
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_amibroker_frame(source_dir, frequency, timezone_name=DEFAULT_TIMEZONE):
@@ -276,30 +409,10 @@ def export_amibroker_market_data(
     output_dir=None,
     timezone_name=DEFAULT_TIMEZONE,
     instrument_settings_path=DEFAULT_INSTRUMENT_SETTINGS,
+    chunk_size=100_000,
 ):
     market_data_dir = Path(market_data_dir)
     output_dir = Path(output_dir or market_data_dir / "amibroker")
-    daily, daily_stats = build_amibroker_frame(
-        market_data_dir / "daily",
-        "daily",
-        timezone_name=timezone_name,
-    )
-    intraday, intraday_stats = build_amibroker_frame(
-        market_data_dir / "5min",
-        "5min",
-        timezone_name=timezone_name,
-    )
-    (
-        instrument_details,
-        point_values,
-        tick_sizes,
-        margins,
-        instrument_stats,
-    ) = build_instrument_property_frames(
-        market_data_dir,
-        instrument_settings_path,
-        market_tickers=set(daily["ticker"]) | set(intraday["ticker"]),
-    )
     daily_path = output_dir / "daily.csv"
     intraday_path = output_dir / "5min.csv"
     instrument_details_path = output_dir / "instrument_details.csv"
@@ -307,21 +420,53 @@ def export_amibroker_market_data(
     tick_sizes_path = output_dir / "tick_sizes.csv"
     margins_path = output_dir / "margins.csv"
     manifest_path = output_dir / "export_complete.json"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path.unlink(missing_ok=True)
+    final_paths = [daily_path, intraday_path, instrument_details_path, point_values_path, tick_sizes_path, margins_path]
+    temporary_paths = {
+        path: path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        for path in final_paths
+    }
 
-    _atomic_csv_write(daily, daily_path)
-    _atomic_csv_write(intraday, intraday_path)
-    _atomic_csv_write(instrument_details, instrument_details_path)
-    _atomic_csv_write(point_values, point_values_path)
-    _atomic_csv_write(tick_sizes, tick_sizes_path)
-    _atomic_csv_write(margins, margins_path)
+    try:
+        daily_stats, daily_tickers = _stream_frequency(
+            market_data_dir / "daily", "daily", temporary_paths[daily_path], timezone_name, chunk_size
+        )
+        intraday_stats, intraday_tickers = _stream_frequency(
+            market_data_dir / "5min", "5min", temporary_paths[intraday_path], timezone_name, chunk_size
+        )
+        (
+            instrument_details,
+            point_values,
+            tick_sizes,
+            margins,
+            instrument_stats,
+        ) = build_instrument_property_frames(
+            market_data_dir,
+            instrument_settings_path,
+            market_tickers=daily_tickers | intraday_tickers,
+        )
+        for frame, path in (
+            (instrument_details, instrument_details_path),
+            (point_values, point_values_path),
+            (tick_sizes, tick_sizes_path),
+            (margins, margins_path),
+        ):
+            frame.to_csv(temporary_paths[path], index=False)
+        for path in final_paths:
+            os.replace(temporary_paths[path], path)
+    except Exception:
+        for temporary in temporary_paths.values():
+            temporary.unlink(missing_ok=True)
+        raise
 
     manifest = {
         "generated_at": datetime.now(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         ),
         "timezone": timezone_name,
-        "daily": {"file": daily_path.name, **daily_stats},
-        "intraday": {"file": intraday_path.name, **intraday_stats},
+        "daily": {"file": daily_path.name, "sha256": _sha256(daily_path), **daily_stats},
+        "intraday": {"file": intraday_path.name, "sha256": _sha256(intraday_path), **intraday_stats},
         "instrument_properties": {
             "details_file": instrument_details_path.name,
             "details_rows": len(instrument_details),
@@ -332,6 +477,10 @@ def export_amibroker_market_data(
             "margins_file": margins_path.name,
             "margins_rows": len(margins),
             **instrument_stats,
+        },
+        "files": {
+            path.name: _sha256(path)
+            for path in final_paths
         },
     }
     _atomic_json_write(manifest, manifest_path)

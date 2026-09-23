@@ -18,8 +18,11 @@ def test_runner_and_archive_contract_are_present():
     runner = RUNNER.read_text(encoding="utf-8")
     archiver = ARCHIVER.read_text(encoding="utf-8")
     assert "'PENDING','RUNNING','COMPLETE','FAILED','INTERRUPTED'" in runner
-    assert "& $Broker '/runbatch'" in runner
-    assert "Start-Process" not in runner
+    assert "Start-Process" in runner
+    assert "-Wait" in runner
+    assert "-PassThru" in runner
+    assert ".ExitCode" in runner
+    assert "& $Broker '/runbatch'" not in runner
     assert "PublishAudit" in archiver
     assert "audit_exports" in archiver
     assert "experiment_artifacts" in archiver
@@ -94,3 +97,21 @@ def test_resume_refuses_matrix_hash_change(tmp_path):
     )
     assert result.returncode != 0
     assert "hash" in (result.stdout + result.stderr).lower()
+
+
+def test_runner_resolves_default_matrix_before_full_mode_validation(tmp_path):
+    if not PWSH:
+        pytest.skip("Set AMIBROKER_TEST_PWSH to exercise the PowerShell runner")
+    result = subprocess.run(
+        [
+            PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+            str(RUNNER), "-Mode", "full", "-Broker", "missing-broker",
+            "-ReportsRoot", str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    output = (result.stdout + result.stderr).lower()
+    assert result.returncode != 0
+    assert "unlock" in output
+    assert "cannot bind argument to parameter 'path'" not in output

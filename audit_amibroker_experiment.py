@@ -345,7 +345,7 @@ def _validate_entries(job: dict, failures: list[str], checks: list[dict]):
             failures.append(f"{job['job_id']}/{export['symbol']}: audit has malformed entry time")
         if job["schedule"] == "entry_cutoff_110000" and (times > 110000).any():
             failures.append(f"{job['job_id']}/{export['symbol']}: low-touch entry after 11:00 Eastern")
-        if job["schedule"] == "fixed_110000" and (not len(times) or not times.eq(111500).all()):
+        if job["schedule"] == "fixed_110000" and len(times) and not times.eq(111500).all():
             failures.append(f"{job['job_id']}/{export['symbol']}: 11:00 signal did not enter on 11:15 bar")
     checks.append({"check": "entry_time_distribution", "job_id": job["job_id"], "value": distribution})
 

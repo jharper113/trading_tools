@@ -12,7 +12,7 @@
   "fitness": "CAR/MDD",
   "periodicity": {
     "label": "15-minute (built from 5-minute database)",
-    "apx_code": 8,
+    "apx_code": 3,
     "seconds": 900,
     "base_database_seconds": 300
   },

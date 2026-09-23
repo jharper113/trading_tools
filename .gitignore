@@ -9,9 +9,14 @@ wheels/
 
 # Virtual environments
 .venv
+.worktrees/
 
 # Local brokerage exports and generated reports
 data/
+# Purchased source archives, temporary merge stages, and dated data snapshots
+data/market_data/source_archives/
+data/market_data/.staging/
+data/market_data_archives/
 logs/
 output/
 output_v2/

@@ -38,9 +38,9 @@ def read_project_context(project_path):
     strategy_name = Path(formula_path.replace("\\", "/")).stem
     periodicity = int(_text(root, "Periodicity", "0"))
     interval = int(_text(root, "ChartInterval", "86400"))
-    if periodicity == 0 or interval == 86400:
+    if periodicity == 0:
         timeframe = "Daily"
-    elif periodicity == 8 and interval in {300, 900, 3600}:
+    elif {4: 300, 3: 900, 2: 3600}.get(periodicity) == interval:
         timeframe = f"Intraday_{interval // 60}m"
     else:
         timeframe = f"Interval_{interval}s"

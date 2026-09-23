@@ -105,7 +105,7 @@ def test_runtime_retains_two_runs_and_project_snapshots(archive_run):
         run('Publish',symbol)
     run('Complete')
     assert read_manifest(first)['status'] == 'COMPLETE'
-    project.write_text(project.read_text().replace('A &amp; B','New Strategy').replace('<Periodicity>0','<Periodicity>8').replace('86400','900'))
+    project.write_text(project.read_text().replace('A &amp; B','New Strategy').replace('<Periodicity>0','<Periodicity>3').replace('86400','900'))
     run('Begin')
     assert context()['run_dir'] != first['run_dir']
     assert Path(context()['run_dir']).parent.parts[-3:] == ('New Strategy','Intraday_15m','Optimization')
@@ -210,7 +210,7 @@ def test_runtime_archives_entry_audit_and_experiment_artifacts(tmp_path):
     if not PWSH:
         pytest.skip('Set AMIBROKER_TEST_PWSH to test the PowerShell runtime')
     project = tmp_path / 'source.apx'
-    project.write_text('<AnalysisDoc><General><FormulaPath>Z:\\Strategies\\Demo.afl</FormulaPath><FormulaContent>Buy=True;</FormulaContent><Periodicity>8</Periodicity><ChartInterval>900</ChartInterval><FromDate>2009-01-01</FromDate><ToDate>2019-01-01</ToDate></General></AnalysisDoc>')
+    project.write_text('<AnalysisDoc><General><FormulaPath>Z:\\Strategies\\Demo.afl</FormulaPath><FormulaContent>Buy=True;</FormulaContent><Periodicity>3</Periodicity><ChartInterval>900</ChartInterval><FromDate>2009-01-01</FromDate><ToDate>2019-01-01</ToDate></General></AnalysisDoc>')
     batch = tmp_path / 'batch.abb'; batch.write_text(source())
     matrix = tmp_path / 'matrix.json'; matrix.write_text('{}')
     profile = tmp_path / 'profile.json'; profile.write_text('{}')

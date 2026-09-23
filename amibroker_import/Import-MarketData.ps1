@@ -2,8 +2,9 @@
 param(
     [string]$MarketDataDirectory = "Z:\04_code\python\trading_tools\data\market_data",
     [string]$AmiBrokerExecutable = "C:\Program Files (x86)\AmiBroker\Broker.exe",
-    [string]$DailyDatabase = "Z:\04_code\amibroker\databases\Harp_daily",
-    [string]$IntradayDatabase = "Z:\04_code\amibroker\databases\Harp_intraday"
+    [string]$DailyDatabase = "Z:\04_Code\Amibroker\Databases\Harp_Daily",
+    [string]$IntradayDatabase = "Z:\04_Code\Amibroker\Databases\Harp_Intraday",
+    [string]$MergeSummary
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +43,15 @@ function Assert-PathExists {
 
     if (-not (Test-Path -LiteralPath $Path)) {
         throw "$Description was not found: $Path"
+    }
+}
+
+function Assert-FileHash {
+    param([string]$Path, [string]$ExpectedHash)
+    Assert-PathExists $Path "Export file"
+    $actualHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $ExpectedHash.ToLowerInvariant()) {
+        throw "Export file hash does not match the completion manifest: $Path"
     }
 }
 
@@ -98,6 +108,22 @@ try {
     Assert-PathExists $MarginsFormat "Margins format definition"
 
     $manifest = Get-Content -LiteralPath $CompletionManifest -Raw | ConvertFrom-Json
+    if (-not $MergeSummary) {
+        $qualityDirectory = Join-Path $MarketDataDirectory "quality"
+        $latestMerge = Get-ChildItem -LiteralPath $qualityDirectory -Filter "merge_summary.json" -File -Recurse |
+            Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+        if (-not $latestMerge) { throw "No Kibot merge_summary.json was found under $qualityDirectory" }
+        $MergeSummary = $latestMerge.FullName
+    }
+    Assert-PathExists $MergeSummary "Kibot merge summary"
+    $merge = Get-Content -LiteralPath $MergeSummary -Raw | ConvertFrom-Json
+    if ($merge.status -ne "PASS") {
+        throw "Kibot merge summary is not PASS: $MergeSummary"
+    }
+    if (-not $manifest.files) { throw "Export manifest does not contain file hashes" }
+    foreach ($property in $manifest.files.PSObject.Properties) {
+        Assert-FileHash (Join-Path $ImportDirectory $property.Name) ([string]$property.Value)
+    }
     Write-ImportLog (
         "Using export generated {0}; timezone {1}; daily rows {2}; 5-minute rows {3}." -f
         $manifest.generated_at,

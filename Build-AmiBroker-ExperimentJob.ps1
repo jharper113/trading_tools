@@ -42,7 +42,7 @@ function Add-BatchStep($Document, $Root, [string]$Action, [string]$Param='') {
     $actionNode.InnerText = $Action
     [void]$step.AppendChild($actionNode)
     $paramNode = $Document.CreateElement('Param')
-    $paramNode.InnerText = $Param
+    $paramNode.InnerText = $Param.Replace('\', '\\')
     [void]$step.AppendChild($paramNode)
     [void]$Root.AppendChild($step)
 }
@@ -63,7 +63,8 @@ try {
     $sourcePath = Resolve-InputPath ([string]$job.source_afl) ([string]$matrixObject.strategy_root_windows)
     $projectTemplate = Resolve-InputPath ([string]$job.project_template) (Split-Path -Parent $matrixPath)
     $profilePath = Resolve-InputPath ([string]$job.analysis_profile) $PSScriptRoot
-    foreach ($path in @($sourcePath, $projectTemplate, $profilePath)) {
+    $workspacePath = Join-Path ([string]$job.database) 'broker.workspace'
+    foreach ($path in @($sourcePath, $projectTemplate, $profilePath, $workspacePath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required input does not exist: $path" }
     }
     if ((File-Hash $sourcePath) -ne ([string]$job.source_sha256).ToLowerInvariant()) {
@@ -105,6 +106,11 @@ AddColumn( Short, "Short", 1.0 );
     $profile = Read-Json $profilePath
     if ([int]$profile.periodicity.seconds -ne [int]$job.interval_seconds) {
         throw 'Analysis profile interval does not match matrix job'
+    }
+    $periodicityCodes = @{ '300' = 4; '900' = 3; '3600' = 2; '86400' = 0 }
+    $expectedCode = $periodicityCodes[[string]$job.interval_seconds]
+    if ($null -eq $expectedCode -or [int]$profile.periodicity.apx_code -ne $expectedCode) {
+        throw "Analysis profile periodicity code does not match $($job.interval_seconds)-second job"
     }
     $project = New-Object System.Xml.XmlDocument
     $project.XmlResolver = $null
@@ -173,7 +179,7 @@ AddColumn( Short, "Short", 1.0 );
         Add-BatchStep $batch $root 'ExecuteAndWait' $command
     }
     Add-ArchiveStep 'Begin'
-    Add-BatchStep $batch $root 'LoadDatabase' ([string]$job.database)
+    Add-BatchStep $batch $root 'LoadDatabase' $workspacePath
     Add-BatchStep $batch $root 'LoadProject' $projectFinal
     foreach ($symbolValue in @($job.symbols)) {
         $symbol = [string]$symbolValue

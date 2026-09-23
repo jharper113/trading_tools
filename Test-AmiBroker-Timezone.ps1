@@ -1,4 +1,4 @@
-# Windows PowerShell 5.1+. Verifies that Harp_intraday is already Eastern time.
+# Windows PowerShell 5.1+. Verifies that Harp_Intraday is already Eastern time.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][string]$Broker,
@@ -18,7 +18,13 @@ function Save-Json($Value, [string]$Path) {
 function Add-BatchStep($Document, $Root, [string]$Action, [string]$Param='') {
     $step = $Document.CreateElement('Step')
     foreach ($pair in @(@('Action', $Action), @('Param', $Param))) {
-        $node = $Document.CreateElement($pair[0]); $node.InnerText = $pair[1]; [void]$step.AppendChild($node)
+        $node = $Document.CreateElement($pair[0])
+        if ($pair[0] -eq 'Param') {
+            $node.InnerText = ([string]$pair[1]).Replace('\', '\\')
+        } else {
+            $node.InnerText = $pair[1]
+        }
+        [void]$step.AppendChild($node)
     }
     [void]$Root.AppendChild($step)
 }
@@ -29,7 +35,20 @@ function Set-XmlValues($Document, [string[]]$Names, [string]$Value) {
 }
 function Test-SessionPair($Rows) {
     $times = @($Rows | ForEach-Object { [int]$_.TimeNum })
-    return ($times -contains 93000) -and ($times -contains 155500)
+    $openBar = @($times | Where-Object { $_ -ge 93000 -and $_ -lt 93500 }).Count -gt 0
+    $closeBar = @($times | Where-Object { $_ -ge 155500 -and $_ -lt 160000 }).Count -gt 0
+    return $openBar -and $closeBar
+}
+function Invoke-AmiBrokerBatch([string]$BrokerPath, [string]$BatchPath) {
+    # Broker.exe is a Windows GUI process, so invoking it with '&' does not
+    # reliably populate $LASTEXITCODE or wait for the batch to finish.
+    $quotedBatchPath = '"' + $BatchPath + '"'
+    $brokerProcess = Start-Process -FilePath $BrokerPath `
+        -ArgumentList @('/runbatch', $quotedBatchPath, '/exit') `
+        -Wait -PassThru
+    if ($brokerProcess.ExitCode -ne 0) {
+        throw "AmiBroker timezone preflight exited $($brokerProcess.ExitCode)"
+    }
 }
 
 New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
@@ -46,7 +65,8 @@ try {
         Copy-Item -LiteralPath $CsvFixture -Destination $csvPath -Force
     } else {
         if (Test-Path -LiteralPath $csvPath) { Remove-Item -LiteralPath $csvPath -Force }
-        foreach ($required in @($Broker, $Database, $ProjectTemplate, (Join-Path $PSScriptRoot 'AmiBroker_Timezone_Preflight.afl'))) {
+        $workspacePath = Join-Path $Database 'broker.workspace'
+        foreach ($required in @($Broker, $workspacePath, $ProjectTemplate, (Join-Path $PSScriptRoot 'AmiBroker_Timezone_Preflight.afl'))) {
             if (-not (Test-Path -LiteralPath $required)) { throw "Required preflight input does not exist: $required" }
         }
         $formulaPath = Join-Path $PSScriptRoot 'AmiBroker_Timezone_Preflight.afl'
@@ -56,7 +76,7 @@ try {
         $project.Load($ProjectTemplate)
         Set-XmlValues $project @('FormulaPath') $formulaPath
         Set-XmlValues $project @('FormulaContent') $formula
-        Set-XmlValues $project @('Periodicity') '8'
+        Set-XmlValues $project @('Periodicity') '4'
         Set-XmlValues $project @('ChartInterval') '300'
         Set-XmlValues $project @('RangeType','BacktestRangeType') '3'
         Set-XmlValues $project @('FromDate','RangeFromDate','BacktestRangeFromDate') '2009-01-01'
@@ -66,20 +86,23 @@ try {
 
         $batch = New-Object System.Xml.XmlDocument
         $root = $batch.CreateElement('AmiBroker-Batch'); $root.SetAttribute('CompactMode', '0'); [void]$batch.AppendChild($root)
-        Add-BatchStep $batch $root 'LoadDatabase' $Database
+        Add-BatchStep $batch $root 'LoadDatabase' $workspacePath
         Add-BatchStep $batch $root 'LoadProject' $projectPath
         Add-BatchStep $batch $root 'SetCurrentSymbol' 'ES'
         Add-BatchStep $batch $root 'Explore' ''
         Add-BatchStep $batch $root 'Export' $csvPath
         $batchPath = Join-Path $WorkDir 'timezone_preflight.abb'
         $batch.Save($batchPath)
-        & $Broker '/runbatch' $batchPath '/exit'
-        if ($LASTEXITCODE -ne 0) { throw "AmiBroker timezone preflight exited $LASTEXITCODE" }
+        Invoke-AmiBrokerBatch $Broker $batchPath
     }
 
-    if (-not (Test-Path -LiteralPath $csvPath -PathType Leaf)) { throw 'Timezone preflight did not create a CSV' }
+    if (-not (Test-Path -LiteralPath $csvPath -PathType Leaf)) {
+        throw 'Timezone preflight did not create a CSV. Verify that Harp_Intraday contains ES data in the 2009-01-01 through 2019-01-01 research window.'
+    }
     $rows = @(Import-Csv -LiteralPath $csvPath)
-    if (-not $rows) { throw 'Timezone preflight CSV is empty' }
+    if (-not $rows) {
+        throw 'Timezone preflight exploration returned no ES rows. Check the project interval, symbol selection, and 2009-01-01 through 2019-01-01 range.'
+    }
     $requiredColumns = @('DateTime','TimeNum','TimeShiftSeconds','IntervalSeconds')
     foreach ($column in $requiredColumns) {
         if ($rows[0].PSObject.Properties.Name -notcontains $column) { throw "Timezone CSV is missing $column" }
@@ -98,14 +121,14 @@ try {
         if ($seen.ContainsKey($key)) { throw 'Timezone CSV contains duplicate rows' }
         $seen[$key] = $true
         if ($shiftValue -ne 0) { throw 'AmiBroker database time shift is not zero' }
-        if ($intervalValue -ne 300) { throw 'AmiBroker intraday database is not 5-minute' }
+        if ($intervalValue -ne 300) { throw "AmiBroker analysis interval is $intervalValue seconds; expected 300 (5-minute)" }
         $row | Add-Member -NotePropertyName ParsedDate -NotePropertyValue $parsed
     }
     $pairs = @($rows | Group-Object { $_.ParsedDate.ToString('yyyy-MM-dd') })
     $winter = @($pairs | Where-Object { ([datetime]$_.Name).Month -eq 1 -and (Test-SessionPair $_.Group) } | ForEach-Object Name | Sort-Object)
     $summer = @($pairs | Where-Object { ([datetime]$_.Name).Month -eq 7 -and (Test-SessionPair $_.Group) } | ForEach-Object Name | Sort-Object)
-    if (-not $winter) { throw 'Timezone export has no complete winter 09:30/15:55 session' }
-    if (-not $summer) { throw 'Timezone export has no complete summer 09:30/15:55 session' }
+    if (-not $winter) { throw 'Timezone export has no complete winter 09:30-09:34/15:55-15:59 session' }
+    if (-not $summer) { throw 'Timezone export has no complete summer 09:30-09:34/15:55-15:59 session' }
     $baseReport.status = 'PASS'; $baseReport.timeshift_seconds = 0; $baseReport.interval_seconds = 300
     $baseReport.winter_sessions = $winter; $baseReport.summer_sessions = $summer; $baseReport.rows = $rows.Count
     $baseReport.csv_sha256 = (Get-FileHash -LiteralPath $csvPath -Algorithm SHA256).Hash.ToLowerInvariant()

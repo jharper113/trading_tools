@@ -133,6 +133,12 @@ FUTURES_PRODUCTS = {
         "exchange": "CME",
         "category": "currency",
     },
+    "/RP": {
+        "name": "Continuous Euro FX/British Pound",
+        "exchange": "Kibot",
+        "category": "currency",
+        "schwab_enabled": False,
+    },
     "/6M": {
         "name": "Mexican Peso",
         "exchange": "CME",
@@ -369,7 +375,11 @@ LEGACY_PRODUCTS = {
     },
 }
 DEFAULT_SYMBOLS = [
-    *FUTURES_PRODUCTS.keys(),
+    *(
+        symbol
+        for symbol, product in FUTURES_PRODUCTS.items()
+        if product.get("schwab_enabled", True)
+    ),
     *EQUITY_PRODUCTS.keys(),
     *LEGACY_PRODUCTS.keys(),
 ]
@@ -720,64 +730,14 @@ def normalize_bar_frame(
 
 
 def append_market_data(existing, incoming, reviewed_bars=None):
-    reviewed_keys = reviewed_key_set(reviewed_bars)
+    # Import lazily to avoid a module cycle: Kibot normalization reuses the
+    # canonical schema defined in this module.
+    from kibot_market_data import merge_market_data_sources
 
-    if existing is None or len(existing) == 0:
-        combined = incoming.copy()
-    elif incoming is None or len(incoming) == 0:
-        combined = existing.copy()
-    else:
-        if reviewed_keys:
-            existing_keys = set(
-                zip(
-                    existing["symbol"].map(normalize_symbol),
-                    existing["frequency"].map(normalize_frequency),
-                    comparison_keys_for_bars(existing),
-                )
-            )
-            incoming = incoming.copy()
-            incoming_keys = list(
-                zip(
-                    incoming["symbol"].map(normalize_symbol),
-                    incoming["frequency"].map(normalize_frequency),
-                    comparison_keys_for_bars(incoming),
-                )
-            )
-            incoming = incoming[
-                [
-                    key not in reviewed_keys or key not in existing_keys
-                    for key in incoming_keys
-                ]
-            ].copy()
-
-        combined = pd.concat(
-            [existing, incoming],
-            ignore_index=True,
-        )
-
-    if len(combined) == 0:
-        return empty_bars_frame()
-
-    combined["timestamp"] = pd.to_datetime(
-        combined["timestamp"],
-        utc=True,
-        errors="coerce",
-    )
-    combined = combined[combined["timestamp"].notna()].copy()
-    combined = combined.sort_values(
-        ["symbol", "frequency", "timestamp", "retrieved_at"],
-        na_position="last",
-    )
-    combined = combined.drop_duplicates(
-        subset=["symbol", "frequency", "timestamp"],
-        keep="last",
-    )
-    combined["date"] = combined["timestamp"].dt.date.astype(str)
-    combined["timestamp"] = combined["timestamp"].dt.strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-
-    return combined[CANONICAL_COLUMNS].reset_index(drop=True)
+    return merge_market_data_sources(
+        [existing, incoming],
+        reviewed_bars=reviewed_bars,
+    ).rows
 
 
 def build_integrity_report(bars):
@@ -790,102 +750,64 @@ def build_integrity_report(bars):
         utc=True,
         errors="coerce",
     )
-    rows = []
+    prices = working[["open", "high", "low", "close"]].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    base = pd.DataFrame(
+        {
+            "symbol": working["symbol"].map(normalize_symbol),
+            "frequency": working["frequency"].map(normalize_frequency),
+            "timestamp": timestamps.dt.strftime("%Y-%m-%dT%H:%M:%SZ").fillna(""),
+            "date": working["date"].astype(str).str[:10],
+        },
+        index=working.index,
+    )
+    issue_frames = []
 
-    for index, row in working.iterrows():
-        symbol = normalize_symbol(row.get("symbol"))
-        frequency = normalize_frequency(row.get("frequency"))
-        timestamp = (
-            timestamps.loc[index].strftime("%Y-%m-%dT%H:%M:%SZ")
-            if not pd.isna(timestamps.loc[index])
-            else ""
+    def add_issues(mask, issue_type, field, value, expected, auto_fix):
+        if not mask.any():
+            return
+        issue = base.loc[mask].copy()
+        issue["issue_type"] = issue_type
+        issue["field"] = field
+        issue["value"] = value.loc[mask] if isinstance(value, pd.Series) else value
+        issue["expected"] = expected.loc[mask] if isinstance(expected, pd.Series) else expected
+        issue["severity"] = "error"
+        issue["auto_fix"] = auto_fix
+        issue_frames.append(issue)
+
+    for field in ["open", "high", "low", "close"]:
+        add_issues(
+            prices[field].isna(), "missing_ohlc", field, prices[field],
+            "numeric OHLC value", "drop_bar",
         )
-        date = str(row.get("date", ""))[:10]
-        prices = {
-            field: pd.to_numeric(row.get(field), errors="coerce")
-            for field in ["open", "high", "low", "close"]
-        }
+        add_issues(
+            prices[field].eq(0), "non_positive_price", field, prices[field],
+            "non-zero price", "drop_bar",
+        )
 
-        for field, value in prices.items():
-            if pd.isna(value):
-                rows.append(
-                    {
-                        "symbol": symbol,
-                        "frequency": frequency,
-                        "timestamp": timestamp,
-                        "date": date,
-                        "issue_type": "missing_ohlc",
-                        "field": field,
-                        "value": value,
-                        "expected": "numeric OHLC value",
-                        "severity": "error",
-                        "auto_fix": "drop_bar",
-                    }
-                )
-            elif value <= 0:
-                rows.append(
-                    {
-                        "symbol": symbol,
-                        "frequency": frequency,
-                        "timestamp": timestamp,
-                        "date": date,
-                        "issue_type": "non_positive_price",
-                        "field": field,
-                        "value": value,
-                        "expected": "> 0",
-                        "severity": "error",
-                        "auto_fix": "drop_bar",
-                    }
-                )
+    valid = prices.notna().all(axis=1) & prices.ne(0).all(axis=1)
+    is_daily = base["frequency"].eq("daily")
+    daily_fields = prices[["open", "high", "low"]]
+    intraday_fields = prices[["open", "high", "low", "close"]]
+    expected_high = intraday_fields.max(axis=1).where(
+        ~is_daily, daily_fields.max(axis=1)
+    )
+    expected_low = intraday_fields.min(axis=1).where(
+        ~is_daily, daily_fields.min(axis=1)
+    )
+    add_issues(
+        valid & prices["high"].lt(expected_high), "high_below_ohlc", "high",
+        prices["high"], expected_high, "set_high_to_max_ohlc",
+    )
+    add_issues(
+        valid & prices["low"].gt(expected_low), "low_above_ohlc", "low",
+        prices["low"], expected_low, "set_low_to_min_ohlc",
+    )
 
-        clean_prices = [
-            value
-            for value in prices.values()
-            if pd.notna(value) and value > 0
-        ]
-
-        if len(clean_prices) != 4:
-            continue
-
-        expected_high = max(clean_prices)
-        expected_low = min(clean_prices)
-
-        if prices["high"] < expected_high:
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "frequency": frequency,
-                    "timestamp": timestamp,
-                    "date": date,
-                    "issue_type": "high_below_ohlc",
-                    "field": "high",
-                    "value": prices["high"],
-                    "expected": expected_high,
-                    "severity": "error",
-                    "auto_fix": "set_high_to_max_ohlc",
-                }
-            )
-
-        if prices["low"] > expected_low:
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "frequency": frequency,
-                    "timestamp": timestamp,
-                    "date": date,
-                    "issue_type": "low_above_ohlc",
-                    "field": "low",
-                    "value": prices["low"],
-                    "expected": expected_low,
-                    "severity": "error",
-                    "auto_fix": "set_low_to_min_ohlc",
-                }
-            )
-
-    if not rows:
+    if not issue_frames:
         return pd.DataFrame(columns=INTEGRITY_COLUMNS)
-
-    return pd.DataFrame(rows).reindex(columns=INTEGRITY_COLUMNS)
+    return pd.concat(issue_frames, ignore_index=True).reindex(columns=INTEGRITY_COLUMNS)
 
 
 def auto_fix_integrity_issues(bars):
@@ -899,12 +821,15 @@ def auto_fix_integrity_issues(bars):
         fixed[column] = pd.to_numeric(fixed[column], errors="coerce")
 
     invalid_mask = fixed[["open", "high", "low", "close"]].isna().any(axis=1)
-    invalid_mask = invalid_mask | (fixed[["open", "high", "low", "close"]] <= 0).any(axis=1)
+    invalid_mask = invalid_mask | (fixed[["open", "high", "low", "close"]] == 0).any(axis=1)
     fixed = fixed[~invalid_mask].copy()
 
     if len(fixed) > 0:
-        fixed["high"] = fixed[["open", "high", "low", "close"]].max(axis=1)
-        fixed["low"] = fixed[["open", "high", "low", "close"]].min(axis=1)
+        daily = fixed["frequency"].astype(str).str.lower().eq("daily")
+        fixed.loc[daily, "high"] = fixed.loc[daily, ["open", "high", "low"]].max(axis=1)
+        fixed.loc[daily, "low"] = fixed.loc[daily, ["open", "high", "low"]].min(axis=1)
+        fixed.loc[~daily, "high"] = fixed.loc[~daily, ["open", "high", "low", "close"]].max(axis=1)
+        fixed.loc[~daily, "low"] = fixed.loc[~daily, ["open", "high", "low", "close"]].min(axis=1)
 
     return fixed[CANONICAL_COLUMNS].reset_index(drop=True), before_report
 
@@ -1142,6 +1067,24 @@ def save_market_data(output_dir, symbol, frequency, bars):
         if output_path.exists()
         else empty_bars_frame()
     )
+    # Preserve the historical repair behavior for lower-priority local and
+    # CSV sources. Preferred vendor rows remain unmodified so an invalid
+    # Schwab row can fall back to Kibot instead of being manufactured into a
+    # valid-looking replacement.
+    repaired_inputs = []
+    for frame in (existing, bars):
+        if frame is None or len(frame) == 0:
+            repaired_inputs.append(frame)
+            continue
+        frame = frame.copy()
+        preferred = frame["source"].astype(str).str.lower().isin(
+            {"schwab", "kibot"}
+        )
+        lower_priority, _ = auto_fix_integrity_issues(frame[~preferred])
+        repaired_inputs.append(
+            pd.concat([frame[preferred], lower_priority], ignore_index=True)
+        )
+    existing, bars = repaired_inputs
     reviewed_bars = load_reviewed_bars(output_dir)
     combined = append_market_data(existing, bars, reviewed_bars=reviewed_bars)
     combined, _ = auto_fix_integrity_issues(combined)
@@ -1204,7 +1147,7 @@ def write_quality_reports(
     min_intraday_bars=50,
 ):
     output_dir = Path(output_dir)
-    frequencies = frequencies or ["daily", "5min", "60min"]
+    frequencies = frequencies or ["daily", "5min"]
     quality_dir = output_dir / QUALITY_DIR
     quality_dir.mkdir(parents=True, exist_ok=True)
     integrity_reports = []
@@ -1956,7 +1899,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Download or ingest market data and store normalized "
-            "daily, 5-minute, and 60-minute bars locally."
+            "daily and 5-minute bars locally (with optional 60-minute output)."
         )
     )
     parser.add_argument(
@@ -1971,7 +1914,7 @@ def parse_args():
     parser.add_argument(
         "--frequencies",
         nargs="+",
-        default=["daily", "5min", "60min"],
+        default=["daily", "5min"],
         help="One or more frequencies: daily, 5min, 60min",
     )
     parser.add_argument(

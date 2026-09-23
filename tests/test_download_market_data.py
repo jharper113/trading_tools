@@ -112,6 +112,21 @@ def test_normalize_frequency_aliases():
     assert normalize_frequency("1h") == "60min"
 
 
+def test_default_frequencies_are_daily_and_5min(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["download_market_data.py", "--quality-only"])
+
+    assert parse_args().frequencies == ["daily", "5min"]
+
+
+def test_explicit_60min_remains_supported(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["download_market_data.py", "--quality-only", "--frequencies", "60min"],
+    )
+
+    assert parse_args().frequencies == ["60min"]
+
+
 def test_elapsed_text_formats_seconds_minutes_and_hours():
     assert elapsed_text(9) == "9s"
     assert elapsed_text(61) == "1m 1s"
@@ -538,12 +553,25 @@ def test_default_symbols_cover_liquid_futures_categories():
     assert "/MSL" in DEFAULT_SYMBOLS
     assert "/XRP" in DEFAULT_SYMBOLS
     assert "/MXP" in DEFAULT_SYMBOLS
+
+
+def test_rp_is_known_but_not_a_default_schwab_download():
+    assert FUTURES_PRODUCTS["/RP"]["category"] == "currency"
+    assert FUTURES_PRODUCTS["/RP"]["schwab_enabled"] is False
+    assert "/RP" not in DEFAULT_SYMBOLS
     assert "/MCA" in DEFAULT_SYMBOLS
     assert "SPY" in DEFAULT_SYMBOLS
 
 
 def test_default_symbols_include_all_configured_products():
-    assert set(FUTURES_PRODUCTS).issubset(DEFAULT_SYMBOLS)
+    enabled_futures = {
+        symbol
+        for symbol, product in FUTURES_PRODUCTS.items()
+        if product.get("schwab_enabled", True)
+    }
+    disabled_futures = set(FUTURES_PRODUCTS) - enabled_futures
+    assert enabled_futures.issubset(DEFAULT_SYMBOLS)
+    assert disabled_futures.isdisjoint(DEFAULT_SYMBOLS)
     assert set(EQUITY_PRODUCTS).issubset(DEFAULT_SYMBOLS)
     assert set(LEGACY_PRODUCTS).issubset(DEFAULT_SYMBOLS)
 
@@ -684,6 +712,36 @@ def test_append_market_data_preserves_reviewed_existing_bar():
     assert combined.loc[0, "source"] == "reviewed"
 
 
+def test_append_market_data_uses_source_precedence_over_retrieval_time():
+    existing = normalize_bar_frame(
+        pd.DataFrame([{
+            "timestamp": "2026-01-01T00:00:00Z",
+            "open": 100, "high": 105, "low": 99, "close": 104,
+            "volume": 10,
+        }]),
+        symbol="/ES",
+        frequency="daily",
+        source="schwab",
+        retrieved_at="2026-01-01T00:00:00Z",
+    )
+    incoming = normalize_bar_frame(
+        pd.DataFrame([{
+            "timestamp": "2026-01-01T00:00:00Z",
+            "open": 101, "high": 106, "low": 100, "close": 105,
+            "volume": 20,
+        }]),
+        symbol="/ES",
+        frequency="daily",
+        source="kibot",
+        retrieved_at="2026-09-22T00:00:00Z",
+    )
+
+    combined = append_market_data(existing, incoming)
+
+    assert combined.loc[0, "source"] == "schwab"
+    assert combined.loc[0, "volume"] == 10
+
+
 def test_build_integrity_report_flags_invalid_ohlc():
     bars = normalize_bar_frame(
         pd.DataFrame(
@@ -706,6 +764,32 @@ def test_build_integrity_report_flags_invalid_ohlc():
     report = build_integrity_report(bars)
 
     assert set(report["issue_type"]) == {"high_below_ohlc", "low_above_ohlc"}
+
+
+def test_integrity_allows_negative_crude_and_daily_settlement_outside_range():
+    bars = normalize_bar_frame(
+        pd.DataFrame([
+            {
+                "timestamp": "2020-04-20T00:00:00Z",
+                "open": -10,
+                "high": -8,
+                "low": -12,
+                "close": -37.63,
+            }
+        ]),
+        symbol="/CL",
+        frequency="daily",
+        source="kibot",
+        retrieved_at="2026-09-22T00:00:00Z",
+    )
+
+    fixed, report = auto_fix_integrity_issues(bars)
+
+    assert report.empty
+    assert len(fixed) == 1
+    assert fixed.loc[0, "close"] == -37.63
+    assert fixed.loc[0, "high"] == -8
+    assert fixed.loc[0, "low"] == -12
 
 
 def test_auto_fix_integrity_issues_repairs_high_low_and_drops_bad_prices():

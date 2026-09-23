@@ -29,13 +29,13 @@ Analyze performance by strategy:
 python analyze_strategy_performance.py
 ```
 
-Ingest futures market data into local daily, 5-minute, and 60-minute files:
+Ingest futures market data into the canonical daily and 5-minute files:
 
 ```bash
 python download_market_data.py \
   --provider csv \
   --input-dir data/vendor_market_data \
-  --frequencies daily 5min 60min
+  --frequencies daily 5min
 ```
 
 Schwab API access can be tested interactively with:
@@ -43,7 +43,7 @@ Schwab API access can be tested interactively with:
 ```bash
 python download_market_data.py \
   --provider schwab \
-  --frequencies daily 5min 60min
+  --frequencies daily 5min
 ```
 
 To create or replace the saved Schwab tokens without downloading data, run:
@@ -65,7 +65,7 @@ To request as much Schwab history as the script can ask for, add `--all`:
 python download_market_data.py \
   --provider schwab \
   --all \
-  --frequencies daily 5min 60min
+  --frequencies daily 5min
 ```
 
 The script prompts for `client_id`, hides `client_secret`, prints the Schwab
@@ -92,7 +92,7 @@ error. Desktop notifications are best effort and require the user to be logged
 in to the graphical desktop session.
 
 ```cron
-15 17 * * * cd /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools && . /home/jon/.schwab_env && /home/jon/anaconda3/bin/python download_market_data.py --provider schwab --frequencies daily 5min 60min --continue-on-error --notify >> /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/logs/market_data.log 2>&1
+15 17 * * * cd /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools && . /home/jon/.schwab_env && /home/jon/anaconda3/bin/python download_market_data.py --provider schwab --frequencies daily 5min --continue-on-error --export-amibroker --notify >> /home/jon/Dropbox/HarpFolders/04_Code/Python/trading_tools/logs/market_data.log 2>&1
 ```
 
 Each download/ingest run also writes local quality reports under
@@ -106,7 +106,7 @@ integrity problems, compares daily bars against daily OHLC aggregated from
 python download_market_data.py \
   --provider csv \
   --input-dir data/vendor_market_data \
-  --frequencies daily 5min 60min \
+  --frequencies daily 5min \
   --apply-daily-intraday-fixes
 ```
 
@@ -115,7 +115,7 @@ Validate locally stored futures bars against Yahoo Finance continuous futures da
 ```bash
 python validate_market_data.py \
   --source-dir data/market_data \
-  --frequencies daily 5min 60min \
+  --frequencies daily 5min \
   --threshold-pct 0.25 \
   --serve-dashboard
 ```
@@ -128,10 +128,11 @@ button updates `data/market_data/` and records reviewed bars in
 from being overwritten during later market-data refreshes. The dashboard can
 also download either a decisions CSV or a selected-bars CSV.
 
-The validated and repaired bar files stay in
+The active validated repository keeps daily and five-minute files in
 `data/market_data/<frequency>/<symbol>.csv`, such as
-`data/market_data/daily/ES.csv`, `data/market_data/5min/ES.csv`, and
-`data/market_data/60min/ES.csv`. Run `export_amibroker_market_data.py` or pass
+`data/market_data/daily/ES.csv` and `data/market_data/5min/ES.csv`. Older
+60-minute files are archived outside the active repository. Run
+`export_amibroker_market_data.py` or pass
 `--export-amibroker` to the downloader to create combined daily and 5-minute
 files plus instrument-property imports for the Windows importer in
 `amibroker_import/`. The maintained point values, tick sizes, and optional
@@ -159,3 +160,24 @@ The default list is defined in `download_market_data.py`; each run also writes
 the symbols requested for that run to `data/market_data/symbols.csv`.
 
 Generated files are written to `output/`. Raw brokerage exports in `data/` and generated outputs are intentionally ignored by Git.
+
+## Rebuild AmiBroker after the Kibot merge
+
+On the Windows VM, close AmiBroker and run these commands in order:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Archive-AmiBroker-Databases.ps1"
+
+# Create Harp_Daily and Harp_Intraday using the settings printed by the script.
+
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Import-MarketData.ps1"
+
+powershell.exe -ExecutionPolicy Bypass -File `
+  "Z:\04_Code\Python\trading_tools\amibroker_import\Verify-AmiBroker-Databases.ps1"
+```
+
+Do not run an optimization or WFA batch until the verification JSON says
+`PASS`. If verification reports truncation, recreate `Harp_Intraday` with a
+higher bar capacity, reimport, and verify again.
