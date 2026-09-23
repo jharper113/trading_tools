@@ -13,21 +13,51 @@ $ErrorActionPreference = "Stop"
 if (-not $ExportManifest) { $ExportManifest = Join-Path $MarketDataDirectory "amibroker\export_complete.json" }
 if (-not $OutputPath) { $OutputPath = Join-Path $MarketDataDirectory "amibroker\amibroker_database_verification.json" }
 
+function Get-ObjectProperty([object]$Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    if ([System.Runtime.InteropServices.Marshal]::IsComObject($Object)) {
+        $value = $Object.GetType().InvokeMember(
+            $Name,
+            [System.Reflection.BindingFlags]::GetProperty,
+            $null,
+            $Object,
+            [object[]]@()
+        )
+        return ,$value
+    }
+    return ,($Object.$Name)
+}
+
+function Get-ObjectItem([object]$Object, [object]$Index) {
+    if ($null -eq $Object) { return $null }
+    if ([System.Runtime.InteropServices.Marshal]::IsComObject($Object)) {
+        $value = $Object.GetType().InvokeMember(
+            "Item",
+            [System.Reflection.BindingFlags]::GetProperty,
+            $null,
+            $Object,
+            [object[]]@($Index)
+        )
+        return ,$value
+    }
+    return ,($Object.Item($Index))
+}
+
 function Quote-Date([object]$Quote) {
     if ($null -eq $Quote) { throw "quotation is null" }
-    $value = if ($Quote.PSObject.Properties.Name -contains "DateTime") { $Quote.DateTime } else { $Quote.Date }
+    $value = Get-ObjectProperty $Quote "Date"
     if ($null -eq $value) { throw "quotation has no date" }
     return [datetime]$value
 }
 
 function Read-LiveDatabase([object]$Ab, [string]$Path, [object]$Expected, [bool]$CheckSeasons) {
     if (-not $Ab.LoadDatabase($Path)) { throw "AmiBroker could not load database: $Path" }
-    $stocks = $Ab.Stocks
+    $stocks = Get-ObjectProperty $Ab "Stocks"
     if ($null -eq $stocks) {
-        throw "AmiBroker Stocks collection is unavailable after loading $Path (active database: $($Ab.DatabasePath))"
+        throw "AmiBroker Stocks collection is unavailable after loading $Path (active database: $(Get-ObjectProperty $Ab "DatabasePath"))"
     }
-    if ([int]$stocks.Count -eq 0) {
-        throw "AmiBroker Stocks collection is empty after loading $Path (active database: $($Ab.DatabasePath))"
+    if ([int](Get-ObjectProperty $stocks "Count") -eq 0) {
+        throw "AmiBroker Stocks collection is empty after loading $Path (active database: $(Get-ObjectProperty $Ab "DatabasePath"))"
     }
     $symbols = @()
     $diagnostics = @()
@@ -40,28 +70,28 @@ function Read-LiveDatabase([object]$Ab, [string]$Path, [object]$Expected, [bool]
         $last = $null
         try {
             $stage = "stock lookup"
-            $stock = $stocks.Item($ticker)
+            $stock = Get-ObjectItem $stocks $ticker
             if ($null -eq $stock) { throw "stock lookup returned null" }
             $stage = "quotation collection"
-            $quotations = $stock.Quotations
+            $quotations = Get-ObjectProperty $stock "Quotations"
             if ($null -eq $quotations) { throw "quotation collection is null" }
             $stage = "quotation count"
-            $count = [int]$quotations.Count
+            $count = [int](Get-ObjectProperty $quotations "Count")
             if ($count -gt 0) {
                 $stage = "first quotation"
-                $firstQuote = $quotations.Item(0)
+                $firstQuote = Get-ObjectItem $quotations 0
                 if ($null -eq $firstQuote) { throw "quotation 0 is null" }
                 $first = (Quote-Date $firstQuote).ToString("yyyy-MM-dd HH:mm:ss")
                 $lastIndex = $count - 1
                 $stage = "last quotation"
-                $lastQuote = $quotations.Item($lastIndex)
+                $lastQuote = Get-ObjectItem $quotations $lastIndex
                 if ($null -eq $lastQuote) { throw "quotation $lastIndex is null" }
                 $last = (Quote-Date $lastQuote).ToString("yyyy-MM-dd HH:mm:ss")
             }
             if ($CheckSeasons -and $ticker -eq "ES") {
                 $stage = "ES season quotations"
                 for ($index = 0; $index -lt $count; $index++) {
-                    $quote = $quotations.Item($index)
+                    $quote = Get-ObjectItem $quotations $index
                     if ($null -eq $quote) { throw "quotation $index is null" }
                     $date = Quote-Date $quote
                     if ($date -ge [datetime]"2009-01-01" -and $date -lt [datetime]"2019-01-01") {

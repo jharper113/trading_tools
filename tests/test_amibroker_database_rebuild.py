@@ -104,7 +104,7 @@ def test_verifier_reports_null_live_quote_with_ticker_and_database(tmp_path):
     harness.write_text(r'''
 $script = Get-Content -LiteralPath $args[0] -Raw
 $functions = ($script -split '(?m)^\$manifest =', 2)[0]
-$functions = $functions.Substring($functions.IndexOf('function Quote-Date'))
+$functions = $functions.Substring($functions.IndexOf('function Get-ObjectProperty'))
 Invoke-Expression $functions
 $quotes = [pscustomobject]@{ Count = 1 }
 $quotes | Add-Member -MemberType ScriptMethod -Name Item -Value { param($index) $null }
@@ -177,7 +177,7 @@ def test_verifier_identifies_unavailable_stocks_collection(tmp_path):
     harness.write_text(r'''
 $script = Get-Content -LiteralPath $args[0] -Raw
 $functions = ($script -split '(?m)^\$manifest =', 2)[0]
-$functions = $functions.Substring($functions.IndexOf('function Quote-Date'))
+$functions = $functions.Substring($functions.IndexOf('function Get-ObjectProperty'))
 Invoke-Expression $functions
 $broker = [pscustomobject]@{ Stocks = $null; DatabasePath = 'fixture-daily' }
 $broker | Add-Member -MemberType ScriptMethod -Name LoadDatabase -Value { param($path) $true }
@@ -197,3 +197,26 @@ try {
     assert "Stocks collection is unavailable" in result.stdout
     assert "fixture-daily" in result.stdout
     assert "unexpected PASS" not in result.stdout
+
+
+@pytest.mark.skipif(_powershell() is None, reason="PowerShell is unavailable")
+def test_verifier_dispatches_com_properties_and_indexed_items(tmp_path):
+    harness = tmp_path / "com_properties.ps1"
+    harness.write_text(r'''
+$script = Get-Content -LiteralPath $args[0] -Raw
+$functions = ($script -split '(?m)^\$manifest =', 2)[0]
+$functions = $functions.Substring($functions.IndexOf('function Get-ObjectProperty'))
+Invoke-Expression $functions
+$dictionary = New-Object -ComObject Scripting.Dictionary
+$dictionary.Add('ES', 7400)
+@{
+    count = Get-ObjectProperty $dictionary 'Count'
+    es = Get-ObjectItem $dictionary 'ES'
+} | ConvertTo-Json
+''')
+    result = subprocess.run(
+        [_powershell(), "-NoProfile", "-File", str(harness), str(VERIFY.resolve())],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"count": 1, "es": 7400}
