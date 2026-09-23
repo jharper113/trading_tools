@@ -115,3 +115,33 @@ def test_powershell_fixture_mode_matches_valid_result(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     report = json.loads((work / "timezone_preflight.json").read_text(encoding="utf-8-sig"))
     assert report["status"] == "PASS"
+
+
+def test_preflight_batch_loads_workspace_file(tmp_path):
+    if not PWSH:
+        pytest.skip("Set AMIBROKER_TEST_PWSH to exercise the PowerShell preflight")
+    database = tmp_path / "database"
+    database.mkdir()
+    (database / "broker.workspace").write_bytes(b"test workspace")
+    broker = tmp_path / "Broker.exe"
+    broker.write_bytes(b"stub")
+    project = tmp_path / "template.apx"
+    project.write_text("<AmiBroker-Analysis><FormulaPath>old.afl</FormulaPath><FormulaContent>old</FormulaContent></AmiBroker-Analysis>")
+    work = tmp_path / "work"
+    harness = tmp_path / "generate.ps1"
+    harness.write_text(r'''
+function Start-Process {
+    param([string]$FilePath, [string[]]$ArgumentList, [switch]$Wait, [switch]$PassThru)
+    [pscustomobject]@{ ExitCode = 1 }
+}
+& $args[0] -Broker $args[1] -Database $args[2] -ProjectTemplate $args[3] -WorkDir $args[4]
+''')
+    result = subprocess.run(
+        [PWSH, "-NoProfile", "-File", str(harness), str(SCRIPT), str(broker), str(database), str(project), str(work)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0  # The stub stops execution after batch generation.
+    import xml.etree.ElementTree as ET
+    batch = ET.parse(work / "timezone_preflight.abb").getroot()
+    load_database = next(node for node in batch if node.findtext("Action") == "LoadDatabase")
+    assert load_database.findtext("Param") == str(database / "broker.workspace")

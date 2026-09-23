@@ -67,6 +67,9 @@ def _matrix(tmp_path: Path, adapter="entry_cutoff_110000", seconds=900, source_t
     source_dir.mkdir(exist_ok=True)
     source = source_dir / SOURCE_0063.name
     source.write_text(source_text if source_text is not None else SOURCE_0063.read_text(), encoding="utf-8")
+    database = tmp_path / "database"
+    database.mkdir(exist_ok=True)
+    (database / "broker.workspace").write_bytes(b"test workspace")
     project = tmp_path / "template.apx"
     profile = tmp_path / "profile.json"
     _project(project)
@@ -167,6 +170,8 @@ def test_builder_sets_interval_dates_and_embeds_generated_formula(tmp_path, ps_b
     actions = [node.findtext("Action") for node in batch]
     assert actions.count("Optimize") == 2
     assert actions.count("Explore") == 2
+    load_database = next(node for node in batch if node.findtext("Action") == "LoadDatabase")
+    assert load_database.findtext("Param") == str(tmp_path / "database" / "broker.workspace")
 
 
 @pytest.mark.parametrize("mutation", ["stale_hash", "missing_anchor", "duplicate_anchor"])

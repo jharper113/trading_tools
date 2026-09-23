@@ -57,7 +57,8 @@ try {
         Copy-Item -LiteralPath $CsvFixture -Destination $csvPath -Force
     } else {
         if (Test-Path -LiteralPath $csvPath) { Remove-Item -LiteralPath $csvPath -Force }
-        foreach ($required in @($Broker, $Database, $ProjectTemplate, (Join-Path $PSScriptRoot 'AmiBroker_Timezone_Preflight.afl'))) {
+        $workspacePath = Join-Path $Database 'broker.workspace'
+        foreach ($required in @($Broker, $workspacePath, $ProjectTemplate, (Join-Path $PSScriptRoot 'AmiBroker_Timezone_Preflight.afl'))) {
             if (-not (Test-Path -LiteralPath $required)) { throw "Required preflight input does not exist: $required" }
         }
         $formulaPath = Join-Path $PSScriptRoot 'AmiBroker_Timezone_Preflight.afl'
@@ -77,7 +78,7 @@ try {
 
         $batch = New-Object System.Xml.XmlDocument
         $root = $batch.CreateElement('AmiBroker-Batch'); $root.SetAttribute('CompactMode', '0'); [void]$batch.AppendChild($root)
-        Add-BatchStep $batch $root 'LoadDatabase' $Database
+        Add-BatchStep $batch $root 'LoadDatabase' $workspacePath
         Add-BatchStep $batch $root 'LoadProject' $projectPath
         Add-BatchStep $batch $root 'SetCurrentSymbol' 'ES'
         Add-BatchStep $batch $root 'Explore' ''

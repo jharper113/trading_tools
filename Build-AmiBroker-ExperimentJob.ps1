@@ -63,7 +63,8 @@ try {
     $sourcePath = Resolve-InputPath ([string]$job.source_afl) ([string]$matrixObject.strategy_root_windows)
     $projectTemplate = Resolve-InputPath ([string]$job.project_template) (Split-Path -Parent $matrixPath)
     $profilePath = Resolve-InputPath ([string]$job.analysis_profile) $PSScriptRoot
-    foreach ($path in @($sourcePath, $projectTemplate, $profilePath)) {
+    $workspacePath = Join-Path ([string]$job.database) 'broker.workspace'
+    foreach ($path in @($sourcePath, $projectTemplate, $profilePath, $workspacePath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required input does not exist: $path" }
     }
     if ((File-Hash $sourcePath) -ne ([string]$job.source_sha256).ToLowerInvariant()) {
@@ -173,7 +174,7 @@ AddColumn( Short, "Short", 1.0 );
         Add-BatchStep $batch $root 'ExecuteAndWait' $command
     }
     Add-ArchiveStep 'Begin'
-    Add-BatchStep $batch $root 'LoadDatabase' ([string]$job.database)
+    Add-BatchStep $batch $root 'LoadDatabase' $workspacePath
     Add-BatchStep $batch $root 'LoadProject' $projectFinal
     foreach ($symbolValue in @($job.symbols)) {
         $symbol = [string]$symbolValue
