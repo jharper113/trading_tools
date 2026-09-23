@@ -8,7 +8,7 @@ import pytest
 from amibroker_experiment_workbook import write_workbook
 from amibroker_experiment_results import evaluate_sectors, summarize_job
 from analyze_amibroker_experiment import _comparisons
-from audit_amibroker_experiment import _same, run_audit, sha256
+from audit_amibroker_experiment import _same, _validate_entries, run_audit, sha256
 
 
 def _hash(path):
@@ -264,3 +264,17 @@ def test_reference_metric_difference_blocks_unlock(audit_fixture):
     report = json.loads(result.json_path.read_text())
     assert report["status"] == "FAIL"
     assert any("manual reference metric differs" in reason for reason in report["failures"])
+
+
+def test_fixed_time_audit_allows_symbol_with_no_entry_signals(tmp_path):
+    audit = tmp_path / "ES.csv"
+    pd.DataFrame(columns=["TimeNum", "Buy", "Short"]).to_csv(audit, index=False)
+    job = {
+        "job_id": "fixed", "run_path": tmp_path, "symbols": ["ES"],
+        "schedule": "fixed_110000",
+        "run_manifest": {"audit_exports": [{"symbol": "ES", "file": "ES.csv"}]},
+    }
+    failures, checks = [], []
+    _validate_entries(job, failures, checks)
+    assert failures == []
+    assert checks[0]["value"] == {"ES": {}}

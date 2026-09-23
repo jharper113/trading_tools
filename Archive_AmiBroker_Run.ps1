@@ -83,9 +83,10 @@ try {
         $periodicity = Project-Value $project 'Periodicity'
         $interval = Project-Value $project 'ChartInterval'
         if ($periodicity -eq '0') { $timeframe = 'Daily' }
-        elseif ($periodicity -eq '8' -and $interval -match '^\d+$' -and [int]$interval -gt 0) {
-            if ([int]$interval % 60 -eq 0) { $timeframe = "Intraday_$([int]$interval / 60)m" }
-            else { $timeframe = "Intraday_${interval}s" }
+        elseif (($periodicity -eq '4' -and $interval -eq '300') -or
+                ($periodicity -eq '3' -and $interval -eq '900') -or
+                ($periodicity -eq '2' -and $interval -eq '3600')) {
+            $timeframe = "Intraday_$([int]$interval / 60)m"
         }
         elseif ($periodicity -match '^\d+$') { $timeframe = "Periodicity_$periodicity" }
         else { throw 'Missing/invalid APX Periodicity' }

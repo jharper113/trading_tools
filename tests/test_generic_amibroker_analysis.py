@@ -112,7 +112,7 @@ def test_wfa_analyzer_uses_only_oos_rows_for_admission_metrics(tmp_path):
 
 def test_generic_runner_names_output_from_project_and_routes_wfa(tmp_path):
     project = tmp_path / "project.apx"
-    write_project(project, r"Z:\Strategies\ES_ORB.afl", 8, 900, wfa=True)
+    write_project(project, r"Z:\Strategies\ES_ORB.afl", 3, 900, wfa=True)
     results = tmp_path / "results"
     results.mkdir()
     pd.DataFrame([

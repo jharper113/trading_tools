@@ -140,13 +140,22 @@ def test_profile_path_supports_all_experiment_intervals(timeframe, seconds, prof
     assert runner._profile_path(context).name == profile
 
 
-@pytest.mark.parametrize("seconds,timeframe", [(300, "Intraday_5m"), (900, "Intraday_15m"), (3600, "Intraday_60m")])
-def test_project_context_names_supported_intraday_intervals(tmp_path, seconds, timeframe):
+@pytest.mark.parametrize("code,seconds,timeframe", [(4, 300, "Intraday_5m"), (3, 900, "Intraday_15m"), (2, 3600, "Intraday_60m")])
+def test_project_context_names_supported_intraday_intervals(tmp_path, code, seconds, timeframe):
     project = tmp_path / "project.apx"
     project.write_text(
-        f"<AnalysisDoc><FormulaPath>Z:\\Strategies\\Demo.afl</FormulaPath><Periodicity>8</Periodicity><ChartInterval>{seconds}</ChartInterval></AnalysisDoc>"
+        f"<AnalysisDoc><FormulaPath>Z:\\Strategies\\Demo.afl</FormulaPath><Periodicity>{code}</Periodicity><ChartInterval>{seconds}</ChartInterval></AnalysisDoc>"
     )
     assert read_project_context(project).timeframe == timeframe
+
+
+def test_project_context_rejects_mismatched_intraday_code(tmp_path):
+    project = tmp_path / "project.apx"
+    project.write_text(
+        "<AnalysisDoc><FormulaPath>Demo.afl</FormulaPath>"
+        "<Periodicity>8</Periodicity><ChartInterval>900</ChartInterval></AnalysisDoc>"
+    )
+    assert read_project_context(project).timeframe == "Interval_900s"
 
 
 def test_cli_is_rerunnable_and_never_promotes_corrupt_job(cli_experiment_fixture, tmp_path):
