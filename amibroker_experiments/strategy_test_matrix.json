@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "matrix_id": "amibroker-research-v1",
-  "catalog_sha256": "67c7e89de74f469f0731f82e79ec009cf525968074eaffd78d38c9f105e1e9df",
+  "catalog_sha256": "780cb0ee248d2a49216e14fd6a6066b43732290eed1c2f2461b6981962c2f79d",
   "research_window": {
     "start": "2009-01-01",
     "end": "2019-01-01"
@@ -92,7 +92,7 @@
       "job_id": "pilot-0084-15m-fixed",
       "strategy_id": "0084_ES_INTRADAY_PCTB",
       "source_afl": "0084_ES_INTRADAY_PCTB.afl",
-      "source_sha256": "d93f3e95c8488debc8c38410979f48f9def2968f00d8faf1fa50d38abe0214e3",
+      "source_sha256": "e01ea2299ac0ef14140b7eb5119f569878208e256e431ffe0aad763f1931d1cf",
       "periodicity": "15m",
       "interval_seconds": 900,
       "database": "Z:\\04_Code\\Amibroker\\Databases\\Harp_intraday",

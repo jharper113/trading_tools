@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,24 @@ MATRIX = ROOT / "amibroker_experiments/strategy_test_matrix.json"
 STRATEGIES = Path(
     "/home/jon/Dropbox/HarpFolders/04_Code/Amibroker/Strategies/2026 Strategy Testing"
 )
+
+
+def test_active_strategies_use_custom_include_directory():
+    include_dir = STRATEGIES.parent / "Include"
+    directive = re.compile(
+        r'^\s*#\s*include(?:_once)?\s*(?P<open>[<"\'])(?P<name>[^>"\']+)[>"\']',
+        re.IGNORECASE | re.MULTILINE,
+    )
+    violations = []
+    missing = []
+    for source in sorted(STRATEGIES.glob("*.afl")):
+        for match in directive.finditer(source.read_text(encoding="utf-8-sig")):
+            if match.group("open") != "<":
+                violations.append(f"{source.name}: {match.group(0).strip()}")
+            if not (include_dir / match.group("name")).is_file():
+                missing.append(f"{source.name}: {match.group('name')}")
+    assert not violations, "Quoted strategy includes: " + ", ".join(violations)
+    assert not missing, "Missing shared includes: " + ", ".join(missing)
 
 
 def test_pilot_matrix_has_exact_approved_jobs():
